@@ -1,0 +1,73 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Secrets & personal config
+data/config.json
+data/character.yaml
+
+# Runtime state (regenerated automatically)
+data/memory/*.json
+data/memory/.migrated
+data/memory/*.bak
+data/memory/*.flag
+data/emotion-state.json
+data/emotion-journal.json
+data/health-state.json
+data/daily-schedule.json
+data/curiosity.json
+data/social.json
+data/proactive.json
+data/diary.json
+data/hobby-progress.json
+data/goals.json
+data/opinions.json
+data/narrative-arcs.json
+data/friend-state.json
+data/moments-state.json
+data/notification-state.json
+data/activities.json
+data/subscriptions.json
+data/projects.json
+data/prompt-optimizer.json
+data/tweet-poster.log
+data/tweet-queue.json
+data/usage.json
+data/auto-rules.md
+vector_store.db
+
+# Session transcripts
+data/sessions/
+
+# Generated media
+data/selfie/generated/
+data/selfie/selfie-state.json
+data/selfie/training/
+data/selfie/training.zip
+data/tts/*.ogg
+data/tts/*.mp3
+data/tts/*.opus
+data/tts/state.json
+data/video/
+data/music/generated/
+
+# Logs & runtime
+data/heartbeat/*.jsonl
+data/heartbeat/state.json
+data/timeline/
+data/context-eval/
+data/evolution/history/*.json
+data/evolution/pending/
+data/evolution/rollback/
+data/watchdog/
+data/documents/
+
+# Personal content
+reading/
+projects/
+scripts/
+*.png
+*.jpg
+*.JPG
+*.jpeg

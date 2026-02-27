@@ -1,0 +1,24 @@
+{
+  "telegramBotToken": "YOUR_TELEGRAM_BOT_TOKEN",
+  "allowedChatId": 0,
+  "anthropicApiKey": "sk-ant-...",
+  "model": "claude-sonnet-4-6",
+  "maxContextTokens": 180000,
+  "compactionThreshold": 0.8,
+
+  "openaiApiKey": "",
+  "openaiModel": "gpt-4o",
+  "conversationProvider": "anthropic",
+
+  "xApiKey": "",
+  "xApiKeySecret": "",
+  "xAccessToken": "",
+  "xAccessTokenSecret": "",
+
+  "falApiKey": "",
+  "fishAudioApiKey": "",
+  "fishAudioVoiceId": "",
+  "tavilyApiKey": "",
+  "sunoApiKey": "",
+  "momentsChannelId": ""
+}

@@ -1,0 +1,292 @@
+/**
+ * MeAI — Entry point.
+ *
+ * Loads config, creates session manager, tool registry, agent loop,
+ * wires up Telegram callbacks for Tier 3/4 approval gates, and starts the bot.
+ *
+ * Architecture:
+ * - Background tasks (emotion, schedule, memory, curiosity, social): Claude Sonnet 4.6
+ * - Real-time conversation: configurable (Anthropic or OpenAI/GPT-5)
+ * - X (Twitter): autonomous posting + real-time reading
+ */
+
+// Disable mem0 telemetry (PostHog) before any imports touch it
+process.env.MEM0_TELEMETRY = "false";
+
+// Prepend HH:mm:ss timestamp (PST) to all console output
+for (const method of ["log", "warn", "error"] as const) {
+  const original = console[method].bind(console);
+  console[method] = (...args: unknown[]) => {
+    const ts = new Date().toLocaleTimeString("en-US", {
+      timeZone: getUserTZ(),
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    if (typeof args[0] === "string") {
+      args[0] = `${ts} ${args[0]}`;
+    } else {
+      args.unshift(ts);
+    }
+    original(...args);
+  };
+}
+
+import { getUserTZ } from "./lib/pst-date.js";
+import { loadConfig } from "./config.js";
+import { createChannel } from "./channel/factory.js";
+import type { Channel } from "./channel/types.js";
+import { TelegramChannel } from "./channel/telegram.js";
+import { SessionManager } from "./session/manager.js";
+import { ToolRegistry } from "./agent/tools.js";
+import { AgentLoop } from "./agent/loop.js";
+import { setupToolApprovalHandlers } from "./evolution/installer.js";
+import { setupPatchApprovalHandlers } from "./evolution/patcher.js";
+import { PromptOptimizer } from "./evolution/prompt-optimizer.js";
+import { ProactiveScheduler } from "./proactive.js";
+import { CuriosityEngine } from "./curiosity.js";
+import { XClient } from "./x-client.js";
+import { SocialEngine } from "./social.js";
+import { initWorld } from "./world.js";
+import { initEmotion } from "./emotion.js";
+import { initInterests } from "./interests.js";
+import { initHobbies } from "./hobbies.js";
+import { initFriends } from "./friends.js";
+import { initEntertainment } from "./entertainment.js";
+import { initBody } from "./body.js";
+import { ActivityScheduler } from "./activities.js";
+import { Heartbeat } from "./heartbeat.js";
+import { WatchdogEngine } from "./watchdog.js";
+import { initMem0 } from "./memory/mem0-engine.js";
+import { initStoreManager } from "./memory/store-manager.js";
+import { initNotifications } from "./notifications.js";
+import { initSelfie } from "./selfie.js";
+import { initTTS } from "./tts.js";
+import { initVideo } from "./video.js";
+import { initMusic } from "./music.js";
+import { initContextEval } from "./agent/context-eval.js";
+import { initSearch } from "./lib/search.js";
+import { initGoals } from "./goals.js";
+import { initJournal } from "./journal.js";
+import { initOpinions } from "./opinions.js";
+import { initRelationshipModel } from "./lib/relationship-model.js";
+import { initNarrative } from "./narrative.js";
+import { initDocuments } from "./documents.js";
+import { initMoments } from "./moments.js";
+import { initTimeline } from "./timeline.js";
+import { initCharacter } from "./character.js";
+import { moduleRegistry } from "./modules/registry.js";
+import { llmRegistry } from "./llm/registry.js";
+import { expressionRegistry } from "./expressions/registry.js";
+import { senseRegistry } from "./senses/registry.js";
+
+async function main(): Promise<void> {
+  console.log("MeAI starting...");
+
+  const config = loadConfig();
+  console.log(`Config loaded. State path: ${config.statePath}`);
+  console.log(`Conversation: ${config.conversationProvider} (${config.conversationProvider === "openai" ? config.openaiModel : config.model})`);
+
+  // Initialize character definition — must be early, before modules that use getCharacter()
+  initCharacter(config.statePath);
+
+  // Initialize shared search module (Tavily + DuckDuckGo fallback)
+  initSearch(config);
+
+  // Initialize world module — market data + LLM-generated daily schedule
+  initWorld({ statePath: config.statePath });
+
+  // Initialize emotion engine — causal mood generation from real-world signals
+  initEmotion({ statePath: config.statePath });
+
+  // Initialize interests — subscriptions persistence for YouTube + podcasts
+  initInterests(config.statePath);
+
+  // Initialize hierarchical memory store (split into 5 category files)
+  const storeManager = initStoreManager(config.statePath);
+  await storeManager.migrateIfNeeded();
+
+  // Initialize mem0 semantic memory engine (OpenAI gpt-4o-mini + text-embedding-3-small)
+  const mem0 = await initMem0(config);
+  if (mem0) {
+    mem0.syncFromStore(storeManager.loadAll()).catch((err) =>
+      console.error("[mem0] Background sync error:", err),
+    );
+  }
+
+  // Initialize life simulation modules — hobbies, friends, entertainment, body
+  initHobbies(config.statePath);
+  initFriends(config.statePath);
+  initEntertainment(config.statePath);
+  initBody(config.statePath);
+  initNotifications(config.statePath);
+  initSelfie(config);
+  initTTS(config);
+  initVideo(config);
+  initMusic(config);
+  initContextEval(config.statePath);
+  initGoals(config.statePath);
+  initJournal(config.statePath);
+  initOpinions(config.statePath);
+  initRelationshipModel(config.statePath);
+  initNarrative(config.statePath);
+  initDocuments(config.statePath);
+  initTimeline(config.statePath);
+
+  // Discover and initialize extensible registries (all 5 axes)
+  await Promise.all([
+    moduleRegistry.discover(),
+    llmRegistry.discover(),
+    expressionRegistry.discover(),
+    senseRegistry.discover(),
+  ]);
+
+  // Configure LLM role mapping from config
+  const llmConfig = (config as any).llm as Record<string, string> | undefined;
+  if (llmConfig) {
+    llmRegistry.setRoleMapping(llmConfig as any);
+  }
+
+  await Promise.all([
+    moduleRegistry.initAll(config),
+    llmRegistry.initAll(config),
+    expressionRegistry.initAll(config),
+    senseRegistry.initAll(config),
+  ]);
+
+  const session = new SessionManager(config);
+  const tools = new ToolRegistry();
+  const channel = createChannel(config);
+
+  // Initialize moments — posts life moments to a channel
+  // For Telegram, we still need the underlying bot for moments + approval handlers
+  const telegramBot = channel instanceof TelegramChannel ? channel.getBot() : null;
+  initMoments(config, telegramBot!);
+
+  // Wire up channel callbacks for tool approval gates
+  tools.setCallbacks({
+    sendToolProposal: (name, description, code) =>
+      channel.sendToolProposal?.(name, description, code) ?? Promise.resolve(),
+    sendPatchProposal: (patchId, reason, filesChanged) =>
+      channel.sendPatchProposal?.(patchId, reason, filesChanged) ?? Promise.resolve(),
+    sendMessage: async (text) => {
+      await channel.sendMessage(text);
+    },
+    sendPhoto: async (photo, caption) => {
+      await channel.sendPhoto(photo, caption);
+    },
+  });
+
+  // Set up inline keyboard handlers for Tier 3 tool approval and Tier 4 patch approval
+  // (Telegram-specific — other channels implement approval differently)
+  if (telegramBot) {
+    setupToolApprovalHandlers(telegramBot, config);
+    setupPatchApprovalHandlers(telegramBot, config, async (text) => {
+      await channel.sendMessage(text);
+    });
+  }
+
+  // Curiosity engine — the character explores the web and learns autonomously
+  const curiosity = new CuriosityEngine(config);
+
+  // X (Twitter) integration — autonomous posting + real-time reading
+  let social: SocialEngine | null = null;
+  if (config.xApiKey && config.xApiKeySecret && config.xAccessToken && config.xAccessTokenSecret) {
+    const xClient = new XClient({
+      apiKey: config.xApiKey,
+      apiKeySecret: config.xApiKeySecret,
+      accessToken: config.xAccessToken,
+      accessTokenSecret: config.xAccessTokenSecret,
+    });
+    social = new SocialEngine(config, xClient, curiosity);
+
+    // Give curiosity engine access to X for real-time info
+    curiosity.setXClient(xClient);
+
+    console.log("[x] X (Twitter) integration enabled");
+  } else {
+    console.log("[x] X credentials not configured — social features disabled");
+  }
+
+  const agent = new AgentLoop(config, session, tools, curiosity);
+  agent.setSendPhoto(async (photo, caption) => {
+    await channel.sendPhoto(photo, caption);
+  });
+  agent.setSendVoice(async (audio, caption) => {
+    await channel.sendVoice?.(audio, caption);
+  });
+  agent.setSendVideo(async (video, caption) => {
+    await channel.sendVideo?.(video, caption);
+  });
+  agent.setSendAudio(async (audio, title, performer) => {
+    await channel.sendAudio?.(audio, title, performer);
+  });
+  agent.setDeleteMessage(async (messageId) => {
+    await channel.deleteMessage?.(messageId);
+  });
+
+  // Proactive messaging — character will reach out to user on their own
+  const proactive = new ProactiveScheduler(config, session, async (text) => {
+    await channel.sendMessage(text);
+  }, curiosity);
+  proactive.setSendPhoto(async (photo, caption) => {
+    await channel.sendPhoto(photo, caption);
+  });
+  proactive.setSendVideo(async (video, caption) => {
+    await channel.sendVideo?.(video, caption);
+  });
+  proactive.setSendVoice(async (audio, caption) => {
+    await channel.sendVoice?.(audio, caption);
+  });
+
+  channel.onMessage(async (text, chatId, sendReply, editReply, sendTyping, imageData) => {
+    proactive.recordUserActivity();
+    await agent.handleMessage(text, chatId, sendReply, editReply, sendTyping, imageData);
+  });
+
+  channel.onTranscribe?.(async (buffer, filename) => {
+    return agent.transcribeAudio(buffer, filename);
+  });
+
+  // Activity scheduler — the character does vibe coding, deep reading, learning on their own
+  const activities = new ActivityScheduler(config);
+  proactive.setActivities(activities);
+
+  // Initialize X user identity (needed for social.tick())
+  if (social) {
+    await social.init().catch((err) => console.error("[social] X init error:", err));
+  }
+
+  // Immune system — health monitoring, circuit breaker, guardrails
+  const watchdog = new WatchdogEngine(config);
+  watchdog.setAlertFn(async (text) => {
+    await channel.sendMessage(text);
+  });
+
+  // LLM Heartbeat — the character's pulse, coordinates all background modules
+  // Replaces individual module self-scheduling loops.
+  // Every ~5 min: LLM evaluates holistic state → decides what to do.
+  const heartbeat = new Heartbeat(config, {
+    curiosity,
+    proactive,
+    social,
+    activities,
+  });
+  heartbeat.setWatchdog(watchdog);
+  watchdog.setHeartbeat(heartbeat);
+  heartbeat.start();
+  watchdog.start();
+
+  if (config.openaiApiKey) {
+    const optimizer = new PromptOptimizer(config);
+    optimizer.start();
+  }
+
+  await channel.start();
+}
+
+main().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});
