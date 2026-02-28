@@ -82,32 +82,216 @@ export interface SkillProgression {
   frustrations: string[];        // e.g. ["backhand always goes out"]
 }
 
-// ── Module State ─────────────────────────────────────────────────────
+// ── Class ────────────────────────────────────────────────────────────
 
-let dataPath = "";
+export class HobbiesEngine {
+  private dataPath: string;
 
-export function initHobbies(statePath: string): void {
-  dataPath = statePath;
+  constructor(statePath: string) {
+    this.dataPath = statePath;
+  }
+
+  // ── Persistence ──────────────────────────────────────────────────────
+
+  private getStatePath(): string {
+    return path.join(this.dataPath, "hobby-progress.json");
+  }
+
+  loadHobbyProgress(): HobbyProgress {
+    if (!this.dataPath) return defaultProgress();
+    const p = this.getStatePath();
+    if (!fs.existsSync(p)) return defaultProgress();
+    return readJsonSafe<HobbyProgress>(p, defaultProgress());
+  }
+
+  saveHobbyProgress(progress: HobbyProgress): void {
+    if (!this.dataPath) return;
+    progress.lastUpdated = pstDateStr();
+    writeJsonAtomic(this.getStatePath(), progress);
+  }
+
+  // ── Updates ──────────────────────────────────────────────────────────
+
+  /** Record a pottery session */
+  recordPotterySession(detail?: string): void {
+    const progress = this.loadHobbyProgress();
+    progress.pottery.sessionsTotal++;
+    progress.pottery.lastSession = pstDateStr();
+    if (detail) {
+      progress.pottery.projectStatus = detail;
+    }
+    this.saveHobbyProgress(progress);
+  }
+
+  /** Record a tennis match */
+  recordTennisMatch(partner?: string, note?: string): void {
+    const progress = this.loadHobbyProgress();
+    progress.tennis.matchesThisMonth++;
+    progress.tennis.lastPlayed = pstDateStr();
+    if (partner) progress.tennis.recentPartner = partner;
+    if (note) progress.tennis.note = note;
+    this.saveHobbyProgress(progress);
+  }
+
+  /** Record drum practice */
+  recordDrumPractice(song?: string): void {
+    const progress = this.loadHobbyProgress();
+    progress.drums.practiceThisWeek++;
+    progress.drums.lastPractice = pstDateStr();
+    if (song) progress.drums.currentSong = song;
+    this.saveHobbyProgress(progress);
+  }
+
+  /** Record a run */
+  recordRun(pace?: string): void {
+    const progress = this.loadHobbyProgress();
+    progress.running.runsThisWeek++;
+    progress.running.lastRun = pstDateStr();
+    if (pace) progress.running.recentPace = pace;
+    this.saveHobbyProgress(progress);
+  }
+
+  /** Record cooking */
+  recordCooking(dish: string): void {
+    const progress = this.loadHobbyProgress();
+    progress.cooking.recentDishes.push(dish);
+    // Keep last 5
+    if (progress.cooking.recentDishes.length > 5) {
+      progress.cooking.recentDishes = progress.cooking.recentDishes.slice(-5);
+    }
+    this.saveHobbyProgress(progress);
+  }
+
+  // ── Skill & Abandonment Tracking ─────────────────────────────────────
+
+  /** Decay skill levels and increase abandonment risk for inactive hobbies */
+  updateHobbyDecay(): void {
+    const progress = this.loadHobbyProgress();
+    const today = pstDateStr();
+
+    if (!progress.meta) progress.meta = {};
+
+    const hobbies = ["pottery", "tennis", "drums", "cooking", "running", "vibeCoding"];
+    for (const hobby of hobbies) {
+      if (!progress.meta[hobby]) {
+        progress.meta[hobby] = { skillLevel: 30, abandonmentRisk: 0, lastActive: today, totalSessions: 0 };
+      }
+      const meta = progress.meta[hobby];
+      const daysSince = daysBetween(meta.lastActive, today);
+
+      // Abandonment risk grows with inactivity
+      if (daysSince > 3) {
+        meta.abandonmentRisk = Math.min(1, meta.abandonmentRisk + (daysSince - 3) * 0.05);
+      } else {
+        meta.abandonmentRisk = Math.max(0, meta.abandonmentRisk - 0.1);
+      }
+
+      // Skill decays after 14 days without practice
+      if (daysSince > 14) {
+        meta.skillLevel = Math.max(0, meta.skillLevel - (daysSince - 14) * 0.5);
+      }
+    }
+
+    this.saveHobbyProgress(progress);
+  }
+
+  /** Record a hobby session, improving skill and reducing abandonment risk */
+  recordHobbySession(hobbyKey: string): void {
+    const progress = this.loadHobbyProgress();
+    if (!progress.meta) progress.meta = {};
+    const today = pstDateStr();
+
+    if (!progress.meta[hobbyKey]) {
+      progress.meta[hobbyKey] = { skillLevel: 30, abandonmentRisk: 0, lastActive: today, totalSessions: 0 };
+    }
+
+    const meta = progress.meta[hobbyKey];
+    meta.lastActive = today;
+    meta.totalSessions++;
+    meta.skillLevel = Math.min(100, meta.skillLevel + 1.5); // slow skill gain
+    meta.abandonmentRisk = Math.max(0, meta.abandonmentRisk - 0.2);
+
+    this.saveHobbyProgress(progress);
+  }
+
+  // ── Formatting ───────────────────────────────────────────────────────
+
+  /** Format hobby progress for schedule generation context */
+  formatHobbyContext(): string {
+    const p = this.loadHobbyProgress();
+    const today = pstDateStr();
+    const lines: string[] = [];
+
+    const h = getCharacter().hobbies as Record<string, Record<string, unknown>>;
+
+    // Pottery
+    const potteryLabel = (h.pottery?.label as string) ?? "Pottery";
+    const daysSincePottery = daysBetween(p.pottery.lastSession, today);
+    lines.push(`${potteryLabel}: ${p.pottery.sessionsTotal} sessions total, ${p.pottery.currentProject ?? "no current project"} (${p.pottery.projectStatus}), ${daysSincePottery} days since last session`);
+
+    // Tennis — with 8.1 skill progression
+    const tennisLabel = (h.tennis?.label as string) ?? "Tennis";
+    const daysSinceTennis = daysBetween(p.tennis.lastPlayed, today);
+    let tennisLine = `${tennisLabel}: ${p.tennis.matchesThisMonth} matches this month, ${daysSinceTennis} days since last${p.tennis.note ? `, ${p.tennis.note}` : ""}`;
+    const tennisProg = p.meta?.tennis?.progression;
+    if (tennisProg?.focusArea) tennisLine += `, ${tennisProg.focusArea}`;
+    if (tennisProg?.recentBreakthroughs?.length) tennisLine += `, recent breakthrough: ${tennisProg.recentBreakthroughs[tennisProg.recentBreakthroughs.length - 1]}`;
+    lines.push(tennisLine);
+
+    // Drums — with 8.1 skill progression
+    const drumsLabel = (h.drums?.label as string) ?? "Drums";
+    const daysSinceDrums = daysBetween(p.drums.lastPractice, today);
+    let drumsLine = `${drumsLabel}: ${p.drums.currentSong ? `practicing ${p.drums.currentSong}` : "not practicing anything"}, ${daysSinceDrums} days since last practice, ${p.drums.level}`;
+    const drumsProg = p.meta?.drums?.progression;
+    if (drumsProg?.focusArea) drumsLine += `, ${drumsProg.focusArea}`;
+    lines.push(drumsLine);
+
+    // Running
+    const runningLabel = (h.running?.label as string) ?? "Running";
+    const daysSinceRun = daysBetween(p.running.lastRun, today);
+    lines.push(`${runningLabel}: ${p.running.runsThisWeek} runs this week, ${daysSinceRun} days since last run`);
+
+    // Cooking
+    if (p.cooking.recentDishes.length > 0) {
+      const cookingLabel = (h.cooking?.label as string) ?? "Recent dishes";
+      lines.push(`${cookingLabel}: ${p.cooking.recentDishes.join(", ")}`);
+    }
+
+    // Vibe coding
+    if (p.vibeCoding.currentProject) {
+      lines.push(`Vibe coding: working on ${p.vibeCoding.currentProject}`);
+    }
+
+    return lines.join("\n");
+  }
 }
 
-// ── Persistence ──────────────────────────────────────────────────────
+// ── Backward-compat singleton ────────────────────────────────────────
 
-function getStatePath(): string {
-  return path.join(dataPath, "hobby-progress.json");
+let _singleton: HobbiesEngine | null = null;
+
+export function initHobbies(statePath: string): HobbiesEngine {
+  _singleton = new HobbiesEngine(statePath);
+  return _singleton;
 }
 
-export function loadHobbyProgress(): HobbyProgress {
-  if (!dataPath) return defaultProgress();
-  const p = getStatePath();
-  if (!fs.existsSync(p)) return defaultProgress();
-  return readJsonSafe<HobbyProgress>(p, defaultProgress());
+function _get(): HobbiesEngine {
+  if (!_singleton) throw new Error("initHobbies() not called");
+  return _singleton;
 }
 
-export function saveHobbyProgress(progress: HobbyProgress): void {
-  if (!dataPath) return;
-  progress.lastUpdated = pstDateStr();
-  writeJsonAtomic(getStatePath(), progress);
-}
+export function loadHobbyProgress(): HobbyProgress { return _get().loadHobbyProgress(); }
+export function saveHobbyProgress(progress: HobbyProgress): void { _get().saveHobbyProgress(progress); }
+export function recordPotterySession(detail?: string): void { _get().recordPotterySession(detail); }
+export function recordTennisMatch(partner?: string, note?: string): void { _get().recordTennisMatch(partner, note); }
+export function recordDrumPractice(song?: string): void { _get().recordDrumPractice(song); }
+export function recordRun(pace?: string): void { _get().recordRun(pace); }
+export function recordCooking(dish: string): void { _get().recordCooking(dish); }
+export function updateHobbyDecay(): void { _get().updateHobbyDecay(); }
+export function recordHobbySession(hobbyKey: string): void { _get().recordHobbySession(hobbyKey); }
+export function formatHobbyContext(): string { return _get().formatHobbyContext(); }
+
+// ── Module-level helpers ─────────────────────────────────────────────
 
 function defaultProgress(): HobbyProgress {
   const today = pstDateStr();
@@ -159,163 +343,6 @@ function defaultProgress(): HobbyProgress {
     lastUpdated: today,
   };
 }
-
-// ── Updates ──────────────────────────────────────────────────────────
-
-/** Record a pottery session */
-export function recordPotterySession(detail?: string): void {
-  const progress = loadHobbyProgress();
-  progress.pottery.sessionsTotal++;
-  progress.pottery.lastSession = pstDateStr();
-  if (detail) {
-    progress.pottery.projectStatus = detail;
-  }
-  saveHobbyProgress(progress);
-}
-
-/** Record a tennis match */
-export function recordTennisMatch(partner?: string, note?: string): void {
-  const progress = loadHobbyProgress();
-  progress.tennis.matchesThisMonth++;
-  progress.tennis.lastPlayed = pstDateStr();
-  if (partner) progress.tennis.recentPartner = partner;
-  if (note) progress.tennis.note = note;
-  saveHobbyProgress(progress);
-}
-
-/** Record drum practice */
-export function recordDrumPractice(song?: string): void {
-  const progress = loadHobbyProgress();
-  progress.drums.practiceThisWeek++;
-  progress.drums.lastPractice = pstDateStr();
-  if (song) progress.drums.currentSong = song;
-  saveHobbyProgress(progress);
-}
-
-/** Record a run */
-export function recordRun(pace?: string): void {
-  const progress = loadHobbyProgress();
-  progress.running.runsThisWeek++;
-  progress.running.lastRun = pstDateStr();
-  if (pace) progress.running.recentPace = pace;
-  saveHobbyProgress(progress);
-}
-
-/** Record cooking */
-export function recordCooking(dish: string): void {
-  const progress = loadHobbyProgress();
-  progress.cooking.recentDishes.push(dish);
-  // Keep last 5
-  if (progress.cooking.recentDishes.length > 5) {
-    progress.cooking.recentDishes = progress.cooking.recentDishes.slice(-5);
-  }
-  saveHobbyProgress(progress);
-}
-
-// ── Skill & Abandonment Tracking ─────────────────────────────────────
-
-/** Decay skill levels and increase abandonment risk for inactive hobbies */
-export function updateHobbyDecay(): void {
-  const progress = loadHobbyProgress();
-  const today = pstDateStr();
-
-  if (!progress.meta) progress.meta = {};
-
-  const hobbies = ["pottery", "tennis", "drums", "cooking", "running", "vibeCoding"];
-  for (const hobby of hobbies) {
-    if (!progress.meta[hobby]) {
-      progress.meta[hobby] = { skillLevel: 30, abandonmentRisk: 0, lastActive: today, totalSessions: 0 };
-    }
-    const meta = progress.meta[hobby];
-    const daysSince = daysBetween(meta.lastActive, today);
-
-    // Abandonment risk grows with inactivity
-    if (daysSince > 3) {
-      meta.abandonmentRisk = Math.min(1, meta.abandonmentRisk + (daysSince - 3) * 0.05);
-    } else {
-      meta.abandonmentRisk = Math.max(0, meta.abandonmentRisk - 0.1);
-    }
-
-    // Skill decays after 14 days without practice
-    if (daysSince > 14) {
-      meta.skillLevel = Math.max(0, meta.skillLevel - (daysSince - 14) * 0.5);
-    }
-  }
-
-  saveHobbyProgress(progress);
-}
-
-/** Record a hobby session, improving skill and reducing abandonment risk */
-export function recordHobbySession(hobbyKey: string): void {
-  const progress = loadHobbyProgress();
-  if (!progress.meta) progress.meta = {};
-  const today = pstDateStr();
-
-  if (!progress.meta[hobbyKey]) {
-    progress.meta[hobbyKey] = { skillLevel: 30, abandonmentRisk: 0, lastActive: today, totalSessions: 0 };
-  }
-
-  const meta = progress.meta[hobbyKey];
-  meta.lastActive = today;
-  meta.totalSessions++;
-  meta.skillLevel = Math.min(100, meta.skillLevel + 1.5); // slow skill gain
-  meta.abandonmentRisk = Math.max(0, meta.abandonmentRisk - 0.2);
-
-  saveHobbyProgress(progress);
-}
-
-// ── Formatting ───────────────────────────────────────────────────────
-
-/** Format hobby progress for schedule generation context */
-export function formatHobbyContext(): string {
-  const p = loadHobbyProgress();
-  const today = pstDateStr();
-  const lines: string[] = [];
-
-  const h = getCharacter().hobbies as Record<string, Record<string, unknown>>;
-
-  // Pottery
-  const potteryLabel = (h.pottery?.label as string) ?? "Pottery";
-  const daysSincePottery = daysBetween(p.pottery.lastSession, today);
-  lines.push(`${potteryLabel}: ${p.pottery.sessionsTotal} sessions total, ${p.pottery.currentProject ?? "no current project"} (${p.pottery.projectStatus}), ${daysSincePottery} days since last session`);
-
-  // Tennis — with 8.1 skill progression
-  const tennisLabel = (h.tennis?.label as string) ?? "Tennis";
-  const daysSinceTennis = daysBetween(p.tennis.lastPlayed, today);
-  let tennisLine = `${tennisLabel}: ${p.tennis.matchesThisMonth} matches this month, ${daysSinceTennis} days since last${p.tennis.note ? `, ${p.tennis.note}` : ""}`;
-  const tennisProg = p.meta?.tennis?.progression;
-  if (tennisProg?.focusArea) tennisLine += `, ${tennisProg.focusArea}`;
-  if (tennisProg?.recentBreakthroughs?.length) tennisLine += `, recent breakthrough: ${tennisProg.recentBreakthroughs[tennisProg.recentBreakthroughs.length - 1]}`;
-  lines.push(tennisLine);
-
-  // Drums — with 8.1 skill progression
-  const drumsLabel = (h.drums?.label as string) ?? "Drums";
-  const daysSinceDrums = daysBetween(p.drums.lastPractice, today);
-  let drumsLine = `${drumsLabel}: ${p.drums.currentSong ? `practicing ${p.drums.currentSong}` : "not practicing anything"}, ${daysSinceDrums} days since last practice, ${p.drums.level}`;
-  const drumsProg = p.meta?.drums?.progression;
-  if (drumsProg?.focusArea) drumsLine += `, ${drumsProg.focusArea}`;
-  lines.push(drumsLine);
-
-  // Running
-  const runningLabel = (h.running?.label as string) ?? "Running";
-  const daysSinceRun = daysBetween(p.running.lastRun, today);
-  lines.push(`${runningLabel}: ${p.running.runsThisWeek} runs this week, ${daysSinceRun} days since last run`);
-
-  // Cooking
-  if (p.cooking.recentDishes.length > 0) {
-    const cookingLabel = (h.cooking?.label as string) ?? "Recent dishes";
-    lines.push(`${cookingLabel}: ${p.cooking.recentDishes.join(", ")}`);
-  }
-
-  // Vibe coding
-  if (p.vibeCoding.currentProject) {
-    lines.push(`Vibe coding: working on ${p.vibeCoding.currentProject}`);
-  }
-
-  return lines.join("\n");
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────
 
 function daysBetween(dateStr1: string, dateStr2: string): number {
   try {

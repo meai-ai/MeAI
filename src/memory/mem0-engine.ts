@@ -72,6 +72,16 @@ export class Mem0Engine {
   }
 
   /**
+   * Static factory: create and initialize a Mem0Engine from config.
+   * Returns null if initialization fails (e.g. missing OpenAI key).
+   */
+  static async createFromConfig(config: AppConfig): Promise<Mem0Engine | null> {
+    const engine = new Mem0Engine(config);
+    const ok = await engine.initialize();
+    return ok ? engine : null;
+  }
+
+  /**
    * Initialize the mem0 engine with OpenAI LLM + OpenAI embeddings.
    * Returns false if OpenAI API key is missing (semantic search disabled).
    */

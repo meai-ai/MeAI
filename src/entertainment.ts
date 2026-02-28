@@ -48,36 +48,135 @@ export interface EntertainmentState {
   lastUpdated: string;
 }
 
-// ── Module State ─────────────────────────────────────────────────────
+// ── Class ────────────────────────────────────────────────────────────
 
-let dataPath = "";
+export class EntertainmentEngine {
+  private dataPath: string;
 
-export function initEntertainment(statePath: string): void {
-  dataPath = statePath;
-}
+  constructor(statePath: string) {
+    this.dataPath = statePath;
+  }
 
-// ── Persistence ──────────────────────────────────────────────────────
+  // ── Persistence ──────────────────────────────────────────────────────
 
-function getStatePath(): string {
-  return path.join(dataPath, "entertainment-state.json");
-}
+  private getStatePath(): string {
+    return path.join(this.dataPath, "entertainment-state.json");
+  }
 
-export function loadEntertainmentState(): EntertainmentState {
-  if (!dataPath) return defaultState();
-  const p = getStatePath();
-  if (!fs.existsSync(p)) return defaultState();
-  try {
-    return JSON.parse(fs.readFileSync(p, "utf-8")) as EntertainmentState;
-  } catch {
-    return defaultState();
+  loadEntertainmentState(): EntertainmentState {
+    if (!this.dataPath) return defaultState();
+    const p = this.getStatePath();
+    if (!fs.existsSync(p)) return defaultState();
+    try {
+      return JSON.parse(fs.readFileSync(p, "utf-8")) as EntertainmentState;
+    } catch {
+      return defaultState();
+    }
+  }
+
+  saveEntertainmentState(state: EntertainmentState): void {
+    if (!this.dataPath) return;
+    state.lastUpdated = pstDateStr();
+    fs.writeFileSync(this.getStatePath(), JSON.stringify(state, null, 2) + "\n");
+  }
+
+  // ── Updates ──────────────────────────────────────────────────────────
+
+  /** Start watching a new show */
+  startWatching(title: string, status?: string): void {
+    const state = this.loadEntertainmentState();
+    // Check if already watching
+    const existing = state.currentShows.find(s => s.title === title);
+    if (existing) {
+      if (status) existing.status = status;
+      this.saveEntertainmentState(state);
+      return;
+    }
+    state.currentShows.push({ title, status: status ?? "started watching" });
+    // Cap at 3 current shows
+    if (state.currentShows.length > 3) {
+      const finished = state.currentShows.shift()!;
+      state.recentlyWatched.push({
+        title: finished.title,
+        reaction: finished.reaction ?? "it was okay",
+        date: pstDateStr(),
+      });
+    }
+    this.saveEntertainmentState(state);
+  }
+
+  /** Update music */
+  updateMusic(music: string | null): void {
+    const state = this.loadEntertainmentState();
+    state.currentMusic = music;
+    this.saveEntertainmentState(state);
+  }
+
+  /** Update book */
+  updateBook(book: string | null): void {
+    const state = this.loadEntertainmentState();
+    state.currentBook = book;
+    this.saveEntertainmentState(state);
+  }
+
+  // ── Formatting ───────────────────────────────────────────────────────
+
+  /** Format entertainment state for system prompt context */
+  formatEntertainmentContext(): string {
+    const state = this.loadEntertainmentState();
+    const lines: string[] = [];
+
+    // Shows
+    if (state.currentShows.length > 0) {
+      const shows = state.currentShows.map(s => `${s.title} (${s.status})`).join(", ");
+      lines.push(`Currently watching: ${shows}`);
+    }
+
+    // Music
+    if (state.currentMusic) {
+      lines.push(`Listening to: ${state.currentMusic}`);
+    }
+
+    // Podcasts
+    if (state.currentPodcasts.length > 0) {
+      const podcasts = state.currentPodcasts
+        .map(p => p.recentEpisode ? `${p.title} (${p.recentEpisode})` : p.title)
+        .join(", ");
+      lines.push(`Regular podcasts: ${podcasts}`);
+    }
+
+    // Book
+    if (state.currentBook) {
+      lines.push(`Currently reading: ${state.currentBook}`);
+    }
+
+    if (lines.length === 0) return "";
+    return lines.join("\n");
   }
 }
 
-export function saveEntertainmentState(state: EntertainmentState): void {
-  if (!dataPath) return;
-  state.lastUpdated = pstDateStr();
-  fs.writeFileSync(getStatePath(), JSON.stringify(state, null, 2) + "\n");
+// ── Backward-compat singleton ────────────────────────────────────────
+
+let _singleton: EntertainmentEngine | null = null;
+
+export function initEntertainment(statePath: string): EntertainmentEngine {
+  _singleton = new EntertainmentEngine(statePath);
+  return _singleton;
 }
+
+function _get(): EntertainmentEngine {
+  if (!_singleton) throw new Error("initEntertainment() not called");
+  return _singleton;
+}
+
+export function loadEntertainmentState(): EntertainmentState { return _get().loadEntertainmentState(); }
+export function saveEntertainmentState(state: EntertainmentState): void { _get().saveEntertainmentState(state); }
+export function startWatching(title: string, status?: string): void { _get().startWatching(title, status); }
+export function updateMusic(music: string | null): void { _get().updateMusic(music); }
+export function updateBook(book: string | null): void { _get().updateBook(book); }
+export function formatEntertainmentContext(): string { return _get().formatEntertainmentContext(); }
+
+// ── Module-level helpers ─────────────────────────────────────────────
 
 function defaultState(): EntertainmentState {
   // Seed from character.yaml hobbies if available
@@ -94,78 +193,4 @@ function defaultState(): EntertainmentState {
     recentlyListened: [],
     lastUpdated: pstDateStr(),
   };
-}
-
-// ── Updates ──────────────────────────────────────────────────────────
-
-/** Start watching a new show */
-export function startWatching(title: string, status?: string): void {
-  const state = loadEntertainmentState();
-  // Check if already watching
-  const existing = state.currentShows.find(s => s.title === title);
-  if (existing) {
-    if (status) existing.status = status;
-    saveEntertainmentState(state);
-    return;
-  }
-  state.currentShows.push({ title, status: status ?? "started watching" });
-  // Cap at 3 current shows
-  if (state.currentShows.length > 3) {
-    const finished = state.currentShows.shift()!;
-    state.recentlyWatched.push({
-      title: finished.title,
-      reaction: finished.reaction ?? "it was okay",
-      date: pstDateStr(),
-    });
-  }
-  saveEntertainmentState(state);
-}
-
-/** Update music */
-export function updateMusic(music: string | null): void {
-  const state = loadEntertainmentState();
-  state.currentMusic = music;
-  saveEntertainmentState(state);
-}
-
-/** Update book */
-export function updateBook(book: string | null): void {
-  const state = loadEntertainmentState();
-  state.currentBook = book;
-  saveEntertainmentState(state);
-}
-
-// ── Formatting ───────────────────────────────────────────────────────
-
-/** Format entertainment state for system prompt context */
-export function formatEntertainmentContext(): string {
-  const state = loadEntertainmentState();
-  const lines: string[] = [];
-
-  // Shows
-  if (state.currentShows.length > 0) {
-    const shows = state.currentShows.map(s => `${s.title} (${s.status})`).join(", ");
-    lines.push(`Currently watching: ${shows}`);
-  }
-
-  // Music
-  if (state.currentMusic) {
-    lines.push(`Listening to: ${state.currentMusic}`);
-  }
-
-  // Podcasts
-  if (state.currentPodcasts.length > 0) {
-    const podcasts = state.currentPodcasts
-      .map(p => p.recentEpisode ? `${p.title} (${p.recentEpisode})` : p.title)
-      .join(", ");
-    lines.push(`Regular podcasts: ${podcasts}`);
-  }
-
-  // Book
-  if (state.currentBook) {
-    lines.push(`Currently reading: ${state.currentBook}`);
-  }
-
-  if (lines.length === 0) return "";
-  return lines.join("\n");
 }

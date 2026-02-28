@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/engine.ts",
+    "./types": "./src/types.ts"
+  },
   "scripts": {
     "start": "node --disable-warning=DEP0040 --import tsx/esm src/index.ts",
     "dev": "node --disable-warning=DEP0040 --import tsx/esm src/index.ts",

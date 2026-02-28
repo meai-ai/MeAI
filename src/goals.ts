@@ -31,90 +31,115 @@ interface GoalState {
   goals: Goal[];
 }
 
-let dataPath = "";
+// ── Class ────────────────────────────────────────────────────────────
 
-export function initGoals(statePath: string): void {
-  dataPath = statePath;
-}
+export class GoalsEngine {
+  private dataPath: string;
 
-function getStatePath(): string {
-  return path.join(dataPath, "goals.json");
-}
-
-function loadState(): GoalState {
-  return readJsonSafe<GoalState>(getStatePath(), { goals: [] });
-}
-
-function saveState(state: GoalState): void {
-  if (!dataPath) return;
-  writeJsonAtomic(getStatePath(), state);
-}
-
-export function getGoals(): Goal[] {
-  return loadState().goals;
-}
-
-export function getActiveGoals(): Goal[] {
-  return loadState().goals.filter(g => g.status === "active");
-}
-
-export function addGoal(goal: Omit<Goal, "id" | "createdAt" | "updatedAt" | "status">): Goal {
-  const state = loadState();
-  const newGoal: Goal = {
-    ...goal,
-    id: String(Date.now()),
-    status: "active",
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-  state.goals.push(newGoal);
-  saveState(state);
-  log.info(`goal added: ${newGoal.description} (${newGoal.category})`);
-  return newGoal;
-}
-
-export function updateGoalProgress(goalId: string, progress: number, milestoneIndex?: number): void {
-  const state = loadState();
-  const goal = state.goals.find(g => g.id === goalId);
-  if (!goal) return;
-
-  goal.progress = Math.max(0, Math.min(1, progress));
-  goal.updatedAt = Date.now();
-
-  if (milestoneIndex !== undefined && goal.milestones[milestoneIndex]) {
-    goal.milestones[milestoneIndex].completed = true;
-    goal.milestones[milestoneIndex].completedAt = Date.now();
+  constructor(statePath: string) {
+    this.dataPath = statePath;
   }
 
-  // Auto-complete if all milestones done
-  if (goal.milestones.length > 0 && goal.milestones.every(m => m.completed)) {
-    goal.status = "completed";
-    goal.progress = 1;
+  private getStatePath(): string {
+    return path.join(this.dataPath, "goals.json");
   }
 
-  saveState(state);
+  private loadState(): GoalState {
+    return readJsonSafe<GoalState>(this.getStatePath(), { goals: [] });
+  }
+
+  private saveState(state: GoalState): void {
+    if (!this.dataPath) return;
+    writeJsonAtomic(this.getStatePath(), state);
+  }
+
+  getGoals(): Goal[] {
+    return this.loadState().goals;
+  }
+
+  getActiveGoals(): Goal[] {
+    return this.loadState().goals.filter(g => g.status === "active");
+  }
+
+  addGoal(goal: Omit<Goal, "id" | "createdAt" | "updatedAt" | "status">): Goal {
+    const state = this.loadState();
+    const newGoal: Goal = {
+      ...goal,
+      id: String(Date.now()),
+      status: "active",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    state.goals.push(newGoal);
+    this.saveState(state);
+    log.info(`goal added: ${newGoal.description} (${newGoal.category})`);
+    return newGoal;
+  }
+
+  updateGoalProgress(goalId: string, progress: number, milestoneIndex?: number): void {
+    const state = this.loadState();
+    const goal = state.goals.find(g => g.id === goalId);
+    if (!goal) return;
+
+    goal.progress = Math.max(0, Math.min(1, progress));
+    goal.updatedAt = Date.now();
+
+    if (milestoneIndex !== undefined && goal.milestones[milestoneIndex]) {
+      goal.milestones[milestoneIndex].completed = true;
+      goal.milestones[milestoneIndex].completedAt = Date.now();
+    }
+
+    // Auto-complete if all milestones done
+    if (goal.milestones.length > 0 && goal.milestones.every(m => m.completed)) {
+      goal.status = "completed";
+      goal.progress = 1;
+    }
+
+    this.saveState(state);
+  }
+
+  abandonGoal(goalId: string): void {
+    const state = this.loadState();
+    const goal = state.goals.find(g => g.id === goalId);
+    if (!goal) return;
+    goal.status = "abandoned";
+    goal.updatedAt = Date.now();
+    this.saveState(state);
+  }
+
+  formatGoalContext(): string {
+    const goals = this.getActiveGoals();
+    if (goals.length === 0) return "";
+
+    const lines = goals.map(g => {
+      const progressPct = Math.round(g.progress * 100);
+      const milestonesDone = g.milestones.filter(m => m.completed).length;
+      const milestonesTotal = g.milestones.length;
+      const milestoneStr = milestonesTotal > 0 ? `（${milestonesDone}/${milestonesTotal} milestones）` : "";
+      return `- [${g.category}] ${g.description}: ${progressPct}%${milestoneStr}`;
+    });
+
+    return `${s().headers.current_goals}:\n${lines.join("\n")}`;
+  }
 }
 
-export function abandonGoal(goalId: string): void {
-  const state = loadState();
-  const goal = state.goals.find(g => g.id === goalId);
-  if (!goal) return;
-  goal.status = "abandoned";
-  goal.updatedAt = Date.now();
-  saveState(state);
+// ── Backward-compat singleton ────────────────────────────────────────
+
+let _singleton: GoalsEngine | null = null;
+
+export function initGoals(statePath: string): GoalsEngine {
+  _singleton = new GoalsEngine(statePath);
+  return _singleton;
 }
 
-export function formatGoalContext(): string {
-  const goals = getActiveGoals();
-  if (goals.length === 0) return "";
-
-  const lines = goals.map(g => {
-    const progressPct = Math.round(g.progress * 100);
-    const milestonesDone = g.milestones.filter(m => m.completed).length;
-    const milestonesTotal = g.milestones.length;
-    const milestoneStr = milestonesTotal > 0 ? `（${milestonesDone}/${milestonesTotal} milestones）` : "";
-    return `- [${g.category}] ${g.description}: ${progressPct}%${milestoneStr}`;
-  });
-
-  return `${s().headers.current_goals}:\n${lines.join("\n")}`;
+function _get(): GoalsEngine {
+  if (!_singleton) throw new Error("initGoals() not called");
+  return _singleton;
 }
+
+export function getGoals(): Goal[] { return _get().getGoals(); }
+export function getActiveGoals(): Goal[] { return _get().getActiveGoals(); }
+export function addGoal(goal: Omit<Goal, "id" | "createdAt" | "updatedAt" | "status">): Goal { return _get().addGoal(goal); }
+export function updateGoalProgress(goalId: string, progress: number, milestoneIndex?: number): void { _get().updateGoalProgress(goalId, progress, milestoneIndex); }
+export function abandonGoal(goalId: string): void { _get().abandonGoal(goalId); }
+export function formatGoalContext(): string { return _get().formatGoalContext(); }

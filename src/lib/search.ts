@@ -37,19 +37,6 @@ export interface SearchOptions {
   searchDepth?: "basic" | "advanced";
 }
 
-// ── Module state ─────────────────────────────────────────────────────
-
-let tavilyApiKey: string | undefined;
-
-export function initSearch(config: AppConfig): void {
-  tavilyApiKey = config.tavilyApiKey;
-  if (tavilyApiKey) {
-    log.info("Tavily API configured — using Tavily for web search");
-  } else {
-    log.info("No Tavily API key — falling back to DuckDuckGo");
-  }
-}
-
 // ── SSRF protection ──────────────────────────────────────────────────
 
 function isInternalUrl(url: string): boolean {
@@ -133,146 +120,184 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-// ── Tavily search ────────────────────────────────────────────────────
+// ── SearchEngine class ───────────────────────────────────────────────
 
-async function searchTavily(
-  query: string,
-  maxResults: number,
-  options: SearchOptions,
-): Promise<SearchResult[]> {
-  const body = JSON.stringify({
-    query,
-    max_results: maxResults,
-    search_depth: options.searchDepth ?? "basic",
-    include_raw_content: options.includeRawContent ? "markdown" : false,
-    include_answer: false,
-    topic: options.topic ?? "general",
-  });
+export class SearchEngine {
+  private tavilyApiKey: string | undefined;
 
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: "api.tavily.com",
-        path: "/search",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${tavilyApiKey}`,
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (chunk) => { data += chunk; });
-        res.on("end", () => {
-          try {
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`Tavily API error ${res.statusCode}: ${data.slice(0, 200)}`));
-              return;
-            }
-            const json = JSON.parse(data);
-            const results: SearchResult[] = (json.results ?? []).map((r: any) => ({
-              title: r.title ?? "",
-              url: r.url ?? "",
-              snippet: r.content ?? "",
-              rawContent: r.raw_content || undefined,
-              score: r.score,
-            }));
-            resolve(results);
-          } catch (err) {
-            reject(new Error(`Failed to parse Tavily response: ${err}`));
-          }
-        });
-      },
-    );
-
-    req.on("error", reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error("Tavily timeout")); });
-    req.write(body);
-    req.end();
-  });
-}
-
-// ── DuckDuckGo search (fallback) ─────────────────────────────────────
-
-async function searchDuckDuckGo(query: string, maxResults: number): Promise<SearchResult[]> {
-  const html = await httpGet(
-    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-    { "Content-Type": "application/x-www-form-urlencoded" },
-  );
-
-  const results: SearchResult[] = [];
-  const resultBlocks = html.match(/<a class="result__a"[\s\S]*?<\/a>[\s\S]*?class="result__snippet"[\s\S]*?<\/a>/g) || [];
-
-  for (const block of resultBlocks) {
-    if (results.length >= maxResults) break;
-
-    const hrefMatch = block.match(/href="([^"]+)"/);
-    let url = hrefMatch ? hrefMatch[1] : "";
-    const uddgMatch = url.match(/uddg=([^&]+)/);
-    if (uddgMatch) url = decodeURIComponent(uddgMatch[1]);
-
-    const titleMatch = block.match(/<a class="result__a"[^>]*>([\s\S]*?)<\/a>/);
-    const title = titleMatch ? htmlToText(titleMatch[1]).trim() : "";
-
-    const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
-    const snippet = snippetMatch ? htmlToText(snippetMatch[1]).trim() : "";
-
-    if (url && title) results.push({ title, url, snippet });
-  }
-
-  // Fallback: simpler regex
-  if (results.length === 0) {
-    const linkMatches = html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g);
-    for (const m of linkMatches) {
-      if (results.length >= maxResults) break;
-      let url = m[1];
-      const uddgMatch = url.match(/uddg=([^&]+)/);
-      if (uddgMatch) url = decodeURIComponent(uddgMatch[1]);
-      const title = htmlToText(m[2]).trim();
-      if (url && title) results.push({ title, url, snippet: "" });
+  constructor(config: AppConfig) {
+    this.tavilyApiKey = config.tavilyApiKey;
+    if (this.tavilyApiKey) {
+      log.info("Tavily API configured — using Tavily for web search");
+    } else {
+      log.info("No Tavily API key — falling back to DuckDuckGo");
     }
   }
 
-  return results;
+  // ── Tavily search ──────────────────────────────────────────────────
+
+  private async searchTavily(
+    query: string,
+    maxResults: number,
+    options: SearchOptions,
+  ): Promise<SearchResult[]> {
+    const body = JSON.stringify({
+      query,
+      max_results: maxResults,
+      search_depth: options.searchDepth ?? "basic",
+      include_raw_content: options.includeRawContent ? "markdown" : false,
+      include_answer: false,
+      topic: options.topic ?? "general",
+    });
+
+    return new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: "api.tavily.com",
+          path: "/search",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.tavilyApiKey}`,
+            "Content-Length": Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => { data += chunk; });
+          res.on("end", () => {
+            try {
+              if (res.statusCode && res.statusCode >= 400) {
+                reject(new Error(`Tavily API error ${res.statusCode}: ${data.slice(0, 200)}`));
+                return;
+              }
+              const json = JSON.parse(data);
+              const results: SearchResult[] = (json.results ?? []).map((r: any) => ({
+                title: r.title ?? "",
+                url: r.url ?? "",
+                snippet: r.content ?? "",
+                rawContent: r.raw_content || undefined,
+                score: r.score,
+              }));
+              resolve(results);
+            } catch (err) {
+              reject(new Error(`Failed to parse Tavily response: ${err}`));
+            }
+          });
+        },
+      );
+
+      req.on("error", reject);
+      req.setTimeout(15000, () => { req.destroy(); reject(new Error("Tavily timeout")); });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  // ── DuckDuckGo search (fallback) ───────────────────────────────────
+
+  private async searchDuckDuckGo(query: string, maxResults: number): Promise<SearchResult[]> {
+    const html = await httpGet(
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+      { "Content-Type": "application/x-www-form-urlencoded" },
+    );
+
+    const results: SearchResult[] = [];
+    const resultBlocks = html.match(/<a class="result__a"[\s\S]*?<\/a>[\s\S]*?class="result__snippet"[\s\S]*?<\/a>/g) || [];
+
+    for (const block of resultBlocks) {
+      if (results.length >= maxResults) break;
+
+      const hrefMatch = block.match(/href="([^"]+)"/);
+      let url = hrefMatch ? hrefMatch[1] : "";
+      const uddgMatch = url.match(/uddg=([^&]+)/);
+      if (uddgMatch) url = decodeURIComponent(uddgMatch[1]);
+
+      const titleMatch = block.match(/<a class="result__a"[^>]*>([\s\S]*?)<\/a>/);
+      const title = titleMatch ? htmlToText(titleMatch[1]).trim() : "";
+
+      const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+      const snippet = snippetMatch ? htmlToText(snippetMatch[1]).trim() : "";
+
+      if (url && title) results.push({ title, url, snippet });
+    }
+
+    // Fallback: simpler regex
+    if (results.length === 0) {
+      const linkMatches = html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g);
+      for (const m of linkMatches) {
+        if (results.length >= maxResults) break;
+        let url = m[1];
+        const uddgMatch = url.match(/uddg=([^&]+)/);
+        if (uddgMatch) url = decodeURIComponent(uddgMatch[1]);
+        const title = htmlToText(m[2]).trim();
+        if (url && title) results.push({ title, url, snippet: "" });
+      }
+    }
+
+    return results;
+  }
+
+  // ── Public methods ─────────────────────────────────────────────────
+
+  /**
+   * Search the web. Uses Tavily if API key is configured, otherwise DuckDuckGo.
+   */
+  async searchWeb(
+    query: string,
+    maxResults = 5,
+    options: SearchOptions = {},
+  ): Promise<SearchResult[]> {
+    if (this.tavilyApiKey) {
+      try {
+        log.info(`Using Tavily: "${query}" (max ${maxResults})`);
+        return await this.searchTavily(query, maxResults, options);
+      } catch (err) {
+        log.warn("Tavily search failed, falling back to DuckDuckGo", err);
+        // Fall through to DuckDuckGo
+      }
+    }
+
+    log.info(`Using DuckDuckGo: "${query}" (max ${maxResults})`);
+    return this.searchDuckDuckGo(query, maxResults);
+  }
+
+  /**
+   * Fetch and extract text content from a URL.
+   * Used for reading pages that weren't covered by search rawContent.
+   */
+  async fetchPage(url: string, maxChars = 3000): Promise<string> {
+    try {
+      const html = await httpGet(url);
+      let text = htmlToText(html);
+      if (text.length > maxChars) text = text.slice(0, maxChars);
+      return text;
+    } catch (err) {
+      log.warn(`failed to fetch page: ${url}`, err);
+      return "";
+    }
+  }
 }
 
-// ── Public API ───────────────────────────────────────────────────────
+// ── Backward-compat singleton ────────────────────────────────────────
 
-/**
- * Search the web. Uses Tavily if API key is configured, otherwise DuckDuckGo.
- */
+let _singleton: SearchEngine | null = null;
+
+export function initSearch(config: AppConfig): SearchEngine {
+  _singleton = new SearchEngine(config);
+  return _singleton;
+}
+
 export async function searchWeb(
   query: string,
   maxResults = 5,
   options: SearchOptions = {},
 ): Promise<SearchResult[]> {
-  if (tavilyApiKey) {
-    try {
-      log.info(`Using Tavily: "${query}" (max ${maxResults})`);
-      return await searchTavily(query, maxResults, options);
-    } catch (err) {
-      log.warn("Tavily search failed, falling back to DuckDuckGo", err);
-      // Fall through to DuckDuckGo
-    }
-  }
-
-  log.info(`Using DuckDuckGo: "${query}" (max ${maxResults})`);
-  return searchDuckDuckGo(query, maxResults);
+  if (!_singleton) throw new Error("SearchEngine not initialized — call initSearch first");
+  return _singleton.searchWeb(query, maxResults, options);
 }
 
-/**
- * Fetch and extract text content from a URL.
- * Used for reading pages that weren't covered by search rawContent.
- */
 export async function fetchPage(url: string, maxChars = 3000): Promise<string> {
-  try {
-    const html = await httpGet(url);
-    let text = htmlToText(html);
-    if (text.length > maxChars) text = text.slice(0, maxChars);
-    return text;
-  } catch (err) {
-    log.warn(`failed to fetch page: ${url}`, err);
-    return "";
-  }
+  if (!_singleton) throw new Error("SearchEngine not initialized — call initSearch first");
+  return _singleton.fetchPage(url, maxChars);
 }

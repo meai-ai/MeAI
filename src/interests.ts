@@ -63,10 +63,11 @@ const FEEDS: FeedConfig[] = [
   { name: "MarketWatch", url: "https://feeds.content.dowjones.io/public/rss/mw_topstories", category: "finance" },
 ];
 
-// ── Cache ────────────────────────────────────────────────────────────
+// ── Cache TTLs ──────────────────────────────────────────────────────
 
-let contentCache: { items: ContentItem[]; fetchedAt: number } | null = null;
 const CONTENT_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+const YOUTUBE_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+const PODCAST_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
 // ── HTTP helper ──────────────────────────────────────────────────────
 
@@ -180,39 +181,6 @@ function extractInterestKeywords(statePath: string): string[] {
   }
 }
 
-// ── Content discovery ────────────────────────────────────────────────
-
-/**
- * Fetch fresh content from RSS feeds.
- * Returns a mix of tech and finance headlines the character would naturally encounter.
- */
-async function fetchContent(): Promise<ContentItem[]> {
-  if (contentCache && Date.now() - contentCache.fetchedAt < CONTENT_CACHE_TTL) {
-    return contentCache.items;
-  }
-
-  const allItems: ContentItem[] = [];
-
-  const promises = FEEDS.map(async (feed) => {
-    try {
-      const xml = await fetchUrl(feed.url);
-      return parseRSS(xml, feed.name).slice(0, 8);
-    } catch {
-      return [];
-    }
-  });
-
-  const results = await Promise.all(promises);
-  for (const items of results) {
-    allItems.push(...items);
-  }
-
-  contentCache = { items: allItems, fetchedAt: Date.now() };
-  console.log(`[interests] Fetched ${allItems.length} headlines from ${FEEDS.length} feeds`);
-
-  return allItems;
-}
-
 /**
  * Score content items by relevance to user interests.
  * Simple keyword matching — good enough for filtering headlines.
@@ -251,7 +219,6 @@ const LOCAL_FEEDS: FeedConfig[] = [
   { name: "Eater SF", url: "https://sf.eater.com/rss/index.xml", category: "food" },
 ];
 
-let localCache: { items: ContentItem[]; fetchedAt: number } | null = null;
 const LOCAL_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
 // ── Subscriptions (persistent, self-evolving) ───────────────────────
@@ -300,178 +267,443 @@ const SEED_PODCASTS: PodcastSub[] = [
   { name: "Acquired", url: "https://feeds.simplecast.com/JbGcrmMG", category: "tech", source: "seed", subscribedAt: 0 },
 ];
 
-// Module-level statePath — set by init()
-let _statePath = "";
+// ── Class ────────────────────────────────────────────────────────────
 
-/** Must be called once at startup so subscriptions know where to persist. */
-export function initInterests(statePath: string): void {
-  _statePath = statePath;
-}
+export class InterestsEngine {
+  private _statePath: string;
+  private contentCache: { items: ContentItem[]; fetchedAt: number } | null = null;
+  private localCache: { items: ContentItem[]; fetchedAt: number } | null = null;
+  private youtubeCache: { videos: YouTubeVideo[]; fetchedAt: number } | null = null;
+  private podcastCache: { episodes: PodcastEpisode[]; fetchedAt: number } | null = null;
 
-function getSubsPath(): string {
-  return path.join(_statePath, "subscriptions.json");
-}
-
-/**
- * Load subscriptions from disk, seeding defaults on first run.
- */
-export function loadSubscriptions(): Subscriptions {
-  const p = getSubsPath();
-  if (_statePath && fs.existsSync(p)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Subscriptions;
-      return { youtube: data.youtube ?? [], podcasts: data.podcasts ?? [] };
-    } catch { /* fall through to seed */ }
-  }
-  // First run — seed defaults
-  const subs: Subscriptions = {
-    youtube: [...SEED_YOUTUBE],
-    podcasts: [...SEED_PODCASTS],
-  };
-  saveSubscriptions(subs);
-  return subs;
-}
-
-function saveSubscriptions(subs: Subscriptions): void {
-  if (!_statePath) return;
-  fs.writeFileSync(getSubsPath(), JSON.stringify(subs, null, 2) + "\n");
-}
-
-/**
- * Subscribe to a new YouTube channel.
- * Returns false if already subscribed.
- */
-export function subscribeYouTube(
-  name: string,
-  channelId: string,
-  category: string,
-  reason: string,
-): boolean {
-  const subs = loadSubscriptions();
-  if (subs.youtube.some(s => s.channelId === channelId)) return false;
-
-  subs.youtube.push({
-    name,
-    channelId,
-    category,
-    source: "discovered",
-    subscribedAt: Date.now(),
-    reason,
-  });
-  saveSubscriptions(subs);
-  console.log(`[interests] 🎬 Subscribed to YouTube: ${name} (${reason})`);
-  return true;
-}
-
-/**
- * Subscribe to a new podcast.
- * Returns false if already subscribed.
- */
-export function subscribePodcast(
-  name: string,
-  feedUrl: string,
-  category: string,
-  reason: string,
-): boolean {
-  const subs = loadSubscriptions();
-  if (subs.podcasts.some(s => s.url === feedUrl)) return false;
-
-  subs.podcasts.push({
-    name,
-    url: feedUrl,
-    category,
-    source: "discovered",
-    subscribedAt: Date.now(),
-    reason,
-  });
-  saveSubscriptions(subs);
-  console.log(`[interests] 🎙️ Subscribed to podcast: ${name} (${reason})`);
-  return true;
-}
-
-/**
- * Unsubscribe from a YouTube channel by channelId.
- */
-export function unsubscribeYouTube(channelId: string): boolean {
-  const subs = loadSubscriptions();
-  const before = subs.youtube.length;
-  subs.youtube = subs.youtube.filter(s => s.channelId !== channelId);
-  if (subs.youtube.length < before) {
-    saveSubscriptions(subs);
-    console.log(`[interests] Unsubscribed from YouTube channel: ${channelId}`);
-    return true;
-  }
-  return false;
-}
-
-/**
- * Unsubscribe from a podcast by feed URL.
- */
-export function unsubscribePodcast(feedUrl: string): boolean {
-  const subs = loadSubscriptions();
-  const before = subs.podcasts.length;
-  subs.podcasts = subs.podcasts.filter(s => s.url !== feedUrl);
-  if (subs.podcasts.length < before) {
-    saveSubscriptions(subs);
-    console.log(`[interests] Unsubscribed from podcast: ${feedUrl}`);
-    return true;
-  }
-  return false;
-}
-
-/**
- * Get a human-readable summary of current subscriptions.
- */
-export function getSubscriptionSummary(): string {
-  const subs = loadSubscriptions();
-  const discoveredTag = s().notifications.discovered_tag;
-  const ytLines = subs.youtube.map(sub => {
-    const tag = sub.source === "discovered" ? ` ${discoveredTag}` : "";
-    return `  YouTube: ${sub.name}${tag}`;
-  });
-  const podLines = subs.podcasts.map(sub => {
-    const tag = sub.source === "discovered" ? ` ${discoveredTag}` : "";
-    return `  Podcast: ${sub.name}${tag}`;
-  });
-  return [...ytLines, ...podLines].join("\n");
-}
-
-let youtubeCache: { videos: YouTubeVideo[]; fetchedAt: number } | null = null;
-const YOUTUBE_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
-
-let podcastCache: { episodes: PodcastEpisode[]; fetchedAt: number } | null = null;
-const PODCAST_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
-
-/**
- * Fetch SF local events and happenings.
- * Used for grounding the character's weekend/after-work activities in reality.
- */
-export async function fetchLocalEvents(): Promise<string> {
-  if (localCache && Date.now() - localCache.fetchedAt < LOCAL_CACHE_TTL) {
-    return formatLocalEvents(localCache.items);
+  constructor(statePath: string) {
+    this._statePath = statePath;
   }
 
-  const allItems: ContentItem[] = [];
+  private getSubsPath(): string {
+    return path.join(this._statePath, "subscriptions.json");
+  }
 
-  const promises = LOCAL_FEEDS.map(async (feed) => {
-    try {
-      const xml = await fetchUrl(feed.url);
-      return parseRSS(xml, feed.name).slice(0, 5);
-    } catch {
-      return [];
+  /**
+   * Load subscriptions from disk, seeding defaults on first run.
+   */
+  loadSubscriptions(): Subscriptions {
+    const p = this.getSubsPath();
+    if (this._statePath && fs.existsSync(p)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Subscriptions;
+        return { youtube: data.youtube ?? [], podcasts: data.podcasts ?? [] };
+      } catch { /* fall through to seed */ }
     }
-  });
-
-  const results = await Promise.all(promises);
-  for (const items of results) {
-    allItems.push(...items);
+    // First run — seed defaults
+    const subs: Subscriptions = {
+      youtube: [...SEED_YOUTUBE],
+      podcasts: [...SEED_PODCASTS],
+    };
+    this.saveSubscriptions(subs);
+    return subs;
   }
 
-  localCache = { items: allItems, fetchedAt: Date.now() };
-  console.log(`[interests] Fetched ${allItems.length} local SF items`);
+  private saveSubscriptions(subs: Subscriptions): void {
+    if (!this._statePath) return;
+    fs.writeFileSync(this.getSubsPath(), JSON.stringify(subs, null, 2) + "\n");
+  }
 
-  return formatLocalEvents(allItems);
+  /**
+   * Subscribe to a new YouTube channel.
+   * Returns false if already subscribed.
+   */
+  subscribeYouTube(
+    name: string,
+    channelId: string,
+    category: string,
+    reason: string,
+  ): boolean {
+    const subs = this.loadSubscriptions();
+    if (subs.youtube.some(s => s.channelId === channelId)) return false;
+
+    subs.youtube.push({
+      name,
+      channelId,
+      category,
+      source: "discovered",
+      subscribedAt: Date.now(),
+      reason,
+    });
+    this.saveSubscriptions(subs);
+    console.log(`[interests] 🎬 Subscribed to YouTube: ${name} (${reason})`);
+    return true;
+  }
+
+  /**
+   * Subscribe to a new podcast.
+   * Returns false if already subscribed.
+   */
+  subscribePodcast(
+    name: string,
+    feedUrl: string,
+    category: string,
+    reason: string,
+  ): boolean {
+    const subs = this.loadSubscriptions();
+    if (subs.podcasts.some(s => s.url === feedUrl)) return false;
+
+    subs.podcasts.push({
+      name,
+      url: feedUrl,
+      category,
+      source: "discovered",
+      subscribedAt: Date.now(),
+      reason,
+    });
+    this.saveSubscriptions(subs);
+    console.log(`[interests] 🎙️ Subscribed to podcast: ${name} (${reason})`);
+    return true;
+  }
+
+  /**
+   * Unsubscribe from a YouTube channel by channelId.
+   */
+  unsubscribeYouTube(channelId: string): boolean {
+    const subs = this.loadSubscriptions();
+    const before = subs.youtube.length;
+    subs.youtube = subs.youtube.filter(s => s.channelId !== channelId);
+    if (subs.youtube.length < before) {
+      this.saveSubscriptions(subs);
+      console.log(`[interests] Unsubscribed from YouTube channel: ${channelId}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Unsubscribe from a podcast by feed URL.
+   */
+  unsubscribePodcast(feedUrl: string): boolean {
+    const subs = this.loadSubscriptions();
+    const before = subs.podcasts.length;
+    subs.podcasts = subs.podcasts.filter(s => s.url !== feedUrl);
+    if (subs.podcasts.length < before) {
+      this.saveSubscriptions(subs);
+      console.log(`[interests] Unsubscribed from podcast: ${feedUrl}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get a human-readable summary of current subscriptions.
+   */
+  getSubscriptionSummary(): string {
+    const subs = this.loadSubscriptions();
+    const discoveredTag = s().notifications.discovered_tag;
+    const ytLines = subs.youtube.map(sub => {
+      const tag = sub.source === "discovered" ? ` ${discoveredTag}` : "";
+      return `  YouTube: ${sub.name}${tag}`;
+    });
+    const podLines = subs.podcasts.map(sub => {
+      const tag = sub.source === "discovered" ? ` ${discoveredTag}` : "";
+      return `  Podcast: ${sub.name}${tag}`;
+    });
+    return [...ytLines, ...podLines].join("\n");
+  }
+
+  /**
+   * Fetch SF local events and happenings.
+   * Used for grounding the character's weekend/after-work activities in reality.
+   */
+  async fetchLocalEvents(): Promise<string> {
+    if (this.localCache && Date.now() - this.localCache.fetchedAt < LOCAL_CACHE_TTL) {
+      return formatLocalEvents(this.localCache.items);
+    }
+
+    const allItems: ContentItem[] = [];
+
+    const promises = LOCAL_FEEDS.map(async (feed) => {
+      try {
+        const xml = await fetchUrl(feed.url);
+        return parseRSS(xml, feed.name).slice(0, 5);
+      } catch {
+        return [];
+      }
+    });
+
+    const results = await Promise.all(promises);
+    for (const items of results) {
+      allItems.push(...items);
+    }
+
+    this.localCache = { items: allItems, fetchedAt: Date.now() };
+    console.log(`[interests] Fetched ${allItems.length} local SF items`);
+
+    return formatLocalEvents(allItems);
+  }
+
+  /**
+   * Fetch fresh content from RSS feeds.
+   * Returns a mix of tech and finance headlines the character would naturally encounter.
+   */
+  private async fetchContent(): Promise<ContentItem[]> {
+    if (this.contentCache && Date.now() - this.contentCache.fetchedAt < CONTENT_CACHE_TTL) {
+      return this.contentCache.items;
+    }
+
+    const allItems: ContentItem[] = [];
+
+    const promises = FEEDS.map(async (feed) => {
+      try {
+        const xml = await fetchUrl(feed.url);
+        return parseRSS(xml, feed.name).slice(0, 8);
+      } catch {
+        return [];
+      }
+    });
+
+    const results = await Promise.all(promises);
+    for (const items of results) {
+      allItems.push(...items);
+    }
+
+    this.contentCache = { items: allItems, fetchedAt: Date.now() };
+    console.log(`[interests] Fetched ${allItems.length} headlines from ${FEEDS.length} feeds`);
+
+    return allItems;
+  }
+
+  /**
+   * Fetch recent YouTube videos from subscribed channels.
+   * Reads from subscriptions.json — she can discover + add new channels over time.
+   */
+  async fetchYouTubeVideos(): Promise<YouTubeVideo[]> {
+    if (this.youtubeCache && Date.now() - this.youtubeCache.fetchedAt < YOUTUBE_CACHE_TTL) {
+      return this.youtubeCache.videos;
+    }
+
+    const subs = this.loadSubscriptions();
+    const channels = subs.youtube;
+    const allVideos: YouTubeVideo[] = [];
+
+    const promises = channels.map(async (ch) => {
+      try {
+        const xml = await fetchUrl(
+          `https://www.youtube.com/feeds/videos.xml?channel_id=${ch.channelId}`,
+        );
+        return parseAtomFeed(xml, ch.name).slice(0, 3); // latest 3 per channel
+      } catch {
+        return [];
+      }
+    });
+
+    const results = await Promise.all(promises);
+    for (const videos of results) {
+      allVideos.push(...videos);
+    }
+
+    // Sort by published date (most recent first)
+    allVideos.sort((a, b) => {
+      const ta = a.published ? new Date(a.published).getTime() : 0;
+      const tb = b.published ? new Date(b.published).getTime() : 0;
+      return tb - ta;
+    });
+
+    this.youtubeCache = { videos: allVideos, fetchedAt: Date.now() };
+    console.log(`[interests] Fetched ${allVideos.length} YouTube videos from ${channels.length} subscribed channels`);
+
+    return allVideos;
+  }
+
+  /**
+   * Format YouTube videos for context injection.
+   * Returns the most recent videos with relevance scoring.
+   */
+  async discoverYouTube(statePath: string): Promise<string> {
+    try {
+      const interests = extractInterestKeywords(statePath);
+      const videos = await this.fetchYouTubeVideos();
+      if (videos.length === 0) return "";
+
+      // Score by interest relevance
+      const lowerInterests = interests.map(k => k.toLowerCase());
+      const scored = videos.map(v => {
+        const text = `${v.title} ${v.description} ${v.channel}`.toLowerCase();
+        let score = 0;
+        for (const interest of lowerInterests) {
+          if (text.includes(interest)) score++;
+        }
+        return { video: v, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+
+      // Top 5 relevant + 2 random for serendipity
+      const relevant = scored.filter(s => s.score > 0).slice(0, 5).map(s => s.video);
+      const random = scored
+        .filter(s => s.score === 0)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 2)
+        .map(s => s.video);
+
+      const selected = [...relevant, ...random].slice(0, 6);
+      if (selected.length === 0) return "";
+
+      return selected
+        .map(v => `[YouTube/${v.channel}] ${v.title}${v.description ? ` — ${v.description.slice(0, 80)}` : ""}`)
+        .join("\n");
+    } catch (err) {
+      console.error("[interests] YouTube discovery error:", err);
+      return "";
+    }
+  }
+
+  /**
+   * Fetch recent podcast episodes from subscribed shows.
+   * Reads from subscriptions.json — she can discover + add new podcasts over time.
+   */
+  async fetchPodcastEpisodes(): Promise<PodcastEpisode[]> {
+    if (this.podcastCache && Date.now() - this.podcastCache.fetchedAt < PODCAST_CACHE_TTL) {
+      return this.podcastCache.episodes;
+    }
+
+    const subs = this.loadSubscriptions();
+    const feeds = subs.podcasts;
+    const allEpisodes: PodcastEpisode[] = [];
+
+    const promises = feeds.map(async (feed) => {
+      try {
+        const xml = await fetchUrl(feed.url);
+        return parsePodcastFeed(xml, feed.name).slice(0, 3); // latest 3 per show
+      } catch {
+        return [];
+      }
+    });
+
+    const results = await Promise.all(promises);
+    for (const episodes of results) {
+      allEpisodes.push(...episodes);
+    }
+
+    // Sort by published date (most recent first)
+    allEpisodes.sort((a, b) => {
+      const ta = a.published ? new Date(a.published).getTime() : 0;
+      const tb = b.published ? new Date(b.published).getTime() : 0;
+      return tb - ta;
+    });
+
+    this.podcastCache = { episodes: allEpisodes, fetchedAt: Date.now() };
+    console.log(`[interests] Fetched ${allEpisodes.length} podcast episodes from ${feeds.length} subscribed shows`);
+
+    return allEpisodes;
+  }
+
+  /**
+   * Format podcast episodes for context injection.
+   * Returns recent episodes scored by relevance to user interests.
+   */
+  async discoverPodcasts(statePath: string): Promise<string> {
+    try {
+      const interests = extractInterestKeywords(statePath);
+      const episodes = await this.fetchPodcastEpisodes();
+      if (episodes.length === 0) return "";
+
+      // Score by interest relevance
+      const lowerInterests = interests.map(k => k.toLowerCase());
+      const scored = episodes.map(ep => {
+        const text = `${ep.title} ${ep.description} ${ep.show}`.toLowerCase();
+        let score = 0;
+        for (const interest of lowerInterests) {
+          if (text.includes(interest)) score++;
+        }
+        return { episode: ep, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+
+      // Top 4 relevant + 1 random
+      const relevant = scored.filter(s => s.score > 0).slice(0, 4).map(s => s.episode);
+      const random = scored
+        .filter(s => s.score === 0)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 1)
+        .map(s => s.episode);
+
+      const selected = [...relevant, ...random].slice(0, 5);
+      if (selected.length === 0) return "";
+
+      return selected
+        .map(ep => {
+          const dur = ep.duration ? ` (${ep.duration})` : "";
+          return `[Podcast/${ep.show}]${dur} ${ep.title}${ep.description ? ` — ${ep.description.slice(0, 80)}` : ""}`;
+        })
+        .join("\n");
+    } catch (err) {
+      console.error("[interests] Podcast discovery error:", err);
+      return "";
+    }
+  }
+
+  /**
+   * Discover content relevant to user interests.
+   * Returns formatted text ready for proactive context injection.
+   */
+  async discoverContent(statePath: string): Promise<string> {
+    try {
+      const interests = extractInterestKeywords(statePath);
+      const allContent = await this.fetchContent();
+      const curated = scoreByRelevance(allContent, interests);
+
+      if (curated.length === 0) return "";
+
+      const lines = curated.map(item =>
+        `[${item.source}] ${item.title}${item.description ? ` — ${item.description}` : ""}`
+      );
+
+      return lines.join("\n");
+    } catch (err) {
+      console.error("[interests] Content discovery error:", err);
+      return "";
+    }
+  }
+
+  /**
+   * Get a compact summary of user's tracked interests.
+   * Useful for the proactive prompt to know what the user cares about.
+   */
+  getInterestSummary(statePath: string): string {
+    const keywords = extractInterestKeywords(statePath);
+    if (keywords.length === 0) return "";
+    return keywords.slice(0, 15).join("\u3001");
+  }
 }
+
+// ── Backward-compat singleton ────────────────────────────────────────
+
+let _singleton: InterestsEngine | null = null;
+
+export function initInterests(statePath: string): InterestsEngine {
+  _singleton = new InterestsEngine(statePath);
+  return _singleton;
+}
+
+function _get(): InterestsEngine {
+  if (!_singleton) throw new Error("initInterests() not called");
+  return _singleton;
+}
+
+export function loadSubscriptions(): Subscriptions { return _get().loadSubscriptions(); }
+export function subscribeYouTube(name: string, channelId: string, category: string, reason: string): boolean { return _get().subscribeYouTube(name, channelId, category, reason); }
+export function subscribePodcast(name: string, feedUrl: string, category: string, reason: string): boolean { return _get().subscribePodcast(name, feedUrl, category, reason); }
+export function unsubscribeYouTube(channelId: string): boolean { return _get().unsubscribeYouTube(channelId); }
+export function unsubscribePodcast(feedUrl: string): boolean { return _get().unsubscribePodcast(feedUrl); }
+export function getSubscriptionSummary(): string { return _get().getSubscriptionSummary(); }
+export async function fetchLocalEvents(): Promise<string> { return _get().fetchLocalEvents(); }
+export async function fetchYouTubeVideos(): Promise<YouTubeVideo[]> { return _get().fetchYouTubeVideos(); }
+export async function discoverYouTube(statePath: string): Promise<string> { return _get().discoverYouTube(statePath); }
+export async function fetchPodcastEpisodes(): Promise<PodcastEpisode[]> { return _get().fetchPodcastEpisodes(); }
+export async function discoverPodcasts(statePath: string): Promise<string> { return _get().discoverPodcasts(statePath); }
+export async function discoverContent(statePath: string): Promise<string> { return _get().discoverContent(statePath); }
+export function getInterestSummary(statePath: string): string { return _get().getInterestSummary(statePath); }
+
+// ── Module-level helpers (no state dependency) ──────────────────────
 
 function formatLocalEvents(items: ContentItem[]): string {
   if (items.length === 0) return "";
@@ -510,91 +742,6 @@ function parseAtomFeed(xml: string, channelName: string): YouTubeVideo[] {
   }
 
   return videos;
-}
-
-/**
- * Fetch recent YouTube videos from subscribed channels.
- * Reads from subscriptions.json — she can discover + add new channels over time.
- */
-export async function fetchYouTubeVideos(): Promise<YouTubeVideo[]> {
-  if (youtubeCache && Date.now() - youtubeCache.fetchedAt < YOUTUBE_CACHE_TTL) {
-    return youtubeCache.videos;
-  }
-
-  const subs = loadSubscriptions();
-  const channels = subs.youtube;
-  const allVideos: YouTubeVideo[] = [];
-
-  const promises = channels.map(async (ch) => {
-    try {
-      const xml = await fetchUrl(
-        `https://www.youtube.com/feeds/videos.xml?channel_id=${ch.channelId}`,
-      );
-      return parseAtomFeed(xml, ch.name).slice(0, 3); // latest 3 per channel
-    } catch {
-      return [];
-    }
-  });
-
-  const results = await Promise.all(promises);
-  for (const videos of results) {
-    allVideos.push(...videos);
-  }
-
-  // Sort by published date (most recent first)
-  allVideos.sort((a, b) => {
-    const ta = a.published ? new Date(a.published).getTime() : 0;
-    const tb = b.published ? new Date(b.published).getTime() : 0;
-    return tb - ta;
-  });
-
-  youtubeCache = { videos: allVideos, fetchedAt: Date.now() };
-  console.log(`[interests] Fetched ${allVideos.length} YouTube videos from ${channels.length} subscribed channels`);
-
-  return allVideos;
-}
-
-/**
- * Format YouTube videos for context injection.
- * Returns the most recent videos with relevance scoring.
- */
-export async function discoverYouTube(statePath: string): Promise<string> {
-  try {
-    const interests = extractInterestKeywords(statePath);
-    const videos = await fetchYouTubeVideos();
-    if (videos.length === 0) return "";
-
-    // Score by interest relevance
-    const lowerInterests = interests.map(k => k.toLowerCase());
-    const scored = videos.map(v => {
-      const text = `${v.title} ${v.description} ${v.channel}`.toLowerCase();
-      let score = 0;
-      for (const interest of lowerInterests) {
-        if (text.includes(interest)) score++;
-      }
-      return { video: v, score };
-    });
-
-    scored.sort((a, b) => b.score - a.score);
-
-    // Top 5 relevant + 2 random for serendipity
-    const relevant = scored.filter(s => s.score > 0).slice(0, 5).map(s => s.video);
-    const random = scored
-      .filter(s => s.score === 0)
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 2)
-      .map(s => s.video);
-
-    const selected = [...relevant, ...random].slice(0, 6);
-    if (selected.length === 0) return "";
-
-    return selected
-      .map(v => `[YouTube/${v.channel}] ${v.title}${v.description ? ` — ${v.description.slice(0, 80)}` : ""}`)
-      .join("\n");
-  } catch (err) {
-    console.error("[interests] YouTube discovery error:", err);
-    return "";
-  }
 }
 
 // ── Podcast fetching (RSS + iTunes) ─────────────────────────────────
@@ -650,92 +797,6 @@ function formatDuration(raw: string): string {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   return h > 0 ? `${h}h${m}min` : `${m}min`;
-}
-
-/**
- * Fetch recent podcast episodes from subscribed shows.
- * Reads from subscriptions.json — she can discover + add new podcasts over time.
- */
-export async function fetchPodcastEpisodes(): Promise<PodcastEpisode[]> {
-  if (podcastCache && Date.now() - podcastCache.fetchedAt < PODCAST_CACHE_TTL) {
-    return podcastCache.episodes;
-  }
-
-  const subs = loadSubscriptions();
-  const feeds = subs.podcasts;
-  const allEpisodes: PodcastEpisode[] = [];
-
-  const promises = feeds.map(async (feed) => {
-    try {
-      const xml = await fetchUrl(feed.url);
-      return parsePodcastFeed(xml, feed.name).slice(0, 3); // latest 3 per show
-    } catch {
-      return [];
-    }
-  });
-
-  const results = await Promise.all(promises);
-  for (const episodes of results) {
-    allEpisodes.push(...episodes);
-  }
-
-  // Sort by published date (most recent first)
-  allEpisodes.sort((a, b) => {
-    const ta = a.published ? new Date(a.published).getTime() : 0;
-    const tb = b.published ? new Date(b.published).getTime() : 0;
-    return tb - ta;
-  });
-
-  podcastCache = { episodes: allEpisodes, fetchedAt: Date.now() };
-  console.log(`[interests] Fetched ${allEpisodes.length} podcast episodes from ${feeds.length} subscribed shows`);
-
-  return allEpisodes;
-}
-
-/**
- * Format podcast episodes for context injection.
- * Returns recent episodes scored by relevance to user interests.
- */
-export async function discoverPodcasts(statePath: string): Promise<string> {
-  try {
-    const interests = extractInterestKeywords(statePath);
-    const episodes = await fetchPodcastEpisodes();
-    if (episodes.length === 0) return "";
-
-    // Score by interest relevance
-    const lowerInterests = interests.map(k => k.toLowerCase());
-    const scored = episodes.map(ep => {
-      const text = `${ep.title} ${ep.description} ${ep.show}`.toLowerCase();
-      let score = 0;
-      for (const interest of lowerInterests) {
-        if (text.includes(interest)) score++;
-      }
-      return { episode: ep, score };
-    });
-
-    scored.sort((a, b) => b.score - a.score);
-
-    // Top 4 relevant + 1 random
-    const relevant = scored.filter(s => s.score > 0).slice(0, 4).map(s => s.episode);
-    const random = scored
-      .filter(s => s.score === 0)
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 1)
-      .map(s => s.episode);
-
-    const selected = [...relevant, ...random].slice(0, 5);
-    if (selected.length === 0) return "";
-
-    return selected
-      .map(ep => {
-        const dur = ep.duration ? ` (${ep.duration})` : "";
-        return `[Podcast/${ep.show}]${dur} ${ep.title}${ep.description ? ` — ${ep.description.slice(0, 80)}` : ""}`;
-      })
-      .join("\n");
-  } catch (err) {
-    console.error("[interests] Podcast discovery error:", err);
-    return "";
-  }
 }
 
 // ── YouTube Transcript Fetching ──────────────────────────────────────
@@ -904,37 +965,3 @@ export async function fetchPodcastTranscript(episodeUrl: string): Promise<string
   }
 }
 
-// ── Public API ───────────────────────────────────────────────────────
-
-/**
- * Discover content relevant to user interests.
- * Returns formatted text ready for proactive context injection.
- */
-export async function discoverContent(statePath: string): Promise<string> {
-  try {
-    const interests = extractInterestKeywords(statePath);
-    const allContent = await fetchContent();
-    const curated = scoreByRelevance(allContent, interests);
-
-    if (curated.length === 0) return "";
-
-    const lines = curated.map(item =>
-      `[${item.source}] ${item.title}${item.description ? ` — ${item.description}` : ""}`
-    );
-
-    return lines.join("\n");
-  } catch (err) {
-    console.error("[interests] Content discovery error:", err);
-    return "";
-  }
-}
-
-/**
- * Get a compact summary of user's tracked interests.
- * Useful for the proactive prompt to know what the user cares about.
- */
-export function getInterestSummary(statePath: string): string {
-  const keywords = extractInterestKeywords(statePath);
-  if (keywords.length === 0) return "";
-  return keywords.slice(0, 15).join("、");
-}

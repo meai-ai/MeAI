@@ -23,126 +23,155 @@ export interface ReinforcementState {
   lastBoredomReset: number;
 }
 
-let dataPath = "";
-
-export function initReinforcement(statePath: string): void {
-  dataPath = statePath;
-}
-
-function getStatePath(): string {
-  return path.join(dataPath, "reinforcement.json");
-}
-
-function loadState(): ReinforcementState {
-  return readJsonSafe<ReinforcementState>(getStatePath(), {
-    activities: {},
-    boredom: {},
-    lastBoredomReset: Date.now(),
-  });
-}
-
-function saveState(state: ReinforcementState): void {
-  if (!dataPath) return;
-  writeJsonAtomic(getStatePath(), state);
-}
-
 const EWMA_ALPHA = 0.3; // Smoothing factor — higher = more weight on recent
 
-/**
- * Record satisfaction after an activity.
- * @param activityType e.g. "explore", "post", "activity", "reach_out"
- * @param satisfaction 0-10 rating
- */
-export function recordSatisfaction(activityType: string, satisfaction: number): void {
-  const state = loadState();
-  const today = pstDateStr();
+// ── ReinforcementEngine class ────────────────────────────────────────
 
-  if (!state.activities[activityType]) {
-    state.activities[activityType] = {
-      ewmaSatisfaction: satisfaction,
-      count30d: 0,
-      lastDone: Date.now(),
-      streak: 0,
-      lastStreakDate: "",
-    };
+export class ReinforcementEngine {
+  private dataPath: string;
+
+  constructor(statePath: string) {
+    this.dataPath = statePath;
   }
 
-  const record = state.activities[activityType];
-
-  // Update EWMA
-  record.ewmaSatisfaction = EWMA_ALPHA * satisfaction + (1 - EWMA_ALPHA) * record.ewmaSatisfaction;
-  record.count30d++;
-  record.lastDone = Date.now();
-
-  // Update streak
-  if (record.lastStreakDate === today) {
-    // Already counted today
-  } else {
-    const yesterday = pstDateStr(new Date(Date.now() - 24 * 60 * 60 * 1000));
-    record.streak = record.lastStreakDate === yesterday ? record.streak + 1 : 1;
-    record.lastStreakDate = today;
+  private getStatePath(): string {
+    return path.join(this.dataPath, "reinforcement.json");
   }
 
-  // Update boredom tracking
-  state.boredom[activityType] = (state.boredom[activityType] ?? 0) + 1;
-
-  // Reset boredom counters every 24h
-  if (Date.now() - state.lastBoredomReset > 24 * 60 * 60 * 1000) {
-    state.boredom = {};
-    state.lastBoredomReset = Date.now();
+  private loadState(): ReinforcementState {
+    return readJsonSafe<ReinforcementState>(this.getStatePath(), {
+      activities: {},
+      boredom: {},
+      lastBoredomReset: Date.now(),
+    });
   }
 
-  saveState(state);
-}
-
-/**
- * Get activity selection bias based on satisfaction history.
- * Higher satisfaction + habit strength = higher weight.
- * Returns a Record<string, number> of relative weights.
- */
-export function getActivityBias(): Record<string, number> {
-  const state = loadState();
-  const bias: Record<string, number> = {};
-
-  for (const [type, record] of Object.entries(state.activities)) {
-    // Base weight from satisfaction (0-10 -> 0.5-1.5)
-    const satisfactionWeight = 0.5 + (record.ewmaSatisfaction / 10);
-    // Streak bonus (up to 0.3)
-    const streakBonus = Math.min(0.3, record.streak * 0.05);
-    // Boredom penalty (repetition in 24h)
-    const boredomCount = state.boredom[type] ?? 0;
-    const boredomPenalty = Math.min(0.5, boredomCount * 0.15);
-
-    bias[type] = Math.max(0.1, satisfactionWeight + streakBonus - boredomPenalty);
+  private saveState(state: ReinforcementState): void {
+    if (!this.dataPath) return;
+    writeJsonAtomic(this.getStatePath(), state);
   }
 
-  return bias;
-}
+  /**
+   * Record satisfaction after an activity.
+   * @param activityType e.g. "explore", "post", "activity", "reach_out"
+   * @param satisfaction 0-10 rating
+   */
+  recordSatisfaction(activityType: string, satisfaction: number): void {
+    const state = this.loadState();
+    const today = pstDateStr();
 
-/**
- * Get burnout risk (0-1) based on recent activity patterns.
- */
-export function getBurnoutRisk(): number {
-  const state = loadState();
-  let totalRecent = 0;
-
-  for (const record of Object.values(state.activities)) {
-    if (Date.now() - record.lastDone < 7 * 24 * 60 * 60 * 1000) {
-      totalRecent += record.count30d;
+    if (!state.activities[activityType]) {
+      state.activities[activityType] = {
+        ewmaSatisfaction: satisfaction,
+        count30d: 0,
+        lastDone: Date.now(),
+        streak: 0,
+        lastStreakDate: "",
+      };
     }
+
+    const record = state.activities[activityType];
+
+    // Update EWMA
+    record.ewmaSatisfaction = EWMA_ALPHA * satisfaction + (1 - EWMA_ALPHA) * record.ewmaSatisfaction;
+    record.count30d++;
+    record.lastDone = Date.now();
+
+    // Update streak
+    if (record.lastStreakDate === today) {
+      // Already counted today
+    } else {
+      const yesterday = pstDateStr(new Date(Date.now() - 24 * 60 * 60 * 1000));
+      record.streak = record.lastStreakDate === yesterday ? record.streak + 1 : 1;
+      record.lastStreakDate = today;
+    }
+
+    // Update boredom tracking
+    state.boredom[activityType] = (state.boredom[activityType] ?? 0) + 1;
+
+    // Reset boredom counters every 24h
+    if (Date.now() - state.lastBoredomReset > 24 * 60 * 60 * 1000) {
+      state.boredom = {};
+      state.lastBoredomReset = Date.now();
+    }
+
+    this.saveState(state);
   }
 
-  // High activity + declining satisfaction = burnout risk
-  if (totalRecent > 50) return Math.min(1, (totalRecent - 50) / 50);
-  return 0;
+  /**
+   * Get activity selection bias based on satisfaction history.
+   * Higher satisfaction + habit strength = higher weight.
+   * Returns a Record<string, number> of relative weights.
+   */
+  getActivityBias(): Record<string, number> {
+    const state = this.loadState();
+    const bias: Record<string, number> = {};
+
+    for (const [type, record] of Object.entries(state.activities)) {
+      // Base weight from satisfaction (0-10 -> 0.5-1.5)
+      const satisfactionWeight = 0.5 + (record.ewmaSatisfaction / 10);
+      // Streak bonus (up to 0.3)
+      const streakBonus = Math.min(0.3, record.streak * 0.05);
+      // Boredom penalty (repetition in 24h)
+      const boredomCount = state.boredom[type] ?? 0;
+      const boredomPenalty = Math.min(0.5, boredomCount * 0.15);
+
+      bias[type] = Math.max(0.1, satisfactionWeight + streakBonus - boredomPenalty);
+    }
+
+    return bias;
+  }
+
+  /**
+   * Get burnout risk (0-1) based on recent activity patterns.
+   */
+  getBurnoutRisk(): number {
+    const state = this.loadState();
+    let totalRecent = 0;
+
+    for (const record of Object.values(state.activities)) {
+      if (Date.now() - record.lastDone < 7 * 24 * 60 * 60 * 1000) {
+        totalRecent += record.count30d;
+      }
+    }
+
+    // High activity + declining satisfaction = burnout risk
+    if (totalRecent > 50) return Math.min(1, (totalRecent - 50) / 50);
+    return 0;
+  }
+
+  /**
+   * Get novelty score — how much the system craves new experiences.
+   * Higher when recent activities are repetitive.
+   */
+  getNoveltyScore(): number {
+    const state = this.loadState();
+    const totalBoredom = Object.values(state.boredom).reduce((sum, n) => sum + n, 0);
+    return Math.min(1, totalBoredom / 10);
+  }
 }
 
-/**
- * Get novelty score — how much the system craves new experiences.
- * Higher when recent activities are repetitive.
- */
+// ── Backward-compat singleton ────────────────────────────────────────
+
+let _singleton: ReinforcementEngine | null = null;
+
+export function initReinforcement(statePath: string): ReinforcementEngine {
+  _singleton = new ReinforcementEngine(statePath);
+  return _singleton;
+}
+
+export function recordSatisfaction(activityType: string, satisfaction: number): void {
+  _singleton!.recordSatisfaction(activityType, satisfaction);
+}
+
+export function getActivityBias(): Record<string, number> {
+  return _singleton!.getActivityBias();
+}
+
+export function getBurnoutRisk(): number {
+  return _singleton!.getBurnoutRisk();
+}
+
 export function getNoveltyScore(): number {
-  const state = loadState();
-  const totalBoredom = Object.values(state.boredom).reduce((sum, n) => sum + n, 0);
-  return Math.min(1, totalBoredom / 10);
+  return _singleton!.getNoveltyScore();
 }

@@ -26,71 +26,93 @@ interface DiaryState {
   entries: DiaryEntry[];
 }
 
-// ── Module State ─────────────────────────────────────────────────────
+// ── Class ────────────────────────────────────────────────────────────
 
-let dataPath = "";
+export class JournalEngine {
+  private dataPath: string;
 
-export function initJournal(statePath: string): void {
-  dataPath = statePath;
-}
-
-// ── Persistence ──────────────────────────────────────────────────────
-
-function getStatePath(): string {
-  return path.join(dataPath, "diary.json");
-}
-
-export function loadDiary(): DiaryState {
-  if (!dataPath) return { entries: [] };
-  return readJsonSafe<DiaryState>(getStatePath(), { entries: [] });
-}
-
-function saveDiary(state: DiaryState): void {
-  if (!dataPath) return;
-  // Keep last 30 entries (~1 month)
-  if (state.entries.length > 30) {
-    state.entries = state.entries.slice(-30);
+  constructor(statePath: string) {
+    this.dataPath = statePath;
   }
-  writeJsonAtomic(getStatePath(), state);
-}
 
-// ── Updates ──────────────────────────────────────────────────────────
+  // ── Persistence ──────────────────────────────────────────────────────
 
-/** Add a new diary entry (called from reflection in heartbeat). */
-export function addDiaryEntry(entry: DiaryEntry): void {
-  const state = loadDiary();
-  // Don't duplicate entries for the same date
-  const existing = state.entries.find(e => e.date === entry.date);
-  if (existing) {
-    Object.assign(existing, entry);
-  } else {
-    state.entries.push(entry);
+  private getStatePath(): string {
+    return path.join(this.dataPath, "diary.json");
   }
-  saveDiary(state);
+
+  loadDiary(): DiaryState {
+    if (!this.dataPath) return { entries: [] };
+    return readJsonSafe<DiaryState>(this.getStatePath(), { entries: [] });
+  }
+
+  private saveDiary(state: DiaryState): void {
+    if (!this.dataPath) return;
+    // Keep last 30 entries (~1 month)
+    if (state.entries.length > 30) {
+      state.entries = state.entries.slice(-30);
+    }
+    writeJsonAtomic(this.getStatePath(), state);
+  }
+
+  // ── Updates ──────────────────────────────────────────────────────────
+
+  /** Add a new diary entry (called from reflection in heartbeat). */
+  addDiaryEntry(entry: DiaryEntry): void {
+    const state = this.loadDiary();
+    // Don't duplicate entries for the same date
+    const existing = state.entries.find(e => e.date === entry.date);
+    if (existing) {
+      Object.assign(existing, entry);
+    } else {
+      state.entries.push(entry);
+    }
+    this.saveDiary(state);
+  }
+
+  /** Get recent entries for context injection (last 3). */
+  getRecentDiaryEntries(count = 3): DiaryEntry[] {
+    const state = this.loadDiary();
+    return state.entries.slice(-count);
+  }
+
+  // ── Formatting ───────────────────────────────────────────────────────
+
+  /** Format recent diary entries for system prompt. */
+  formatDiaryContext(): string {
+    const entries = this.getRecentDiaryEntries(3);
+    if (entries.length === 0) return "";
+
+    const formatted = entries.map(e => {
+      return `[${e.date}] ${e.content}`;
+    }).join("\n\n");
+
+    return `${s().headers.my_diary}:\n${formatted}`;
+  }
+
+  /** Get past entry dates for LLM to reference when writing new entries. */
+  getPastEntryDates(): string[] {
+    const state = this.loadDiary();
+    return state.entries.map(e => e.date);
+  }
 }
 
-/** Get recent entries for context injection (last 3). */
-export function getRecentDiaryEntries(count = 3): DiaryEntry[] {
-  const state = loadDiary();
-  return state.entries.slice(-count);
+// ── Backward-compat singleton ────────────────────────────────────────
+
+let _singleton: JournalEngine | null = null;
+
+export function initJournal(statePath: string): JournalEngine {
+  _singleton = new JournalEngine(statePath);
+  return _singleton;
 }
 
-// ── Formatting ───────────────────────────────────────────────────────
-
-/** Format recent diary entries for system prompt. */
-export function formatDiaryContext(): string {
-  const entries = getRecentDiaryEntries(3);
-  if (entries.length === 0) return "";
-
-  const formatted = entries.map(e => {
-    return `[${e.date}] ${e.content}`;
-  }).join("\n\n");
-
-  return `${s().headers.my_diary}:\n${formatted}`;
+function _get(): JournalEngine {
+  if (!_singleton) throw new Error("initJournal() not called");
+  return _singleton;
 }
 
-/** Get past entry dates for LLM to reference when writing new entries. */
-export function getPastEntryDates(): string[] {
-  const state = loadDiary();
-  return state.entries.map(e => e.date);
-}
+export function loadDiary(): DiaryState { return _get().loadDiary(); }
+export function addDiaryEntry(entry: DiaryEntry): void { _get().addDiaryEntry(entry); }
+export function getRecentDiaryEntries(count = 3): DiaryEntry[] { return _get().getRecentDiaryEntries(count); }
+export function formatDiaryContext(): string { return _get().formatDiaryContext(); }
+export function getPastEntryDates(): string[] { return _get().getPastEntryDates(); }

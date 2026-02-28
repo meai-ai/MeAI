@@ -565,71 +565,137 @@ const CharacterSchema = z.object({
 export type CharacterProfile = z.infer<typeof CharacterSchema>;
 export type CharacterStrings = z.infer<typeof StringsSchema>;
 
-// ── Singleton ────────────────────────────────────────────────────
+// ── CharacterEngine class ────────────────────────────────────────
 
-let character: CharacterProfile | null = null;
+export class CharacterEngine {
+  private character: CharacterProfile | null = null;
+  private statePath: string;
 
-/**
- * Load and validate character.yaml from the data directory.
- * Called once at startup from index.ts.
- */
-export function initCharacter(statePath: string): void {
-  const yamlPath = path.join(statePath, "character.yaml");
+  constructor(statePath: string) {
+    this.statePath = statePath;
+  }
 
-  if (!fs.existsSync(yamlPath)) {
-    // Try to copy from example
-    const examplePath = path.join(statePath, "character.example.yaml");
-    if (fs.existsSync(examplePath)) {
-      fs.copyFileSync(examplePath, yamlPath);
-      log.info("copied character.example.yaml → character.yaml");
-    } else {
-      log.warn("character.yaml not found — using minimal defaults");
-      character = CharacterSchema.parse({
-        name: "MeAI",
-        user: { name: "User" },
-        location: {
+  /**
+   * Load and validate character.yaml from the data directory.
+   */
+  init(): void {
+    const yamlPath = path.join(this.statePath, "character.yaml");
+
+    if (!fs.existsSync(yamlPath)) {
+      // Try to copy from example
+      const examplePath = path.join(this.statePath, "character.example.yaml");
+      if (fs.existsSync(examplePath)) {
+        fs.copyFileSync(examplePath, yamlPath);
+        log.info("copied character.example.yaml → character.yaml");
+      } else {
+        log.warn("character.yaml not found — using minimal defaults");
+        this.character = CharacterSchema.parse({
+          name: "MeAI",
+          user: { name: "User" },
+          location: {
+            city: "",
+            coordinates: { latitude: 40.7128, longitude: -74.0060 },
+          },
+        });
+        return;
+      }
+    }
+
+    const raw = fs.readFileSync(yamlPath, "utf-8");
+    const parsed = parseYaml(raw);
+
+    const result = CharacterSchema.safeParse(parsed);
+    if (!result.success) {
+      log.error("character.yaml validation errors:");
+      for (const issue of result.error.issues) {
+        log.error(`  ${issue.path.join(".")}: ${issue.message}`);
+      }
+      // Fall back to what we can parse
+      this.character = CharacterSchema.parse({
+        name: (parsed as any).name || "MeAI",
+        user: (parsed as any).user || { name: "User" },
+        timezone: (parsed as any).timezone || "America/Los_Angeles",
+        location: (parsed as any).location || {
           city: "",
           coordinates: { latitude: 40.7128, longitude: -74.0060 },
         },
       });
       return;
     }
+
+    this.character = result.data;
+    log.info(`character loaded: ${this.character.name} (${this.character.location.city})`);
   }
 
-  const raw = fs.readFileSync(yamlPath, "utf-8");
-  const parsed = parseYaml(raw);
-
-  const result = CharacterSchema.safeParse(parsed);
-  if (!result.success) {
-    log.error("character.yaml validation errors:");
-    for (const issue of result.error.issues) {
-      log.error(`  ${issue.path.join(".")}: ${issue.message}`);
+  /**
+   * Get the loaded character profile. Must call init() first.
+   */
+  getProfile(): CharacterProfile {
+    if (!this.character) {
+      throw new Error("Character not initialized");
     }
-    // Fall back to what we can parse
-    character = CharacterSchema.parse({
-      name: (parsed as any).name || "MeAI",
-      user: (parsed as any).user || { name: "User" },
-      timezone: (parsed as any).timezone || "America/Los_Angeles",
-      location: (parsed as any).location || {
-        city: "",
-        coordinates: { latitude: 40.7128, longitude: -74.0060 },
-      },
-    });
-    return;
+    return this.character;
   }
 
-  character = result.data;
-  log.info(`character loaded: ${character.name} (${character.location.city})`);
+  /**
+   * Get the strings object from the character profile.
+   * Shortcut for getProfile().strings.
+   */
+  getStrings(): CharacterStrings {
+    return this.getProfile().strings;
+  }
+
+  /**
+   * Simple template substitution for persona prompts and string templates.
+   * Replaces {character.name}, {user.name}, {pet.name}, {location.city} etc.
+   * Also supports ad-hoc variables via the `vars` parameter.
+   */
+  renderTemplate(template: string, char?: CharacterProfile, vars?: Record<string, string>): string {
+    const c = char ?? this.getProfile();
+    let result = template
+      .replace(/\{character\.name\}/g, c.name)
+      .replace(/\{character\.nickname\}/g, c.nickname ?? c.name)
+      .replace(/\{character\.english_name\}/g, c.english_name ?? c.name)
+      .replace(/\{character\.age\}/g, String(c.age ?? ""))
+      .replace(/\{user\.name\}/g, c.user.name)
+      .replace(/\{user\.location\}/g, c.user.location ?? "")
+      .replace(/\{user\.work\}/g, c.user.work ?? "")
+      .replace(/\{pet\.name\}/g, c.pet?.name ?? "")
+      .replace(/\{pet\.type\}/g, c.pet?.type ?? "")
+      .replace(/\{location\.city\}/g, c.location.city)
+      .replace(/\{location\.city_english\}/g, c.location.city_english ?? c.location.city)
+      .replace(/\{work\.title\}/g, c.work?.title ?? "")
+      .replace(/\{work\.company_type\}/g, c.work?.company_type ?? "");
+    if (vars) {
+      for (const [key, value] of Object.entries(vars)) {
+        result = result.replace(new RegExp(`\\{${key}\\}`, "g"), value);
+      }
+    }
+    return result;
+  }
+}
+
+// ── Backward-compat singleton ────────────────────────────────────
+
+let _singleton: CharacterEngine | null = null;
+
+/**
+ * Load and validate character.yaml from the data directory.
+ * Called once at startup from index.ts.
+ */
+export function initCharacter(statePath: string): void {
+  _singleton = new CharacterEngine(statePath);
+  _singleton.init();
 }
 
 /**
  * Get the loaded character profile. Must call initCharacter() first.
  */
 export function getCharacter(): CharacterProfile {
-  if (!character) {
+  if (!_singleton) {
     throw new Error("Character not initialized — call initCharacter() first");
   }
-  return character;
+  return _singleton.getProfile();
 }
 
 /**
@@ -649,25 +715,8 @@ export const s = getStrings;
  * Also supports ad-hoc variables via the `vars` parameter.
  */
 export function renderTemplate(template: string, char?: CharacterProfile, vars?: Record<string, string>): string {
-  const c = char ?? getCharacter();
-  let result = template
-    .replace(/\{character\.name\}/g, c.name)
-    .replace(/\{character\.nickname\}/g, c.nickname ?? c.name)
-    .replace(/\{character\.english_name\}/g, c.english_name ?? c.name)
-    .replace(/\{character\.age\}/g, String(c.age ?? ""))
-    .replace(/\{user\.name\}/g, c.user.name)
-    .replace(/\{user\.location\}/g, c.user.location ?? "")
-    .replace(/\{user\.work\}/g, c.user.work ?? "")
-    .replace(/\{pet\.name\}/g, c.pet?.name ?? "")
-    .replace(/\{pet\.type\}/g, c.pet?.type ?? "")
-    .replace(/\{location\.city\}/g, c.location.city)
-    .replace(/\{location\.city_english\}/g, c.location.city_english ?? c.location.city)
-    .replace(/\{work\.title\}/g, c.work?.title ?? "")
-    .replace(/\{work\.company_type\}/g, c.work?.company_type ?? "");
-  if (vars) {
-    for (const [key, value] of Object.entries(vars)) {
-      result = result.replace(new RegExp(`\\{${key}\\}`, "g"), value);
-    }
+  if (!_singleton) {
+    throw new Error("Character not initialized — call initCharacter() first");
   }
-  return result;
+  return _singleton.renderTemplate(template, char, vars);
 }

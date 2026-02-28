@@ -35,103 +35,122 @@ export interface TimelineEvent {
   source: "schedule" | "narration" | "conversation";
 }
 
-// ── Module state ─────────────────────────────────────────────────────
+// ── TimelineEngine class ─────────────────────────────────────────────
 
-let timelineDir = "";
+export class TimelineEngine {
+  private timelineDir: string;
+  private queue = Promise.resolve();
 
-export function initTimeline(statePath: string): void {
-  timelineDir = path.join(statePath, "timeline");
-  fs.mkdirSync(timelineDir, { recursive: true });
-  log.info("timeline initialized");
-}
-
-// ── Sequential queue ─────────────────────────────────────────────────
-
-let queue = Promise.resolve();
-
-/**
- * Enqueue a timeline job to ensure sequential execution.
- * All LLM calls that read/write the timeline go through this.
- */
-export function enqueueTimelineJob<T>(fn: () => Promise<T>): Promise<T> {
-  const job = queue.then(fn, fn); // run even if previous failed
-  queue = job.then(() => {}, () => {}); // swallow for chain continuity
-  return job;
-}
-
-// ── File helpers ─────────────────────────────────────────────────────
-
-function todayKey(): string {
-  return pstDateStr();
-}
-
-function timelinePath(dateKey?: string): string {
-  return path.join(timelineDir, `${dateKey ?? todayKey()}.json`);
-}
-
-// ── Public API ───────────────────────────────────────────────────────
-
-/** Load today's timeline events. */
-export function getTodayTimeline(): TimelineEvent[] {
-  if (!timelineDir) return [];
-  return readJsonSafe<TimelineEvent[]>(timelinePath(), []);
-}
-
-/** Append an event, deduplicating by time+category. */
-export function addTimelineEvent(event: TimelineEvent): void {
-  if (!timelineDir) {
-    log.warn("addTimelineEvent called before initTimeline — event dropped:", event.category, event.summary?.slice(0, 40));
-    return;
+  constructor(statePath: string) {
+    this.timelineDir = path.join(statePath, "timeline");
+    fs.mkdirSync(this.timelineDir, { recursive: true });
+    log.info("timeline initialized");
   }
-  const filePath = timelinePath();
-  const events = readJsonSafe<TimelineEvent[]>(filePath, []);
 
-  // Dedup: if same category in the same hour, replace (higher-priority source wins)
-  const eventHour = parseInt(event.time.split(":")[0], 10);
-  const existing = events.findIndex(e => {
-    const eHour = parseInt(e.time.split(":")[0], 10);
-    return e.category === event.category && eHour === eventHour;
-  });
+  /** Enqueue a timeline job to ensure sequential execution. */
+  enqueueTimelineJob<T>(fn: () => Promise<T>): Promise<T> {
+    const job = this.queue.then(fn, fn);
+    this.queue = job.then(() => {}, () => {});
+    return job;
+  }
 
-  if (existing >= 0) {
-    // Conversation overrides narration; narration overrides schedule
-    const SOURCE_PRIORITY: Record<string, number> = { schedule: 0, narration: 1, conversation: 2 };
-    const existingPriority = SOURCE_PRIORITY[events[existing].source] ?? 0;
-    const newPriority = SOURCE_PRIORITY[event.source] ?? 0;
-    if (newPriority >= existingPriority) {
-      events[existing] = event;
-      log.info(`timeline: replaced ${event.category} at ${event.time} (source: ${event.source})`);
-    } else {
-      log.info(`timeline: skipped lower-priority ${event.source} for ${event.category} (existing: ${events[existing].source})`);
+  private todayKey(): string {
+    return pstDateStr();
+  }
+
+  private timelinePath(dateKey?: string): string {
+    return path.join(this.timelineDir, `${dateKey ?? this.todayKey()}.json`);
+  }
+
+  /** Load today's timeline events. */
+  getTodayTimeline(): TimelineEvent[] {
+    if (!this.timelineDir) return [];
+    return readJsonSafe<TimelineEvent[]>(this.timelinePath(), []);
+  }
+
+  /** Append an event, deduplicating by time+category. */
+  addTimelineEvent(event: TimelineEvent): void {
+    if (!this.timelineDir) {
+      log.warn("addTimelineEvent called before init — event dropped:", event.category, event.summary?.slice(0, 40));
       return;
     }
-  } else {
-    events.push(event);
-    log.info(`timeline: added ${event.category} at ${event.time} (source: ${event.source})`);
+    const filePath = this.timelinePath();
+    const events = readJsonSafe<TimelineEvent[]>(filePath, []);
+
+    const eventHour = parseInt(event.time.split(":")[0], 10);
+    const existing = events.findIndex(e => {
+      const eHour = parseInt(e.time.split(":")[0], 10);
+      return e.category === event.category && eHour === eventHour;
+    });
+
+    if (existing >= 0) {
+      const SOURCE_PRIORITY: Record<string, number> = { schedule: 0, narration: 1, conversation: 2 };
+      const existingPriority = SOURCE_PRIORITY[events[existing].source] ?? 0;
+      const newPriority = SOURCE_PRIORITY[event.source] ?? 0;
+      if (newPriority >= existingPriority) {
+        events[existing] = event;
+        log.info(`timeline: replaced ${event.category} at ${event.time} (source: ${event.source})`);
+      } else {
+        log.info(`timeline: skipped lower-priority ${event.source} for ${event.category} (existing: ${events[existing].source})`);
+        return;
+      }
+    } else {
+      events.push(event);
+      log.info(`timeline: added ${event.category} at ${event.time} (source: ${event.source})`);
+    }
+
+    writeJsonAtomic(filePath, events);
   }
 
-  writeJsonAtomic(filePath, events);
+  /** Get event for a specific block category at a given hour (if exists). */
+  getBlockEvent(category: string, hour: number): TimelineEvent | null {
+    const events = this.getTodayTimeline();
+    return events.find(e => {
+      const eHour = parseInt(e.time.split(":")[0], 10);
+      return e.category === category && eHour === hour;
+    }) ?? null;
+  }
+
+  /** Format today's timeline for system prompt injection. */
+  formatTimelineContext(): string {
+    const events = this.getTodayTimeline();
+    if (events.length === 0) return "";
+
+    const lines = events.map(e => {
+      let line = `- ${e.time} [${e.category}] ${e.summary}`;
+      if (e.people?.length) line += ` (with ${e.people.join(", ")})`;
+      return line;
+    });
+
+    return `Today's timeline (established facts — conversation must be consistent with these):\n${lines.join("\n")}\n\n⚠️ Strict rules:\n- Nothing you say about activities can contradict "currently doing" and the timeline. If "currently doing" says you're commuting, you can't say you're eating.\n- When ${getCharacter().user.name} asks what you're doing / if you're off work / what you're up to, use the most recent timeline event to answer — be specific (e.g. "dealing with an urgent rebalancing email from the NY client"), not vague (e.g. "wrapping up emails").\n- Don't invent activity details not in the timeline (what you ate, where you went), unless the timeline explicitly mentions them.`;
+  }
 }
 
-/** Get event for a specific block category at a given hour (if exists). */
+// ── Singleton backward compat ────────────────────────────────────────
+
+let _singleton: TimelineEngine | null = null;
+
+export function initTimeline(statePath: string): TimelineEngine {
+  _singleton = new TimelineEngine(statePath);
+  return _singleton;
+}
+
+export function enqueueTimelineJob<T>(fn: () => Promise<T>): Promise<T> {
+  return _singleton!.enqueueTimelineJob(fn);
+}
+
+export function getTodayTimeline(): TimelineEvent[] {
+  return _singleton!.getTodayTimeline();
+}
+
+export function addTimelineEvent(event: TimelineEvent): void {
+  return _singleton!.addTimelineEvent(event);
+}
+
 export function getBlockEvent(category: string, hour: number): TimelineEvent | null {
-  const events = getTodayTimeline();
-  return events.find(e => {
-    const eHour = parseInt(e.time.split(":")[0], 10);
-    return e.category === category && eHour === hour;
-  }) ?? null;
+  return _singleton!.getBlockEvent(category, hour);
 }
 
-/** Format today's timeline for system prompt injection. */
 export function formatTimelineContext(): string {
-  const events = getTodayTimeline();
-  if (events.length === 0) return "";
-
-  const lines = events.map(e => {
-    let line = `- ${e.time} [${e.category}] ${e.summary}`;
-    if (e.people?.length) line += ` (with ${e.people.join(", ")})`;
-    return line;
-  });
-
-  return `Today's timeline (established facts — conversation must be consistent with these):\n${lines.join("\n")}\n\n⚠️ Strict rules:\n- Nothing you say about activities can contradict "currently doing" and the timeline. If "currently doing" says you're commuting, you can't say you're eating.\n- When ${getCharacter().user.name} asks what you're doing / if you're off work / what you're up to, use the most recent timeline event to answer — be specific (e.g. "dealing with an urgent rebalancing email from the NY client"), not vague (e.g. "wrapping up emails").\n- Don't invent activity details not in the timeline (what you ate, where you went), unless the timeline explicitly mentions them.`;
+  return _singleton!.formatTimelineContext();
 }

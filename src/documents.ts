@@ -37,105 +37,123 @@ interface DocumentIndex {
   documents: DocumentEntry[];
 }
 
-// ── State ────────────────────────────────────────────────────────────
+// ── Class ────────────────────────────────────────────────────────────
 
-let docsDir = "";
-let indexPath = "";
+export class DocumentsEngine {
+  private docsDir: string;
+  private indexPath: string;
 
-// ── Init ─────────────────────────────────────────────────────────────
+  constructor(statePath: string) {
+    this.docsDir = path.join(statePath, "documents");
+    this.indexPath = path.join(this.docsDir, "index.json");
 
-export function initDocuments(statePath: string): void {
-  docsDir = path.join(statePath, "documents");
-  indexPath = path.join(docsDir, "index.json");
+    // Ensure directory exists
+    if (!fs.existsSync(this.docsDir)) {
+      fs.mkdirSync(this.docsDir, { recursive: true });
+    }
 
-  // Ensure directory exists
-  if (!fs.existsSync(docsDir)) {
-    fs.mkdirSync(docsDir, { recursive: true });
+    // Ensure index exists
+    if (!fs.existsSync(this.indexPath)) {
+      writeJsonAtomic(this.indexPath, { documents: [] });
+    }
+
+    // Scan for unindexed files
+    this.syncIndex();
   }
 
-  // Ensure index exists
-  if (!fs.existsSync(indexPath)) {
-    writeJsonAtomic(indexPath, { documents: [] });
+  // ── Index Management ─────────────────────────────────────────────────
+
+  private loadIndex(): DocumentIndex {
+    return readJsonSafe(this.indexPath, { documents: [] });
   }
 
-  // Scan for unindexed files
-  syncIndex();
-}
+  private saveIndex(index: DocumentIndex): void {
+    writeJsonAtomic(this.indexPath, index);
+  }
 
-// ── Index Management ─────────────────────────────────────────────────
+  /** Scan documents dir for files not in the index and add them. */
+  private syncIndex(): void {
+    const index = this.loadIndex();
+    const indexed = new Set(index.documents.map(d => d.filename));
 
-function loadIndex(): DocumentIndex {
-  return readJsonSafe(indexPath, { documents: [] });
-}
+    const files = fs.readdirSync(this.docsDir).filter(f =>
+      !f.startsWith(".") &&
+      f !== "index.json" &&
+      fs.statSync(path.join(this.docsDir, f)).isFile()
+    );
 
-function saveIndex(index: DocumentIndex): void {
-  writeJsonAtomic(indexPath, index);
-}
+    let added = 0;
+    for (const file of files) {
+      if (!indexed.has(file)) {
+        const stat = fs.statSync(path.join(this.docsDir, file));
+        const title = file
+          .replace(/\.[^.]+$/, "")       // strip extension
+          .replace(/[-_]/g, " ")         // normalize separators
+          .replace(/\b\w/g, c => c.toUpperCase()); // title case
 
-/** Scan documents dir for files not in the index and add them. */
-function syncIndex(): void {
-  const index = loadIndex();
-  const indexed = new Set(index.documents.map(d => d.filename));
+        index.documents.push({
+          id: `doc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          title,
+          filename: file,
+          summary: "(auto-indexed, no summary yet)",
+          tags: [],
+          createdAt: stat.birthtimeMs || stat.mtimeMs,
+          updatedAt: stat.mtimeMs,
+        });
+        added++;
+      }
+    }
 
-  const files = fs.readdirSync(docsDir).filter(f =>
-    !f.startsWith(".") &&
-    f !== "index.json" &&
-    fs.statSync(path.join(docsDir, f)).isFile()
-  );
+    // Remove entries whose files no longer exist
+    index.documents = index.documents.filter(d =>
+      fs.existsSync(path.join(this.docsDir, d.filename))
+    );
 
-  let added = 0;
-  for (const file of files) {
-    if (!indexed.has(file)) {
-      const stat = fs.statSync(path.join(docsDir, file));
-      const title = file
-        .replace(/\.[^.]+$/, "")       // strip extension
-        .replace(/[-_]/g, " ")         // normalize separators
-        .replace(/\b\w/g, c => c.toUpperCase()); // title case
-
-      index.documents.push({
-        id: `doc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-        title,
-        filename: file,
-        summary: "(auto-indexed, no summary yet)",
-        tags: [],
-        createdAt: stat.birthtimeMs || stat.mtimeMs,
-        updatedAt: stat.mtimeMs,
-      });
-      added++;
+    if (added > 0) {
+      this.saveIndex(index);
+      console.log(`[documents] Synced index: ${added} new file(s) found`);
     }
   }
 
-  // Remove entries whose files no longer exist
-  index.documents = index.documents.filter(d =>
-    fs.existsSync(path.join(docsDir, d.filename))
-  );
+  // ── Public API ───────────────────────────────────────────────────────
 
-  if (added > 0) {
-    saveIndex(index);
-    console.log(`[documents] Synced index: ${added} new file(s) found`);
+  getDocumentIndex(): DocumentEntry[] {
+    return this.loadIndex().documents;
+  }
+
+  getDocumentsDir(): string {
+    return this.docsDir;
+  }
+
+  /** Format document list for system prompt context. */
+  formatDocumentContext(): string {
+    const docs = this.getDocumentIndex();
+    if (docs.length === 0) return "";
+
+    const lines = docs.map(d => {
+      const date = pstDateStr(new Date(d.updatedAt));
+      const tags = d.tags.length > 0 ? ` [${d.tags.join(", ")}]` : "";
+      return `- ${d.title} (${d.filename}, ${date})${tags}\n  ${d.summary}`;
+    });
+
+    return `${s().headers.my_documents}:\n${lines.join("\n")}`;
   }
 }
 
-// ── Public API ───────────────────────────────────────────────────────
+// ── Backward-compat singleton ────────────────────────────────────────
 
-export function getDocumentIndex(): DocumentEntry[] {
-  return loadIndex().documents;
+let _singleton: DocumentsEngine | null = null;
+
+export function initDocuments(statePath: string): DocumentsEngine {
+  _singleton = new DocumentsEngine(statePath);
+  return _singleton;
 }
 
-export function getDocumentsDir(): string {
-  return docsDir;
+function _get(): DocumentsEngine {
+  if (!_singleton) throw new Error("initDocuments() not called");
+  return _singleton;
 }
 
-/** Format document list for system prompt context. */
-export function formatDocumentContext(): string {
-  const docs = getDocumentIndex();
-  if (docs.length === 0) return "";
-
-  const lines = docs.map(d => {
-    const date = pstDateStr(new Date(d.updatedAt));
-    const tags = d.tags.length > 0 ? ` [${d.tags.join(", ")}]` : "";
-    return `- ${d.title} (${d.filename}, ${date})${tags}\n  ${d.summary}`;
-  });
-
-  return `${s().headers.my_documents}:\n${lines.join("\n")}`;
-}
+export function getDocumentIndex(): DocumentEntry[] { return _get().getDocumentIndex(); }
+export function getDocumentsDir(): string { return _get().getDocumentsDir(); }
+export function formatDocumentContext(): string { return _get().formatDocumentContext(); }
