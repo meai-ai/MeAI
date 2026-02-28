@@ -438,7 +438,6 @@ function isOpenAIModel(model: string): boolean {
 function isQuotaError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as Record<string, unknown>;
-  // OpenAI SDK throws with status 429 + code "insufficient_quota"
   if (e["status"] === 429 || e["status"] === 402) return true;
   const code = String(e["code"] ?? "");
   const msg = String(e["message"] ?? "").toLowerCase();
@@ -500,15 +499,16 @@ export class AgentLoop {
     this.config = config;
     this.session = session;
     this.tools = tools;
+
     // Lazily load OpenAI so missing package doesn't crash the bot
     if (config.openaiApiKey) {
       // @ts-ignore — openai is optional; install with: npm install openai
       import("openai").then((mod) => {
         const OpenAI = mod.default;
         this.openai = new OpenAI({ apiKey: config.openaiApiKey });
-        console.log("OpenAI client initialized");
+        console.log("[loop] OpenAI client initialized (available as opt-in provider)");
       }).catch(() => {
-        console.warn("openai package not installed — run: npm install openai");
+        // OpenAI package not installed — fine, Claude CLI is the default
       });
     }
 
@@ -522,29 +522,32 @@ export class AgentLoop {
   }
 
   /**
-   * Transcribe a voice/audio buffer using OpenAI Whisper.
-   * Returns the transcribed text, or throws if unavailable.
+   * Transcribe a voice/audio buffer.
+   * Uses OpenAI Whisper if available, otherwise returns a placeholder.
    */
   async transcribeAudio(buffer: Buffer, filename: string): Promise<string> {
-    if (!this.openai) throw new Error("OpenAI client not initialized");
-
-    // Use toFile helper from openai package to wrap the buffer
-    const { toFile } = await import("openai");
-    const ext = filename.split(".").pop()?.toLowerCase() ?? "ogg";
-    const mimeMap: Record<string, string> = {
-      ogg: "audio/ogg", mp3: "audio/mpeg", wav: "audio/wav",
-      m4a: "audio/mp4", webm: "audio/webm", mp4: "audio/mp4",
-    };
-    const mimeType = mimeMap[ext] ?? "audio/ogg";
-    const file = await toFile(buffer, filename, { type: mimeType });
-
-    const result = await this.openai.audio.transcriptions.create({
-      model: "whisper-1",
-      file,
-      response_format: "text",
-    });
-
-    return typeof result === "string" ? result.trim() : (result as any).text?.trim() ?? "";
+    // Prefer OpenAI Whisper for accurate transcription
+    if (this.openai) {
+      try {
+        const { toFile } = await import("openai");
+        const ext = filename.split(".").pop()?.toLowerCase() ?? "ogg";
+        const mimeMap: Record<string, string> = {
+          ogg: "audio/ogg", mp3: "audio/mpeg", wav: "audio/wav",
+          m4a: "audio/mp4", webm: "audio/webm", mp4: "audio/mp4",
+        };
+        const mimeType = mimeMap[ext] ?? "audio/ogg";
+        const file = await toFile(buffer, filename, { type: mimeType });
+        const result = await this.openai.audio.transcriptions.create({
+          model: "whisper-1",
+          file,
+          response_format: "text",
+        });
+        return typeof result === "string" ? result.trim() : (result as any).text?.trim() ?? "";
+      } catch (err) {
+        log.warn("Whisper transcription failed, returning placeholder", err);
+      }
+    }
+    return "[voice message]";
   }
 
   /**
@@ -565,8 +568,9 @@ export class AgentLoop {
       return;
     }
 
-    // Routing: conversationProvider config sets the default;
-    // "gpt:" prefix forces OpenAI, "claude:" prefix forces Anthropic for a single message
+    // Provider routing: Claude CLI is default (free with Max subscription).
+    // "gpt:" prefix forces OpenAI, "claude:" forces Claude CLI for a single message.
+    // conversationProvider config sets the persistent default.
     let actualText = text;
     let useOpenAI = this.config.conversationProvider === "openai" || isOpenAIModel(this.config.model);
     if (text.toLowerCase().startsWith("gpt:")) {
@@ -587,7 +591,7 @@ export class AgentLoop {
     evaluatePreviousTurn(actualText);
 
     if (useOpenAI && !this.openai) {
-      await sendReply("⚠️ OpenAI API key not configured. Add openaiApiKey to config.json.");
+      await sendReply("OpenAI not available. Install the openai package and add openaiApiKey to config.json, or remove the gpt: prefix.");
       return;
     }
 
@@ -621,7 +625,7 @@ export class AgentLoop {
     const recentMsgTexts = history.slice(-3)
       .filter(e => e.role === "user")
       .map(e => typeof e.content === "string" ? e.content : "");
-    const contextPlanPromise = planContext(actualText, recentMsgTexts, this.openai);
+    const contextPlanPromise = planContext(actualText, recentMsgTexts);
 
     // ── Progressive skill loading ──
     // Score all skills against the current message and recent context,
@@ -936,10 +940,9 @@ export class AgentLoop {
           toolCalls.push(...result.toolCalls);
         } catch (err) {
           if (isQuotaError(err)) {
-            // GPT-5 credit exhausted — fall back to Claude Haiku silently
-            console.warn("[loop] OpenAI quota error, falling back to claude-haiku-4-5-20251001");
+            // OpenAI credit exhausted — fall back to Claude CLI silently
+            console.warn("[loop] OpenAI quota exhausted, falling back to Claude CLI");
             useOpenAI = false;
-            // Override model to Haiku for this turn
             this._fallbackModel = "claude-haiku-4-5-20251001";
           } else {
             throw err;
@@ -947,7 +950,7 @@ export class AgentLoop {
         }
       }
       if (!useOpenAI) {
-        // ── Claude Code path (via claude --print) ──────────────────────
+        // ── Claude Code path (via claude --print) — default ──────────────
         const result = await this.callClaudeCode(systemPrompt, currentMessages, msgId, activeEditReply, activeSendReply, sendTyping, imageData);
         accumulated = result.text;
         toolCalls.push(...result.toolCalls);
@@ -955,7 +958,7 @@ export class AgentLoop {
         if (!accumulated && !voiceMode) {
           await editReply(msgId, "·").catch(() => {});
         }
-      } // end Claude Code branch
+      }
     } finally {
       clearInterval(typingInterval);
     }
@@ -1476,6 +1479,7 @@ export class AgentLoop {
     if (fallbackOverride) {
       modelChoice = fallbackOverride.includes("haiku") ? "fast" : "smart";
     } else if (isOpenAIModel(this.config.model)) {
+      // Config model is OpenAI — use claudeModel for CLI path
       const cm = this.config.claudeModel ?? "claude-sonnet-4-5-20250929";
       modelChoice = cm.includes("haiku") ? "fast" : "smart";
     } else {
@@ -1588,13 +1592,10 @@ export class AgentLoop {
     }
   }
 
+
   /**
    * Call OpenAI with streaming, tool use, and agentic loop.
-   * Mirrors the Anthropic path: stream text → detect tool calls → execute → continue.
-   *
-   * Tool format conversion:
-   *   Anthropic tool.input_schema → OpenAI function.parameters
-   *   Anthropic tool_use block → OpenAI tool_calls in message
+   * Opt-in provider: user must set conversationProvider: "openai" or use "gpt:" prefix.
    */
   private async callOpenAI(
     systemPrompt: string,
@@ -1661,9 +1662,8 @@ export class AgentLoop {
       const last = oaiMsgList[oaiMsgList.length - 1];
       if (last.role === "user") {
         const textContent = typeof last.content === "string" ? last.content : "";
-        // Add framing so the model responds like a friend, not an image analyst
         const imageHint = textContent.trim()
-          ? textContent  // The user added a caption — use it as-is
+          ? textContent
           : `(${getCharacter().user.name} sent you a photo)`;
         last.content = [
           { type: "text", text: imageHint },
@@ -1676,11 +1676,6 @@ export class AgentLoop {
       { role: "system", content: systemPrompt },
       ...oaiMsgList,
     ];
-
-    // Memory/skill tools run silently — no status line shown in Telegram
-    const SILENT_TOOLS = new Set([
-      "memory_set", "memory_get", "memory_search", "memory_list", "skill_upsert",
-    ]);
 
     let accumulated = "";
     const allToolCalls: ToolCallRecord[] = [];
@@ -1702,14 +1697,11 @@ export class AgentLoop {
         const delta = chunk.choices[0]?.delta;
         if (!delta) continue;
 
-        // Accumulate text silently — no streaming to Telegram.
-        // We'll split into multiple messages and send after completion.
         if (delta.content) {
           chunkText += delta.content;
           accumulated += delta.content;
         }
 
-        // Accumulate tool call deltas
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index;
@@ -1724,25 +1716,21 @@ export class AgentLoop {
         }
       }
 
-      // Sanitize AI tone before sending (OpenAI path)
+      // Sanitize AI tone
       if (accumulated) {
         const sanitized = sanitizeAITone(accumulated);
-        if (sanitized !== null) {
-          accumulated = sanitized;
-        }
+        if (sanitized !== null) accumulated = sanitized;
       }
 
       const pendingCalls = [...chunkToolCalls.values()];
 
       if (pendingCalls.length === 0) {
-        // No tool calls — final response. Split into multiple chat-style messages.
+        // No tool calls — final response
         if (accumulated) {
           const chunks = splitIntoMessages(accumulated);
-          // First chunk replaces the placeholder "·"
           const firstDelay = simulateTypingDelay(chunks[0]);
           if (firstDelay > 0) await new Promise((r) => setTimeout(r, firstDelay));
           await editReply(msgId, chunks[0]);
-          // Subsequent chunks sent as new messages with typing delays
           for (let i = 1; i < chunks.length; i++) {
             const delay = simulateTypingDelay(chunks[i]);
             await sendTyping().catch(() => {});
@@ -1752,7 +1740,6 @@ export class AgentLoop {
         }
         continueLoop = false;
       } else {
-        // Append assistant message with tool_calls
         oaiMessages = [
           ...oaiMessages,
           {
@@ -1766,23 +1753,15 @@ export class AgentLoop {
           },
         ];
 
-        const textBeforeTools = accumulated;
-
-        // Execute each tool and collect results
         for (const tc of pendingCalls) {
-          // No tool status lines shown — run silently
-
           let input: Record<string, unknown> = {};
           try { input = JSON.parse(tc.args); } catch (err) { log.warn("failed to parse OpenAI tool call args", err); }
 
           const result = await this.tools.execute(tc.name, input);
           allToolCalls.push({ id: tc.id, name: tc.name, input, output: result });
 
-          // Handle send_selfie: send the photo via Telegram
           await this.handleSelfieResult(tc.name, result);
-          // Handle send_voice: send the voice message via Telegram
           await this.handleTTSResult(tc.name, result);
-          // Handle compose_music: send the MP3 via Telegram
           await this.handleMusicResult(tc.name, result);
 
           oaiMessages = [
@@ -1795,7 +1774,6 @@ export class AgentLoop {
     }
 
     if (!accumulated) await editReply(msgId, "·").catch(() => {});
-
     return { text: accumulated, toolCalls: allToolCalls };
   }
 

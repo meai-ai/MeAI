@@ -12,10 +12,13 @@ The companion has a complete simulated life: daily schedule, emotions with causa
 
 ```bash
 npm start          # Run the bot (tsx transpiles TypeScript on-the-fly, no build step)
+npm run setup      # Interactive setup wizard (creates config.json + character.yaml)
+npm run check      # Validate config and API connectivity
 npm run typecheck  # Type-check without emitting (tsc --noEmit)
+npm test           # Run tests (vitest)
 ```
 
-There is no build step, no linter, and no test suite. TypeScript is executed directly via `tsx`.
+There is no build step and no linter. TypeScript is executed directly via `tsx`. Tests use vitest (no test files exist yet, but the runner is configured).
 
 ## Architecture
 
@@ -80,6 +83,20 @@ Conversations stored as JSONL (`data/sessions/main.jsonl`). When transcript hits
 - Main conversation: configured provider (Anthropic or OpenAI) via `conversationProvider` config
 - Background tasks (heartbeat, curiosity, etc.): `src/claude-runner.ts` wraps `claude --print` CLI (uses Max subscription, no API billing)
 
+### Five-Axis Extensibility
+
+The codebase has five extensible registries, all built on `src/registry/base.ts` (auto-discovery via filesystem scan + topological sort by dependencies):
+
+| Axis | Directory | Interface | Guide |
+|------|-----------|-----------|-------|
+| SimModules | `src/modules/<name>/` | `SimModule` | `docs/CREATE_MODULE.md` |
+| Channels | `src/channel/<name>.ts` | `Channel` | `docs/CREATE_CHANNEL.md` |
+| LLM Providers | `src/llm/<name>/` | `LLMProvider` | `docs/CREATE_LLM_PROVIDER.md` |
+| Senses | `src/senses/<name>/` | `SenseProvider` | `docs/CREATE_SENSE.md` |
+| Expressions | `src/expressions/<name>/` | `ExpressionProvider` | `docs/CREATE_EXPRESSION.md` |
+
+All five axes share the same pattern: create `index.ts` in the appropriate subdirectory with a default export, restart MeAI, and it's auto-discovered. See the corresponding guide for interface details.
+
 ## Key Files
 
 - `src/index.ts` — Initialization & module wiring
@@ -88,6 +105,7 @@ Conversations stored as JSONL (`data/sessions/main.jsonl`). When transcript hits
 - `src/agent/tools.ts` — Tool registry with hot-loading from skill directories
 - `src/types.ts` — Shared TypeScript interfaces
 - `src/config.ts` — Config loader with Zod validation
+- `src/registry/base.ts` — Shared auto-discovery + lifecycle for all 5 extensible axes
 - `data/config.json` — API keys and settings (gitignored)
 - `src/character.ts` — Character loader (loads `data/character.yaml`, exports `getCharacter()`)
 - `data/character.yaml` — Character definition (identity, location, friends, persona prompts — gitignored)
@@ -98,7 +116,7 @@ Conversations stored as JSONL (`data/sessions/main.jsonl`). When transcript hits
 
 ## Configuration
 
-`data/config.json` contains API keys (`telegramBotToken`, `anthropicApiKey`, `openaiApiKey`, X API credentials), `allowedChatId`, model selection, and `statePath`. Schema validated by Zod in `src/config.ts`.
+`data/config.json` contains API keys (`telegramBotToken`, `anthropicApiKey`, `openaiApiKey`, X API credentials), `allowedChatId`, model selection, and `statePath`. Schema validated by Zod in `src/config.ts`. Environment variables (e.g. `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`) override config.json values.
 
 ## Adding a New Module
 
@@ -106,6 +124,8 @@ Conversations stored as JSONL (`data/sessions/main.jsonl`). When transcript hits
 2. Call `initMyModule()` in `src/index.ts`
 3. Add `formatMyContext()` output to system prompt in `src/agent/context.ts`
 4. State persists to `data/my-state.json`
+
+For plug-in modules that should be auto-discovered (no core edits), use the SimModule pattern instead — see `docs/CREATE_MODULE.md`.
 
 ## Adding a Skill
 

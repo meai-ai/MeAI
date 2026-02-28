@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import OpenAI from "openai";
+import { claudeText } from "../claude-runner.js";
 import type { AppConfig } from "../types.js";
 import { getCharacter, renderTemplate } from "../character.js";
 
@@ -35,13 +35,11 @@ interface OptimizerState {
 export class PromptOptimizer {
   private config: AppConfig;
   private statePath: string;
-  private openai: OpenAI;
   private stopped = false;
 
   constructor(config: AppConfig) {
     this.config = config;
     this.statePath = config.statePath;
-    this.openai = new OpenAI({ apiKey: config.openaiApiKey });
   }
 
   start(): void {
@@ -184,13 +182,12 @@ Rule requirements:
 If the replies are already natural with no obvious issues, output only: ${SKIP_TOKEN}`;
 
     try {
-      const response = await this.openai.chat.completions.create({
-        model: this.config.openaiModel ?? this.config.model,
-        messages: [{ role: "user", content: prompt }],
-        max_completion_tokens: 100,
-      });
-
-      const output = response.choices[0]?.message?.content?.trim() ?? SKIP_TOKEN;
+      const output = (await claudeText({
+        system: "You are a prompt optimization assistant. Output only the rule or SKIP.",
+        prompt,
+        model: "fast",
+        timeoutMs: 30_000,
+      })).trim() || SKIP_TOKEN;
 
       let added = false;
       if (output === SKIP_TOKEN || output.includes(SKIP_TOKEN)) {

@@ -12,10 +12,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import type { GenerationMode, GenerationInputs } from "./character-gen.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG_PATH = path.join(PROJECT_ROOT, "data", "config.json");
 const CHARACTER_PATH = path.join(PROJECT_ROOT, "data", "character.yaml");
+const IDENTITY_PATH = path.join(PROJECT_ROOT, "data", "memory", "IDENTITY.md");
+const USER_MD_PATH = path.join(PROJECT_ROOT, "data", "memory", "USER.md");
 const CHARACTER_TEMPLATE = path.join(PROJECT_ROOT, "data", "character.minimal.yaml");
 
 const CITY_COORDS: Record<string, { lat: number; lon: number; tz: string }> = {
@@ -160,12 +163,153 @@ These are optional — press Enter to skip any.
 --- Step 5/5: Create Your Character ---
 
 Your AI companion needs a name and personality.
+
+Choose how to create your character:
+  1) Quick start — minimal template, get running fast (recommended for first-timers)
+  2) Full template — rich config for manual customization (see docs/CREATE_CHARACTER.md)
+  3) AI Random — specialist AI agents generate a unique character from scratch
+  4) AI + Your Ideas — you provide basics, AI fills in the deep details
+  5) AI Soul Match — describe yourself, AI creates your ideal companion
+
+  Options 3-5 use Claude CLI (Max subscription) and take about 2 minutes.
 `);
 
-  const charName = (await askOptional("Character's name (default: Alex): ")) || "Alex";
+  const modeChoice = (await askOptional("Choice (1-5, default: 1): ")) || "1";
+  const mode = modeChoice.trim();
+
+  let charName = "Alex";
+  let characterCity = "New York";
+  let templateName = "minimal";
+
+  if (mode === "3" || mode === "4" || mode === "5") {
+    // ── AI-powered character generation (uses Claude CLI) ──────────
+    let genMode: GenerationMode;
+    let genInputs: GenerationInputs;
+
+    if (mode === "3") {
+      // ── AI Random ────────────────────────────────────────────────
+      templateName = "AI random";
+      console.log("\nGenerating a unique character from scratch...\n");
+      const userName = (await askOptional("Your name (what the AI calls you): ")) || "User";
+
+      genMode = "random";
+      genInputs = { mode: "random", userName };
+
+    } else if (mode === "4") {
+      // ── AI + Your Ideas ──────────────────────────────────────────
+      templateName = "AI + your ideas";
+      console.log("\nProvide some basics — press Enter to let AI decide any field.\n");
+      const userName = (await askOptional("Your name (what the AI calls you): ")) || "User";
+      const inputName = await askOptional("Character's name (Enter = AI decides): ");
+      const inputAge = await askOptional("Character's age (Enter = AI decides): ");
+      const inputGender = await askOptional("Character's gender (female/male/nonbinary, Enter = AI decides): ");
+      const inputCity = await askOptional("City where the character lives (Enter = AI decides): ");
+      const inputOccupation = await askOptional("Character's occupation (Enter = AI decides): ");
+      const inputPersonality = await askOptional("Personality keywords, e.g. 'witty, introverted, creative' (Enter = AI decides): ");
+      const inputRelationship = await askOptional("Relationship to you, e.g. 'best friend', 'roommate' (default: close friend): ");
+
+      genMode = "user-defined";
+      genInputs = {
+        mode: "user-defined",
+        userName,
+        userDefined: {
+          charName: inputName || undefined,
+          charAge: inputAge || undefined,
+          charGender: inputGender || undefined,
+          charCity: inputCity || undefined,
+          charOccupation: inputOccupation || undefined,
+          charPersonalityKeywords: inputPersonality || undefined,
+          userName,
+          userRelationship: inputRelationship || undefined,
+        },
+      };
+
+    } else {
+      // ── AI Soul Match ────────────────────────────────────────────
+      templateName = "AI soul match";
+      console.log("\nTell us about yourself — the AI will create a complementary companion.\n");
+      const userName = (await askOptional("Your name: ")) || "User";
+      const userCity = await askOptional("Your city (Enter = skip): ");
+      const userOccupation = await askOptional("Your occupation (Enter = skip): ");
+      const userPersonality = await askOptional("Describe your personality in a few words: ");
+      const userInterests = await askOptional("Your interests/hobbies: ");
+      const userLifestyle = await askOptional("Your lifestyle (e.g. 'busy professional', 'stay-at-home parent'): ");
+      const userPrefs = await askOptional("What do you want in a companion? (e.g. 'someone fun and spontaneous'): ");
+
+      genMode = "soul-match";
+      genInputs = {
+        mode: "soul-match",
+        userName,
+        soulMatch: {
+          userName,
+          userCity: userCity || undefined,
+          userOccupation: userOccupation || undefined,
+          userPersonality: userPersonality || undefined,
+          userInterests: userInterests || undefined,
+          userLifestyle: userLifestyle || undefined,
+          userCompanionPreferences: userPrefs || undefined,
+        },
+      };
+    }
+
+    console.log("\nStarting AI character generation...\n");
+
+    // Dynamic import to avoid loading at module level
+    const { generateCharacter } = await import("./character-gen.js");
+
+    try {
+      const result = await generateCharacter(genMode, genInputs, (step, total, label) => {
+        console.log(`  [${step}/${total}] ${label}`);
+      });
+
+      console.log("  done!\n");
+
+      charName = result.characterName;
+      characterCity = result.characterCity;
+
+      // Write files atomically at the end
+      fs.mkdirSync(path.join(PROJECT_ROOT, "data"), { recursive: true });
+      fs.mkdirSync(path.join(PROJECT_ROOT, "data", "memory"), { recursive: true });
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+      fs.writeFileSync(CHARACTER_PATH, result.characterYaml);
+      fs.writeFileSync(IDENTITY_PATH, result.identityMd);
+      if (result.userMd) {
+        fs.writeFileSync(USER_MD_PATH, result.userMd);
+      }
+
+      // Print summary
+      printSummary(charName, characterCity, templateName, config);
+
+      rl.close();
+      return;
+
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`\nCharacter generation failed: ${msg}`);
+      if (msg.includes("Claude Code CLI not found")) {
+        console.log("Install Claude CLI: npm install -g @anthropic-ai/claude-code");
+      }
+      console.log("Falling back to quick start template...\n");
+      // Fall through to template-based generation
+    }
+  }
+
+  // ── Template-based character generation (modes 1, 2, or AI fallback) ──
+
+  const useFullTemplate = mode === "2";
+  const CHARACTER_FULL_TEMPLATE = path.join(PROJECT_ROOT, "data", "character.example.yaml");
+  const templatePath = useFullTemplate ? CHARACTER_FULL_TEMPLATE : CHARACTER_TEMPLATE;
+  templateName = useFullTemplate ? "full" : "minimal";
+
+  if (useFullTemplate) {
+    console.log("\nUsing the full template. You can customize everything in data/character.yaml after setup.\n");
+  }
+
+  charName = (await askOptional("Character's name (default: Alex): ")) || "Alex";
   const userName = (await askOptional("Your name (what the AI calls you): ")) || "User";
   const gender = (await askOptional("Character's gender (female/male/nonbinary, default: female): ")) || "female";
   const city = (await askOptional("City where the character lives (default: New York): ")) || "New York";
+  characterCity = city;
 
   // Look up city coordinates
   const cityKey = city.toLowerCase();
@@ -174,22 +318,39 @@ Your AI companion needs a name and personality.
 
   const timezone = (await askOptional(`Timezone (default: ${defaultTZ}): `)) || defaultTZ;
 
-  // Generate character.yaml from template
+  // Generate character.yaml from chosen template
   let characterYaml: string;
-  if (fs.existsSync(CHARACTER_TEMPLATE)) {
-    characterYaml = fs.readFileSync(CHARACTER_TEMPLATE, "utf-8");
-    characterYaml = characterYaml
-      .replace(/^name: Alex$/m, `name: ${charName}`)
-      .replace(/^english_name: Alex$/m, `english_name: ${charName}`)
-      .replace(/^age: 28$/m, `age: 28`)
-      .replace(/^gender: female\b.*$/m, `gender: ${gender}`)
-      .replace(/^timezone: America\/New_York$/m, `timezone: ${timezone}`)
-      .replace(/^  city: New York$/m, `  city: ${city}`)
-      .replace(/latitude: 40\.7128/m, `latitude: ${coords.lat}`)
-      .replace(/longitude: -74\.0060/m, `longitude: ${coords.lon}`)
-      .replace(/name: User$/m, `name: ${userName}`)
-      .replace(/You are Alex/g, `You are ${charName}`)
-      .replace(/User's close friend/g, `${userName}'s close friend`);
+  if (fs.existsSync(templatePath)) {
+    characterYaml = fs.readFileSync(templatePath, "utf-8");
+
+    if (useFullTemplate) {
+      // Full template uses placeholder values like "Your Character Name"
+      // Note: {character.name} and {user.name} are runtime template vars — don't replace those
+      characterYaml = characterYaml
+        .replace(/^name: Your Character Name\b.*$/m, `name: ${charName}`)
+        .replace(/^english_name: MeAI$/m, `english_name: ${charName}`)
+        .replace(/^age: 25$/m, `age: 28`)
+        .replace(/^gender: female\b.*$/m, `gender: ${gender}`)
+        .replace(/^timezone: America\/Los_Angeles\b.*$/m, `timezone: ${timezone}`)
+        .replace(/^  city: "".*$/m, `  city: ${city}`)
+        .replace(/latitude: 37\.7749/m, `latitude: ${coords.lat}`)
+        .replace(/longitude: -122\.4194/m, `longitude: ${coords.lon}`)
+        .replace(/^  name: User\b.*$/m, `  name: ${userName}`);
+    } else {
+      // Minimal template uses "Alex" / "User" as defaults
+      characterYaml = characterYaml
+        .replace(/^name: Alex$/m, `name: ${charName}`)
+        .replace(/^english_name: Alex$/m, `english_name: ${charName}`)
+        .replace(/^age: 28$/m, `age: 28`)
+        .replace(/^gender: female\b.*$/m, `gender: ${gender}`)
+        .replace(/^timezone: America\/New_York$/m, `timezone: ${timezone}`)
+        .replace(/^  city: New York$/m, `  city: ${city}`)
+        .replace(/latitude: 40\.7128/m, `latitude: ${coords.lat}`)
+        .replace(/longitude: -74\.0060/m, `longitude: ${coords.lon}`)
+        .replace(/name: User$/m, `name: ${userName}`)
+        .replace(/You are Alex/g, `You are ${charName}`)
+        .replace(/User's close friend/g, `${userName}'s close friend`);
+    }
   } else {
     // Fallback: generate minimal YAML inline
     characterYaml = `# MeAI Character Definition
@@ -241,6 +402,12 @@ persona:
   fs.writeFileSync(CHARACTER_PATH, characterYaml);
 
   // ── Summary ──────────────────────────────────────────────────────
+  printSummary(charName, characterCity, templateName, config);
+
+  rl.close();
+}
+
+function printSummary(charName: string, city: string, templateName: string, config: Record<string, unknown>) {
   const features = [
     ["Telegram conversation", true],
     ["Semantic memory (OpenAI)", !!config.openaiApiKey],
@@ -253,7 +420,7 @@ persona:
 --- Setup Complete! ---
 
 Config saved to data/config.json
-Character created: ${charName} (${city})
+Character created: ${charName} (${city}) — ${templateName} template
 
 Features enabled:`);
   for (const [name, enabled] of features) {
@@ -270,8 +437,6 @@ To verify your setup first:
 To customize personality, speech patterns, and more:
   edit data/character.yaml — see docs/CREATE_CHARACTER.md
 `);
-
-  rl.close();
 }
 
 main().catch((err) => {

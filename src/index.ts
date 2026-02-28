@@ -6,7 +6,7 @@
  *
  * Architecture:
  * - Background tasks (emotion, schedule, memory, curiosity, social): Claude Sonnet 4.6
- * - Real-time conversation: configurable (Anthropic or OpenAI/GPT-5)
+ * - Real-time conversation: Claude CLI (Max subscription)
  * - X (Twitter): autonomous posting + real-time reading
  */
 
@@ -97,7 +97,8 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   console.log(`Config loaded. State path: ${config.statePath}`);
-  console.log(`Conversation: ${config.conversationProvider} (${config.conversationProvider === "openai" ? config.openaiModel : config.model})`);
+  const provider = config.conversationProvider === "openai" ? "OpenAI" : "Claude CLI";
+  console.log(`Conversation: ${provider} (${config.model})`);
 
   let moduleCount = 0;
   let moduleTotal = 0;
@@ -298,10 +299,8 @@ async function main(): Promise<void> {
   heartbeat.start();
   watchdog.start();
 
-  if (config.openaiApiKey) {
-    const optimizer = new PromptOptimizer(config);
-    optimizer.start();
-  }
+  const optimizer = new PromptOptimizer(config);
+  optimizer.start();
 
   console.log(`[init] MeAI ready — ${moduleCount}/${moduleTotal} modules active`);
 

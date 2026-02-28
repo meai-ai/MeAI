@@ -9,6 +9,7 @@
  * full context for deep conversations.
  */
 
+import { claudeText } from "../claude-runner.js";
 import { createLogger } from "../lib/logger.js";
 
 const log = createLogger("context-planner");
@@ -75,19 +76,13 @@ Respond with JSON only, no explanation.`;
 // ── Core Function ────────────────────────────────────────────────────
 
 /**
- * Call gpt-4o-mini to decide which context sections are needed.
+ * Call Claude CLI (haiku) to decide which context sections are needed.
  * Falls back to FULL_PLAN on any error.
  */
 export async function planContext(
   userMessage: string,
   recentMessages: string[],
-  openai: any,
 ): Promise<ContextPlan> {
-  if (!openai) {
-    log.info("no OpenAI client — using full plan");
-    return FULL_PLAN;
-  }
-
   const recentContext = recentMessages.length > 0
     ? `\nRecent messages:\n${recentMessages.slice(-3).map((m, i) => `${i + 1}. ${m}`).join("\n")}`
     : "";
@@ -95,23 +90,26 @@ export async function planContext(
   const userPrompt = `User message: "${userMessage}"${recentContext}`;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: PLANNER_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      max_completion_tokens: 200,
-      response_format: { type: "json_object" },
+    const content = await claudeText({
+      system: PLANNER_PROMPT,
+      prompt: userPrompt,
+      model: "fast",
+      timeoutMs: 15_000,
     });
 
-    const content = response.choices?.[0]?.message?.content;
     if (!content) {
       log.warn("empty planner response — using full plan");
       return FULL_PLAN;
     }
 
-    const raw = JSON.parse(content);
+    // Extract JSON from response (claude CLI may include extra text)
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      log.warn("no JSON in planner response — using full plan");
+      return FULL_PLAN;
+    }
+
+    const raw = JSON.parse(jsonMatch[0]);
     const plan = normalizePlan(raw);
 
     log.info(`plan: ${JSON.stringify(plan)}`);
