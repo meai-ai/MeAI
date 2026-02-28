@@ -100,7 +100,7 @@ function seedDefaults(statePath: string): void {
   if (!fs.existsSync(identityPath)) {
     fs.writeFileSync(
       identityPath,
-      "I am MeAI, the user's close friend. Personality is straightforward, warm, and outgoing. Speaks casually with my own life and thoughts.\n(Specific identity defined by character.yaml)\n",
+      "<!-- blank-slate -->\n# New Character\n\nThis character hasn't been created yet. Chat to build your character!\n",
     );
   }
 

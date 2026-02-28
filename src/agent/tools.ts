@@ -16,6 +16,7 @@ import { getPatcherTools } from "../evolution/patcher.js";
 import { getSkillDiscoveryTools } from "../evolution/skill-discovery.js";
 import { getNotificationTools } from "../notifications.js";
 import { moduleRegistry } from "../modules/registry.js";
+import { getCharacterUpdateTools } from "../character.js";
 
 /**
  * Callbacks that the tool registry needs to send Telegram messages
@@ -130,6 +131,11 @@ export class ToolRegistry {
 
     // SimModule tools — from extensible modules (src/modules/*/index.ts)
     for (const tool of moduleRegistry.getAllTools(config)) {
+      this.register(tool);
+    }
+
+    // Character tools: update_character + confirm_character_update (always loaded)
+    for (const tool of getCharacterUpdateTools(config)) {
       this.register(tool);
     }
 

@@ -23,7 +23,7 @@ import { formatNarrativeContext } from "../narrative.js";
 import { formatDocumentContext, getDocumentsDir } from "../documents.js";
 import type { ContextPlan } from "./context-planner.js";
 import { getRecentMoments } from "../moments.js";
-import { getCharacter, s, renderTemplate } from "../character.js";
+import { getCharacter, s, renderTemplate, isBlankSlate, BLANK_SLATE_PERSONA } from "../character.js";
 import { moduleRegistry } from "../modules/registry.js";
 
 const log = createLogger("context");
@@ -365,11 +365,16 @@ export async function assembleSystemPrompt(
 
   const identity = loadIdentity(config.statePath);
   const userProfile = loadUserProfile(config.statePath);
+  const blankSlate = isBlankSlate(config.statePath);
 
   const sections: string[] = [];
 
+  // Blank-slate mode — character not yet created, guide user through setup
+  if (blankSlate) {
+    sections.push(BLANK_SLATE_PERSONA);
+  }
   // Header — persona rules (full or compact based on plan)
-  if (plan?.persona === "compact") {
+  else if (plan?.persona === "compact") {
     sections.push(getPersonaCompact());
   } else {
   sections.push(getCharacter().persona.full ?? "");
@@ -393,8 +398,8 @@ export async function assembleSystemPrompt(
     sections.push(budgetedMemory);
   }
 
-  // Emotion — controlled by plan (full / summary / false)
-  if (emotionContext && plan?.emotion !== false) {
+  // Emotion — controlled by plan (full / summary / false); skip in blank-slate mode
+  if (!blankSlate && emotionContext && plan?.emotion !== false) {
     if (plan?.emotion === "summary") {
       sections.push(`## ${s().headers.inner_state}\n${formatEmotionSummary(emotionContext)}`);
     } else {
@@ -408,8 +413,8 @@ export async function assembleSystemPrompt(
     }
   }
 
-  // Recent Moments — what the character recently posted, so they can reference their own shared experiences
-  try {
+  // Recent Moments — skip in blank-slate mode
+  if (!blankSlate) try {
     const moments = getRecentMoments(6);
     if (moments.length > 0) {
       const lines = moments.map((m) => {
@@ -424,8 +429,8 @@ export async function assembleSystemPrompt(
     }
   } catch { /* non-fatal */ }
 
-  // 8.4: Opinions — evolving viewpoints for natural disagreement
-  if (!plan || plan.opinions) {
+  // 8.4: Opinions — evolving viewpoints for natural disagreement; skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.opinions)) {
     try {
       const opinionCtx = formatOpinionContext();
       if (opinionCtx) {
@@ -434,8 +439,8 @@ export async function assembleSystemPrompt(
     } catch { /* non-fatal */ }
   }
 
-  // 8.3: Diary — recent journal entries for continuity
-  if (!plan || plan.diary) {
+  // 8.3: Diary — skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.diary)) {
     try {
       const diaryCtx = formatDiaryContext();
       if (diaryCtx) {
@@ -444,8 +449,8 @@ export async function assembleSystemPrompt(
     } catch { /* non-fatal */ }
   }
 
-  // 8.2: Goals — current motivations and direction
-  if (!plan || plan.goals) {
+  // 8.2: Goals — skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.goals)) {
     try {
       const goalCtx = formatGoalContext();
       if (goalCtx) {
@@ -454,8 +459,8 @@ export async function assembleSystemPrompt(
     } catch { /* non-fatal */ }
   }
 
-  // 10.1: Narrative arcs — ongoing storylines in her life
-  if (!plan || plan.narrative) {
+  // 10.1: Narrative arcs — skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.narrative)) {
     try {
       const narrativeCtx = formatNarrativeContext();
       if (narrativeCtx) {
@@ -524,8 +529,8 @@ export async function assembleSystemPrompt(
     }
   } catch { /* non-fatal */ }
 
-  // Real-world context — grounds character in physical reality (budget-limited)
-  if (worldContext) {
+  // Real-world context — grounds character in physical reality (budget-limited); skip in blank-slate mode
+  if (!blankSlate && worldContext) {
     const char = getCharacter();
     const { text: budgetedWorld, truncated: worldTruncated } = truncateToTokenBudget(worldContext, worldBudget);
     if (worldTruncated) log.info(`world context truncated to ${worldBudget} token budget`);
@@ -543,8 +548,17 @@ export async function assembleSystemPrompt(
       (lifeRules ? `\n\n${renderTemplate(lifeRules, undefined, { hobbyNames, friendNames, placeDescriptions, petLine })}` : ""));
   }
 
-  // Capabilities — full or minimal based on plan
-  if (plan?.capabilities === "minimal") {
+  // Capabilities — full or minimal based on plan; simplified in blank-slate mode
+  if (blankSlate) {
+    sections.push(`## Available tools
+- update_character: Save character details as the user describes them (shows a preview first)
+- confirm_character_update: Commit a previewed character change
+- memory_set / memory_get / memory_search / memory_list: Remember important things about the user
+- get_current_time: Check the current time
+
+Use update_character to save each detail the user shares about who you should be.
+Use memory_set to remember things about the user themselves.`);
+  } else if (plan?.capabilities === "minimal") {
     sections.push(getCapabilitiesMinimal());
   } else {
     const char = getCharacter();
@@ -563,9 +577,9 @@ export async function assembleSystemPrompt(
     }
   }
 
-  // Auto-generated rules from conversation analysis
+  // Auto-generated rules from conversation analysis; skip in blank-slate mode
   const autoRulesPath = path.join(config.statePath, "auto-rules.md");
-  if (fs.existsSync(autoRulesPath)) {
+  if (!blankSlate && fs.existsSync(autoRulesPath)) {
     const autoRules = fs.readFileSync(autoRulesPath, "utf-8").trim();
     if (autoRules) {
       sections.push(`## ${s().headers.auto_rules}\n${autoRules}`);

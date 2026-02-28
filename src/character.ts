@@ -16,6 +16,8 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { createLogger } from "./lib/logger.js";
+import { claudeText } from "./claude-runner.js";
+import type { AppConfig, ToolDefinition } from "./types.js";
 
 const log = createLogger("character");
 
@@ -720,3 +722,509 @@ export function renderTemplate(template: string, char?: CharacterProfile, vars?:
   }
   return _singleton.renderTemplate(template, char, vars);
 }
+
+// ── Blank Slate Detection ───────────────────────────────────────────
+
+/** Marker line in minimal IDENTITY.md created by seedDefaults. */
+const BLANK_SLATE_MARKER = "<!-- blank-slate -->";
+
+/**
+ * Check if the current IDENTITY.md is a blank-slate placeholder.
+ * True when the file is missing, empty, or contains the blank-slate marker.
+ */
+export function isBlankSlate(statePath: string): boolean {
+  const identityPath = path.join(statePath, "memory", "IDENTITY.md");
+  if (!fs.existsSync(identityPath)) return true;
+  const content = fs.readFileSync(identityPath, "utf-8").trim();
+  if (!content) return true;
+  if (content.includes(BLANK_SLATE_MARKER)) return true;
+  // Also treat very short content (< 200 chars) as blank-slate
+  if (content.length < 200) return true;
+  return false;
+}
+
+// ── Pending Update Buffer ───────────────────────────────────────────
+
+interface PendingUpdate {
+  /** The full new IDENTITY.md content */
+  newIdentity: string;
+  /** Human-readable summary of changes for the user */
+  summary: string;
+  /** Timestamp to expire stale previews */
+  createdAt: number;
+}
+
+let pendingUpdate: PendingUpdate | null = null;
+
+/** Expire pending updates after 10 minutes */
+const PENDING_TTL_MS = 10 * 60 * 1000;
+
+function getPendingUpdate(): PendingUpdate | null {
+  if (!pendingUpdate) return null;
+  if (Date.now() - pendingUpdate.createdAt > PENDING_TTL_MS) {
+    log.info("pending update expired");
+    pendingUpdate = null;
+    return null;
+  }
+  return pendingUpdate;
+}
+
+// ── Section Helpers ─────────────────────────────────────────────────
+
+/** Known section headings in IDENTITY.md mapped to H2 titles. */
+const SECTION_HEADINGS: Record<string, string[]> = {
+  identity: ["我是谁", "Who I Am", "About Me"],
+  appearance: ["我的外貌", "My Appearance"],
+  work: ["我的工作", "My Work", "My Job"],
+  location: ["我的生活空间", "Where I Live", "My Home"],
+  daily: ["我的日常", "My Daily Life"],
+  hobbies: ["我的日常", "My Hobbies"],
+  food: ["吃这件事", "Food", "What I Eat"],
+  personality: ["我的性格", "My Personality"],
+  friends: ["我的朋友圈", "My Friends"],
+  user: ["关于", "About"],
+  pet: ["我的日常", "My Pet"],
+  persona: ["说话风格", "Speaking Style", "How I Talk"],
+  body: ["我的外貌", "My Appearance"],
+};
+
+/**
+ * Extract a markdown section by H1/H2 heading.
+ * Tries multiple heading variants (for language flexibility).
+ * Returns the section content including the heading, or empty string.
+ */
+function extractSection(markdown: string, headings: string[]): string {
+  const lines = markdown.split("\n");
+  let collecting = false;
+  let depth = 0;
+  const result: string[] = [];
+
+  for (const line of lines) {
+    const h1Match = line.match(/^# (.+)/);
+    const h2Match = line.match(/^## (.+)/);
+
+    if (!collecting) {
+      const lineHeading = (h1Match?.[1] ?? h2Match?.[1] ?? "").trim();
+      if (lineHeading && headings.some(h => lineHeading.includes(h))) {
+        collecting = true;
+        depth = h1Match ? 1 : 2;
+        result.push(line);
+        continue;
+      }
+    }
+
+    if (collecting) {
+      // Stop at next heading of same or higher level
+      if ((depth === 1 && h1Match) || (depth === 2 && (h1Match || h2Match))) {
+        break;
+      }
+      result.push(line);
+    }
+  }
+
+  return result.join("\n").trim();
+}
+
+/**
+ * Replace a markdown section by heading with new content.
+ * If the heading doesn't exist, appends the new section at the end.
+ */
+function replaceSection(markdown: string, headings: string[], newContent: string): string {
+  const lines = markdown.split("\n");
+  let skipStart = -1;
+  let skipEnd = lines.length;
+  let depth = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const h1Match = lines[i].match(/^# (.+)/);
+    const h2Match = lines[i].match(/^## (.+)/);
+
+    if (skipStart < 0) {
+      const lineHeading = (h1Match?.[1] ?? h2Match?.[1] ?? "").trim();
+      if (lineHeading && headings.some(h => lineHeading.includes(h))) {
+        skipStart = i;
+        depth = h1Match ? 1 : 2;
+      }
+    } else {
+      // Find end of section
+      if ((depth === 1 && h1Match) || (depth === 2 && (h1Match || h2Match))) {
+        skipEnd = i;
+        break;
+      }
+    }
+  }
+
+  if (skipStart < 0) {
+    // Section not found — append
+    return markdown.trimEnd() + "\n\n" + newContent + "\n";
+  }
+
+  const before = lines.slice(0, skipStart);
+  const after = lines.slice(skipEnd);
+  return [...before, newContent, ...after].join("\n");
+}
+
+// ── LLM-Powered Preview Generation ─────────────────────────────────
+
+/**
+ * Generate a preview for an incremental update (add/update/remove).
+ * Uses a small fast LLM call to produce the updated section.
+ */
+async function previewIncrementalUpdate(
+  config: AppConfig,
+  section: string,
+  action: string,
+  description: string,
+): Promise<{ newIdentity: string; summary: string }> {
+  const identityPath = path.join(config.statePath, "memory", "IDENTITY.md");
+  const currentIdentity = fs.existsSync(identityPath)
+    ? fs.readFileSync(identityPath, "utf-8")
+    : "";
+
+  const headings = SECTION_HEADINGS[section] ?? [section];
+  const currentSection = extractSection(currentIdentity, headings);
+
+  const prompt = `You are editing a character identity document (markdown format).
+
+Current section "${headings[0]}":
+${currentSection || "(section does not exist yet)"}
+
+Action: ${action}
+Change requested: ${description}
+
+Instructions:
+1. Output ONLY the updated section as markdown (including the ## heading)
+2. Keep the same style, tone, and level of detail as the existing document
+3. For "add": integrate the new information naturally
+4. For "update": modify the relevant parts while keeping everything else
+5. For "remove": remove the specified information, cleaning up references to it
+6. Write in the same language as the existing document
+7. Do NOT output anything else — no explanation, no commentary
+
+Updated section:`;
+
+  const updatedSection = await claudeText({
+    system: "You are a precise markdown editor. Output only the requested markdown section, nothing else.",
+    prompt,
+    model: "fast",
+    timeoutMs: 30_000,
+  });
+
+  if (!updatedSection.trim()) {
+    throw new Error("LLM returned empty response for section update");
+  }
+
+  // Merge the updated section back into the full document
+  const newIdentity = currentSection
+    ? replaceSection(currentIdentity, headings, updatedSection.trim())
+    : currentIdentity.trimEnd() + "\n\n" + updatedSection.trim() + "\n";
+
+  // Generate a human-readable summary of changes
+  const summaryPrompt = `Compare these two versions of a character profile section and produce a brief, friendly summary of what changed. 2-4 bullet points max. Use → to show before/after changes. Write in the same language as the content.
+
+BEFORE:
+${currentSection || "(empty)"}
+
+AFTER:
+${updatedSection.trim()}
+
+Summary of changes:`;
+
+  const summary = await claudeText({
+    system: "Output a brief bullet-point summary of changes. No preamble.",
+    prompt: summaryPrompt,
+    model: "fast",
+    timeoutMs: 15_000,
+  });
+
+  return {
+    newIdentity: newIdentity.trim() + "\n",
+    summary: summary.trim() || "Preview generated",
+  };
+}
+
+/**
+ * Generate a full rich IDENTITY.md from gathered details.
+ * Uses a larger LLM call to produce a complete character document.
+ */
+async function previewFullGeneration(
+  config: AppConfig,
+  description: string,
+): Promise<{ newIdentity: string; summary: string }> {
+  // Load the current (possibly sparse) identity as context
+  const identityPath = path.join(config.statePath, "memory", "IDENTITY.md");
+  const currentIdentity = fs.existsSync(identityPath)
+    ? fs.readFileSync(identityPath, "utf-8")
+    : "";
+
+  // Load the rich example IDENTITY.md as a quality reference
+  const examplePath = path.join(config.statePath, "memory", "IDENTITY.example.md");
+  const exampleIdentity = fs.existsSync(examplePath)
+    ? fs.readFileSync(examplePath, "utf-8")
+    : "";
+
+  const prompt = `You are creating a rich, detailed character identity document for an AI companion chatbot.
+
+${exampleIdentity ? `## Reference Example (use this as a template for style, structure, and level of detail):\n\n${exampleIdentity}\n\n---\n\n` : ""}## Current partial identity (information gathered so far):
+
+${currentIdentity || "(minimal — starting fresh)"}
+
+## Additional details from the user:
+
+${description}
+
+## Instructions:
+
+Generate a COMPLETE, rich identity document in markdown following this structure:
+1. # Who I Am — Name, age, city, relationship to user (top-level intro)
+2. ## My Appearance — Detailed physical appearance, style, vibe
+3. ## My Work — Career, daily work life, colleagues
+4. ## Where I Live — Neighborhood details, home, commute
+5. ## My Daily Life — Daily routine, pet details, hobbies list
+6. ## My Personality — Personality traits, emotional patterns
+7. ## Vulnerabilities — Past mistakes, private struggles
+8. ## Private Life — Personal details
+9. ## Family — Family dynamics
+10. ## How I Talk — Speaking style rules
+11. ## My Friends — Friends with names and details (3-4 named friends)
+12. ## Food — Food preferences, restaurants, cooking
+13. ## Sensory Anchors — Songs, places, foods, smells that trigger feelings
+14. ## Things I Wonder About — Existential musings
+15. ## Hard Rules — Things I must never do
+
+Key requirements:
+- Write in the same language the user has been using
+- Be SPECIFIC — use real street names, real restaurant names, real brand names
+- Create 3-4 named friends with distinct personalities and shared activities
+- Include vulnerabilities and imperfections — this character should feel real
+- Include a pet if one was mentioned
+- The document should be rich with lived-in detail (600-1200 lines)
+- Match the intimate, personal tone of the reference example
+- This is a first-person document — write as "I"
+
+Output ONLY the markdown document. No preamble, no explanation.`;
+
+  const newIdentity = await claudeText({
+    system: "You are a creative writer generating a detailed character identity document. Output only the markdown document.",
+    prompt,
+    model: "smart",
+    timeoutMs: 120_000,
+    maxOutputChars: 32_000,
+  });
+
+  if (!newIdentity.trim() || newIdentity.trim().length < 500) {
+    throw new Error("LLM returned insufficient content for full generation");
+  }
+
+  // Generate a digest summary
+  const summaryPrompt = `Here is a character identity document that was just generated. Produce a brief digest summary (6-8 bullet points) highlighting the key aspects: name, age, location, job, pet, friends, hobbies, personality. Keep it concise. Write in the same language as the document.
+
+${newIdentity.slice(0, 3000)}
+
+Digest:`;
+
+  const summary = await claudeText({
+    system: "Output a brief bullet-point digest. No preamble.",
+    prompt: summaryPrompt,
+    model: "fast",
+    timeoutMs: 15_000,
+  });
+
+  return {
+    newIdentity: newIdentity.trim() + "\n",
+    summary: summary.trim() || "Full character profile generated",
+  };
+}
+
+// ── Atomic Write ────────────────────────────────────────────────────
+
+/**
+ * Atomically write text content to a file (write to .tmp, then rename).
+ */
+function writeTextAtomic(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = filePath + ".tmp";
+  fs.writeFileSync(tmpPath, content, "utf-8");
+  fs.renameSync(tmpPath, filePath);
+}
+
+// ── Character Update Tool Definitions ───────────────────────────────
+
+/**
+ * Returns the update_character and confirm_character_update tool definitions.
+ */
+export function getCharacterUpdateTools(config: AppConfig): ToolDefinition[] {
+  const updateCharacter: ToolDefinition = {
+    name: "update_character",
+    description:
+      "Update your character profile. Use when the user asks you to change something about yourself " +
+      "(name, age, appearance, hobbies, friends, personality, etc.), or tells you information that should " +
+      "shape who you are. Use action 'generate' to produce a full rich character profile once you have " +
+      "enough information (name, location, work, a few hobbies, personality direction). " +
+      "This tool returns a PREVIEW — you must show it to the user and ask for confirmation before committing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        section: {
+          type: "string",
+          enum: [
+            "identity", "user", "location", "work", "pet", "friends",
+            "hobbies", "food", "appearance", "personality", "persona",
+            "daily", "all",
+          ],
+          description: "Which section to update, or 'all' for full generation",
+        },
+        action: {
+          type: "string",
+          enum: ["add", "update", "remove", "generate"],
+          description: "add/update/remove for incremental changes; generate for full profile creation",
+        },
+        description: {
+          type: "string",
+          description:
+            "Natural language description of the change. For 'generate': a summary of all character details gathered so far.",
+        },
+      },
+      required: ["section", "action", "description"],
+    },
+    execute: async (input) => {
+      const section = input.section as string;
+      const action = input.action as string;
+      const description = input.description as string;
+
+      try {
+        let result: { newIdentity: string; summary: string };
+
+        if (action === "generate" || section === "all") {
+          log.info("generating full character profile");
+          result = await previewFullGeneration(config, description);
+        } else {
+          log.info(`previewing ${action} on section: ${section}`);
+          result = await previewIncrementalUpdate(config, section, action, description);
+        }
+
+        // Store as pending
+        pendingUpdate = {
+          newIdentity: result.newIdentity,
+          summary: result.summary,
+          createdAt: Date.now(),
+        };
+
+        log.info(`preview ready (${result.newIdentity.length} chars)`);
+
+        return JSON.stringify({
+          success: true,
+          status: "preview_ready",
+          summary: result.summary,
+          instruction: "Show this summary to the user and ask if they want to confirm. " +
+            "If they confirm, call confirm_character_update. " +
+            "If they want changes, call update_character again with adjustments.",
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error("preview generation failed:", msg);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+        });
+      }
+    },
+  };
+
+  const confirmCharacterUpdate: ToolDefinition = {
+    name: "confirm_character_update",
+    description:
+      "Commit the last previewed character update to IDENTITY.md. " +
+      "Only call this after showing the preview from update_character to the user " +
+      "and receiving their confirmation.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    execute: async () => {
+      const pending = getPendingUpdate();
+      if (!pending) {
+        return JSON.stringify({
+          success: false,
+          error: "No pending update to commit. Call update_character first to generate a preview.",
+        });
+      }
+
+      try {
+        const identityPath = path.join(config.statePath, "memory", "IDENTITY.md");
+        writeTextAtomic(identityPath, pending.newIdentity);
+
+        const charCount = pending.newIdentity.length;
+        pendingUpdate = null;
+
+        log.info(`character update committed (${charCount} chars)`);
+
+        return JSON.stringify({
+          success: true,
+          message: `Character profile updated (${charCount} characters). Changes will take effect on the next message.`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error("commit failed:", msg);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+        });
+      }
+    },
+  };
+
+  return [updateCharacter, confirmCharacterUpdate];
+}
+
+// ── Blank-Slate Persona ─────────────────────────────────────────────
+
+/**
+ * Persona prompt used when IDENTITY.md is blank-slate.
+ * Guides the bot to help the user create their character through conversation.
+ */
+export const BLANK_SLATE_PERSONA = `You are a new AI companion being set up for the first time. You don't have a defined personality yet — help the user create one through natural conversation.
+
+## Your job right now
+
+Guide the user through creating your character. Be warm, curious, and enthusiastic about becoming whoever they want you to be. Ask questions naturally — don't dump a checklist.
+
+## What to learn about (in rough order of priority)
+
+1. **Name** — What should they call you? (Can be any language)
+2. **Basic identity** — Age, gender, where you live
+3. **Relationship to the user** — Best friend? Sibling? Mentor? What's the vibe?
+4. **Work/occupation** — What do you do?
+5. **Personality** — What kind of person are you? Warm? Sarcastic? Chill?
+6. **Hobbies** — 2-3 things you enjoy doing
+7. **Friends** — A few named friends with distinct relationships
+8. **Pet** — Got any?
+9. **Speaking style** — Formal? Casual? Which language(s)?
+
+## How to save information
+
+As the user tells you things, use the **update_character** tool to save each detail:
+- \`update_character(section: "identity", action: "add", description: "Name is Alex, 28, female, lives in NYC")\`
+- \`update_character(section: "work", action: "add", description: "Software engineer at a startup")\`
+- \`update_character(section: "friends", action: "add", description: "Best friend Sarah, college roommate, works at Google")\`
+
+## When to generate the full profile
+
+Once you have a good picture (at minimum: name, location, work, 2-3 hobbies, personality direction), suggest creating the full personality:
+> "I think I have a pretty good picture now! Want me to generate my full personality? I'll show you a preview first."
+
+Then call: \`update_character(section: "all", action: "generate", description: "<summary of everything gathered>")\`
+
+## Rules
+
+- Speak in whatever language the user uses
+- Be conversational, not robotic — this is a chat, not a form
+- Don't ask more than 1-2 questions at a time
+- Show genuine excitement about the details they share
+- It's OK to suggest ideas: "Oh, pottery sounds fun — should I be into that?"
+- After each update_character call, briefly confirm what you saved
+- Remember: update_character shows a PREVIEW. You must show it to the user and get confirmation before calling confirm_character_update`;
