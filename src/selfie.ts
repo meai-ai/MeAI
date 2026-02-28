@@ -620,6 +620,8 @@ let _singleton: SelfieEngine | null = null;
 
 export function initSelfie(cfg: AppConfig): SelfieEngine {
   _singleton = new SelfieEngine(cfg);
+  // Initialize sticker templates lazily (character is loaded by now)
+  initStickerTemplates();
   return _singleton;
 }
 
@@ -720,7 +722,12 @@ export function getStickerTemplates(): Array<{
 }
 
 /** @deprecated Use getStickerTemplates() instead — this is kept for backward compat */
-export const STICKER_TEMPLATES = getStickerTemplates();
+export let STICKER_TEMPLATES: ReturnType<typeof getStickerTemplates> = [];
+
+/** Initialize STICKER_TEMPLATES lazily (called after initCharacter). */
+export function initStickerTemplates(): void {
+  STICKER_TEMPLATES = getStickerTemplates();
+}
 
 // ── Internal helpers (module-level, not class members) ───────────────
 
