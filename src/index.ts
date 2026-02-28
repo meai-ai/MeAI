@@ -81,6 +81,17 @@ import { llmRegistry } from "./llm/registry.js";
 import { expressionRegistry } from "./expressions/registry.js";
 import { senseRegistry } from "./senses/registry.js";
 
+async function safeInit(name: string, fn: () => unknown | Promise<unknown>, critical = false): Promise<boolean> {
+  try {
+    await fn();
+    return true;
+  } catch (err) {
+    console.error(`[init] ${critical ? "FATAL" : "WARNING"}: ${name} failed:`, (err as Error).message);
+    if (critical) process.exit(1);
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   console.log("MeAI starting...");
 
@@ -88,24 +99,32 @@ async function main(): Promise<void> {
   console.log(`Config loaded. State path: ${config.statePath}`);
   console.log(`Conversation: ${config.conversationProvider} (${config.conversationProvider === "openai" ? config.openaiModel : config.model})`);
 
-  // Initialize character definition — must be early, before modules that use getCharacter()
-  initCharacter(config.statePath);
+  let moduleCount = 0;
+  let moduleTotal = 0;
+
+  const track = async (name: string, fn: () => unknown | Promise<unknown>, critical = false) => {
+    moduleTotal++;
+    if (await safeInit(name, fn, critical)) moduleCount++;
+  };
+
+  // Critical modules — crash on failure
+  await track("character", () => initCharacter(config.statePath), true);
 
   // Initialize shared search module (Tavily + DuckDuckGo fallback)
-  initSearch(config);
+  await track("search", () => initSearch(config));
 
   // Initialize world module — market data + LLM-generated daily schedule
-  initWorld({ statePath: config.statePath });
+  await track("world", () => initWorld({ statePath: config.statePath }));
 
   // Initialize emotion engine — causal mood generation from real-world signals
-  initEmotion({ statePath: config.statePath });
+  await track("emotion", () => initEmotion({ statePath: config.statePath }));
 
   // Initialize interests — subscriptions persistence for YouTube + podcasts
-  initInterests(config.statePath);
+  await track("interests", () => initInterests(config.statePath));
 
   // Initialize hierarchical memory store (split into 5 category files)
   const storeManager = initStoreManager(config.statePath);
-  await storeManager.migrateIfNeeded();
+  await track("memory-store", () => storeManager.migrateIfNeeded());
 
   // Initialize mem0 semantic memory engine (OpenAI gpt-4o-mini + text-embedding-3-small)
   const mem0 = await initMem0(config);
@@ -116,30 +135,30 @@ async function main(): Promise<void> {
   }
 
   // Initialize life simulation modules — hobbies, friends, entertainment, body
-  initHobbies(config.statePath);
-  initFriends(config.statePath);
-  initEntertainment(config.statePath);
-  initBody(config.statePath);
-  initNotifications(config.statePath);
-  initSelfie(config);
-  initTTS(config);
-  initVideo(config);
-  initMusic(config);
-  initContextEval(config.statePath);
-  initGoals(config.statePath);
-  initJournal(config.statePath);
-  initOpinions(config.statePath);
-  initRelationshipModel(config.statePath);
-  initNarrative(config.statePath);
-  initDocuments(config.statePath);
-  initTimeline(config.statePath);
+  await track("hobbies", () => initHobbies(config.statePath));
+  await track("friends", () => initFriends(config.statePath));
+  await track("entertainment", () => initEntertainment(config.statePath));
+  await track("body", () => initBody(config.statePath));
+  await track("notifications", () => initNotifications(config.statePath));
+  await track("selfie", () => initSelfie(config));
+  await track("tts", () => initTTS(config));
+  await track("video", () => initVideo(config));
+  await track("music", () => initMusic(config));
+  await track("context-eval", () => initContextEval(config.statePath));
+  await track("goals", () => initGoals(config.statePath));
+  await track("journal", () => initJournal(config.statePath));
+  await track("opinions", () => initOpinions(config.statePath));
+  await track("relationship-model", () => initRelationshipModel(config.statePath));
+  await track("narrative", () => initNarrative(config.statePath));
+  await track("documents", () => initDocuments(config.statePath));
+  await track("timeline", () => initTimeline(config.statePath));
 
   // Discover and initialize extensible registries (all 5 axes)
   await Promise.all([
-    moduleRegistry.discover(),
-    llmRegistry.discover(),
-    expressionRegistry.discover(),
-    senseRegistry.discover(),
+    safeInit("module-registry", () => moduleRegistry.discover()),
+    safeInit("llm-registry", () => llmRegistry.discover()),
+    safeInit("expression-registry", () => expressionRegistry.discover()),
+    safeInit("sense-registry", () => senseRegistry.discover()),
   ]);
 
   // Configure LLM role mapping from config
@@ -149,10 +168,10 @@ async function main(): Promise<void> {
   }
 
   await Promise.all([
-    moduleRegistry.initAll(config),
-    llmRegistry.initAll(config),
-    expressionRegistry.initAll(config),
-    senseRegistry.initAll(config),
+    safeInit("modules", () => moduleRegistry.initAll(config)),
+    safeInit("llm-providers", () => llmRegistry.initAll(config)),
+    safeInit("expressions", () => expressionRegistry.initAll(config)),
+    safeInit("senses", () => senseRegistry.initAll(config)),
   ]);
 
   const session = new SessionManager(config);
@@ -162,7 +181,7 @@ async function main(): Promise<void> {
   // Initialize moments — posts life moments to a channel
   // For Telegram, we still need the underlying bot for moments + approval handlers
   const telegramBot = channel instanceof TelegramChannel ? channel.getBot() : null;
-  initMoments(config, telegramBot!);
+  await track("moments", () => initMoments(config, telegramBot!));
 
   // Wire up channel callbacks for tool approval gates
   tools.setCallbacks({
@@ -188,7 +207,8 @@ async function main(): Promise<void> {
   }
 
   // Curiosity engine — the character explores the web and learns autonomously
-  const curiosity = new CuriosityEngine(config);
+  let curiosity!: CuriosityEngine;
+  await track("curiosity", () => { curiosity = new CuriosityEngine(config); });
 
   // X (Twitter) integration — autonomous posting + real-time reading
   let social: SocialEngine | null = null;
@@ -282,6 +302,8 @@ async function main(): Promise<void> {
     const optimizer = new PromptOptimizer(config);
     optimizer.start();
   }
+
+  console.log(`[init] MeAI ready — ${moduleCount}/${moduleTotal} modules active`);
 
   await channel.start();
 }

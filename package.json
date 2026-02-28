@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node --disable-warning=DEP0040 --import tsx/esm src/index.ts",
     "dev": "node --disable-warning=DEP0040 --import tsx/esm src/index.ts",
+    "setup": "node --disable-warning=DEP0040 --import tsx/esm scripts/setup.ts",
+    "check": "node --disable-warning=DEP0040 --import tsx/esm scripts/check.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -15,11 +17,13 @@
     "chokidar": "^3.6.0",
     "mem0ai": "^2.2.3",
     "openai": "^4.0.0",
-    "playwright": "^1.58.2",
     "telegraf": "^4.16.0",
     "tsx": "^4.19.0",
     "yaml": "^2.8.2",
     "zod": "^3.23.0"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.58.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -16,38 +16,63 @@ MeAI ships with an example character template, but you can define your own chara
 ## Quick Start
 
 ```bash
-# 1. Clone and install
+# 1. Install
 git clone https://github.com/meai-ai/MeAI.git
 cd MeAI
 npm install
 
-# 2. Configure
-cp data/config.example.json data/config.json
-# Edit data/config.json with your API keys (see Configuration below)
+# 2. Setup (interactive wizard — guides you through API keys and character creation)
+npm run setup
 
-# 3. Install Playwright browser (needed for web exploration)
-npx playwright install chromium
-
-# 4. Run
+# 3. Run
 npm start
 ```
 
+To verify your setup before starting: `npm run check`
+
+## What You Need
+
+| Service | Required | Cost | What It Enables |
+|---------|----------|------|-----------------|
+| [Telegram bot token](https://t.me/BotFather) | Yes | Free | Chat interface |
+| [Anthropic API key](https://console.anthropic.com/) | Yes | ~$5/mo | Conversation |
+| [OpenAI API key](https://platform.openai.com/api-keys) | No | ~$1/mo | Semantic memory search |
+| [fal.ai API key](https://fal.ai/dashboard/keys) | No | ~$1/mo | AI selfie generation |
+| [Fish Audio API key](https://fish.audio) | No | ~$1/mo | Voice messages |
+| X/Twitter API keys | No | Free | Social posting |
+| [Claude CLI](https://claude.ai/code) (Max subscription) | No | $200/mo | Background tasks at no API cost |
+
 ## Configuration
 
-Edit `data/config.json` with your credentials:
+The setup wizard (`npm run setup`) creates `data/config.json` and `data/character.yaml` for you.
 
-| Key | Required | Description |
-|-----|----------|-------------|
-| `telegramBotToken` | Yes | From [@BotFather](https://t.me/BotFather) |
-| `allowedChatId` | Yes | Your Telegram user ID (use [@userinfobot](https://t.me/userinfobot)) |
-| `anthropicApiKey` | Yes | From [Anthropic Console](https://console.anthropic.com/) |
-| `openaiApiKey` | No | Enables mem0 semantic memory + optional GPT conversation |
-| `xApiKey` / `xApiKeySecret` / `xAccessToken` / `xAccessTokenSecret` | No | Enables X/Twitter posting and reading |
-| `falApiKey` | No | Enables AI selfie/image generation ([fal.ai](https://fal.ai)) |
-| `fishAudioApiKey` / `fishAudioVoiceId` | No | Enables voice messages ([Fish Audio](https://fish.audio)) |
-| `tavilyApiKey` | No | High-quality web search (falls back to DuckDuckGo) |
-| `sunoApiKey` | No | Enables music composition |
-| `momentsChannelId` | No | Telegram channel ID for "朋友圈" (life moments timeline) |
+### Manual Setup
+
+If you prefer to configure manually, create `data/config.json`:
+
+```json
+{
+  "telegramBotToken": "your-bot-token",
+  "allowedChatId": 123456789,
+  "anthropicApiKey": "sk-ant-..."
+}
+```
+
+Copy `data/character.minimal.yaml` to `data/character.yaml` and edit it.
+
+### Environment Variables
+
+For Docker/server deployments, you can use environment variables instead of (or in addition to) `config.json`:
+
+```bash
+export TELEGRAM_BOT_TOKEN="..."
+export ALLOWED_CHAT_ID="123456789"
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="..."       # optional
+export FAL_API_KEY="..."          # optional
+```
+
+Environment variables override values in `config.json`.
 
 ### LLM Routing
 
@@ -112,6 +137,8 @@ Create `data/skills/<name>/SKILL.md` (knowledge) and optionally `data/skills/<na
 ## Commands
 
 ```bash
+npm run setup      # Interactive setup wizard
+npm run check      # Validate config and API connectivity
 npm start          # Run the bot
 npm run typecheck  # Type-check without emitting
 ```

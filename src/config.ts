@@ -119,31 +119,54 @@ function seedDefaults(statePath: string): void {
   }
 }
 
+/**
+ * Build config overrides from environment variables.
+ * Env vars take precedence over config.json values.
+ */
+function getEnvOverrides(): Record<string, unknown> {
+  const overrides: Record<string, unknown> = {};
+  if (process.env.TELEGRAM_BOT_TOKEN) overrides.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (process.env.ALLOWED_CHAT_ID) overrides.allowedChatId = Number(process.env.ALLOWED_CHAT_ID);
+  if (process.env.ANTHROPIC_API_KEY) overrides.anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  if (process.env.OPENAI_API_KEY) overrides.openaiApiKey = process.env.OPENAI_API_KEY;
+  if (process.env.FAL_API_KEY) overrides.falApiKey = process.env.FAL_API_KEY;
+  if (process.env.FISH_AUDIO_API_KEY) overrides.fishAudioApiKey = process.env.FISH_AUDIO_API_KEY;
+  if (process.env.TAVILY_API_KEY) overrides.tavilyApiKey = process.env.TAVILY_API_KEY;
+  return overrides;
+}
+
 export function loadConfig(): AppConfig {
   const configFile =
     process.env.MEAI_CONFIG ??
     path.join(PROJECT_ROOT, "data", "config.json");
 
   const resolved = resolveHome(configFile);
+  const envOverrides = getEnvOverrides();
 
-  if (!fs.existsSync(resolved)) {
+  let raw: Record<string, unknown> = {};
+
+  if (fs.existsSync(resolved)) {
+    try {
+      raw = JSON.parse(fs.readFileSync(resolved, "utf-8")) as Record<string, unknown>;
+    } catch (err) {
+      console.error(`Failed to parse config file: ${resolved}`);
+      console.error(err);
+      process.exit(1);
+    }
+  } else if (Object.keys(envOverrides).length > 0) {
+    console.log("No config.json found — using environment variables.");
+  } else {
     console.error(`Config file not found: ${resolved}`);
     console.error(
-      "Create data/config.json with telegramBotToken, allowedChatId, and anthropicApiKey.",
+      "Run 'npm run setup' to create one, or set TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_ID, and ANTHROPIC_API_KEY environment variables.",
     );
     process.exit(1);
   }
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(fs.readFileSync(resolved, "utf-8"));
-  } catch (err) {
-    console.error(`Failed to parse config file: ${resolved}`);
-    console.error(err);
-    process.exit(1);
-  }
+  // Env vars override config.json values
+  const merged = { ...raw, ...envOverrides };
 
-  const result = ConfigSchema.safeParse(raw);
+  const result = ConfigSchema.safeParse(merged);
   if (!result.success) {
     console.error("Invalid config:");
     for (const issue of result.error.issues) {
