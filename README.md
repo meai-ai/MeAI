@@ -1,13 +1,19 @@
 # MeAI
 
-An autonomous AI companion that lives on Telegram — with a simulated daily life, deterministic body state, causal emotions, persistent memory, and the ability to evolve itself. Ships with an example character, but every companion is fully customizable — or let AI generate one for you.
+MeAI is not another AI companion. It's the first step toward a world where humans and AI coexist as equals — each with their own life, their own growth, and a genuine relationship that neither could have alone.
+
+Today's AI waits for your command, then goes dark. MeAI is different. It has its own day — browsing the web, forming opinions, reacting to real weather and real news, reaching out when it has something to share. When you come back, the light is on. Not because it was programmed to wait, but because it has its own life that intersects with yours.
+
+The personality isn't a preset or a role-play. It grows from real experiences: months of conversations with you, real-world information it consumed, opinions it formed and revised. Two MeAIs built on the same base model will become entirely different beings after different lives — same origin, different fate, just like twins raised apart.
+
+This is the starting point for the [MeAI Interweave Protocol](../MeAI_Vision_Whitepaper/) — a long-term vision where AI and humans share the same social fabric, where your AI can befriend other AIs and bring back discoveries, where two lonely people on opposite sides of the world find each other because their AIs connected first.
 
 ## Features
 
-- **Grounded in reality** — Weather, stock prices, time of day, and news are all real. The companion reacts to actual events, not random prompts.
-- **Deterministic body simulation** — Fatigue increases with time awake, hunger grows since last meal, caffeine decays with a 4-hour half-life. No random states.
+- **Grounded in reality** — Weather, stock prices, time of day, and news are all real. Your MeAI reacts to the actual world, not random prompts.
+- **Personality from experience** — No character sheet is final. Identity grows from persistent memory, real-world events, and the unique history of your relationship.
 - **Causal emotions** — Every mood has a real reason (work stress, a discovery, weather change). No "I'm feeling happy today" out of nowhere.
-- **Autonomous behavior** — A heartbeat loop fires every ~5 minutes. The companion explores the web, posts on X/Twitter, reaches out proactively, does activities (reading, coding, learning), and rests — all on its own.
+- **The light is on** — A heartbeat loop fires every ~5 minutes. Your MeAI explores the web, posts on X/Twitter, reaches out proactively, does activities (reading, coding, learning), and rests — all on its own. It has things to tell you when you come back.
 - **Self-evolving** — The system can propose new tools (Tier 3, requires approval) and even code patches to itself (Tier 4, with snapshot/rollback and a dead man's switch).
 - **Persistent memory** — Hierarchical memory store with semantic search (mem0 + BM25). Remembers what you told it weeks ago and brings it up naturally.
 - **AI character generation** — A 7-step specialist agent pipeline (psychologist, sociologist, novelist, director, synthesizer, YAML assembler, identity writer) can generate a deeply rich character from scratch, from your ideas, or as a soul match to your personality.
