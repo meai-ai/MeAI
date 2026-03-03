@@ -13,10 +13,13 @@
     "setup": "node --disable-warning=DEP0040 --import tsx/esm scripts/setup.ts",
     "check": "node --disable-warning=DEP0040 --import tsx/esm scripts/check.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:maip": "node --disable-warning=DEP0040 --import tsx/esm scripts/test-maip.ts"
   },
   "dependencies": {
     "@maip/agent": "file:../MAIP/packages/maip-agent",
+    "@maip/core": "file:../MAIP/packages/maip-core",
+    "@maip/node": "file:../MAIP/packages/maip-node",
     "@anthropic-ai/sdk": "^0.40.1",
     "@fal-ai/client": "^1.9.3",
     "chokidar": "^3.6.0",
