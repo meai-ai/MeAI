@@ -302,6 +302,30 @@ async function main(): Promise<void> {
   const optimizer = new PromptOptimizer(config);
   optimizer.start();
 
+  // ── MAIP Protocol Bridge (optional) ────────────────────────────────
+  if (config.maip?.enabled) {
+    try {
+      const { initMAIP, recordHeartbeatAction } = await import("./maip/bridge.js");
+      const maipBridge = await initMAIP(config);
+      if (maipBridge) {
+        // Hook heartbeat → MAIP homecoming reports
+        heartbeat.setOnPulse(recordHeartbeatAction);
+
+        // Register MAIP channel handler — MAIP peers route through the same agent loop
+        const maipChannel = maipBridge.getChannel();
+        if (maipChannel) {
+          maipChannel.onMessage(async (text, chatId, sendReply, editReply, sendTyping) => {
+            await agent.handleMessage(text, chatId, sendReply, editReply, sendTyping);
+          });
+        }
+
+        console.log(`[maip] Bridge started — DID: ${maipBridge.getDid()}`);
+      }
+    } catch (err) {
+      console.error("[maip] Failed to initialize:", (err as Error).message);
+    }
+  }
+
   console.log(`[init] MeAI ready — ${moduleCount}/${moduleTotal} modules active`);
 
   await channel.start();

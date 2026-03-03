@@ -16,6 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@maip/agent": "file:../MAIP/packages/maip-agent",
     "@anthropic-ai/sdk": "^0.40.1",
     "@fal-ai/client": "^1.9.3",
     "chokidar": "^3.6.0",

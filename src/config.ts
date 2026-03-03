@@ -56,6 +56,19 @@ const ConfigSchema = z.object({
     embedding: z.string().default("anthropic-api"),
     vision: z.string().default("anthropic-api"),
   }).default({}),
+  /** MAIP Protocol — optional, enables federated AI agent networking */
+  maip: z.object({
+    enabled: z.boolean().default(false),
+    port: z.number().int().positive(),
+    publicUrl: z.string().url(),
+    guardianDid: z.string().optional(),
+    guardianEndpoint: z.string().optional(),
+    autonomyLevel: z.number().int().min(0).max(3).optional(),
+    registryUrls: z.array(z.string()).optional(),
+    interests: z.array(z.string()).optional(),
+    dailyInteractionCap: z.number().int().optional(),
+    quietPeriod: z.tuple([z.number(), z.number()]).optional(),
+  }).optional(),
 });
 
 function resolveHome(p: string): string {
@@ -86,6 +99,7 @@ function ensureDirectories(statePath: string): void {
     path.join(statePath, "tts"),
     path.join(statePath, "music"),
     path.join(statePath, "music", "generated"),
+    path.join(statePath, "maip"),
   ];
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true });

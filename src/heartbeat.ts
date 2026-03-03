@@ -175,6 +175,7 @@ export class Heartbeat {
   private lastNarratedAt = 0;
   private lastNarratedCategory = "";
   private narrationCooldownMs = 10 * 60 * 1000; // default 10 min, updated dynamically by LLM
+  private onPulseCallback: ((action: string, detail?: string) => void) | null = null;
 
   // Block transition: tracks the last seen block to detect changes
   private lastBlockKey = "";
@@ -205,6 +206,11 @@ export class Heartbeat {
   /** Connect watchdog for health checks + budget enforcement */
   setWatchdog(watchdog: WatchdogEngine): void {
     this.watchdog = watchdog;
+  }
+
+  /** Register a callback invoked after each heartbeat pulse (e.g. for MAIP reporting). */
+  setOnPulse(callback: (action: string, detail?: string) => void): void {
+    this.onPulseCallback = callback;
   }
 
   start(): void {
@@ -453,6 +459,9 @@ export class Heartbeat {
         executed,
         duration_ms: Date.now() - startMs,
       });
+
+      // Notify MAIP bridge
+      this.onPulseCallback?.(decision.action, decision.reason);
 
       if (busySkip) {
         console.log(`[heartbeat] 💓 #${this.pulseCount} — ${decision.reason}`);

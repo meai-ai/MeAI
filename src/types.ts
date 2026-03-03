@@ -46,6 +46,19 @@ export interface AppConfig {
     embedding?: string;
     vision?: string;
   };
+  /** MAIP Protocol — optional, enables federated AI agent networking */
+  maip?: {
+    enabled: boolean;
+    port: number;
+    publicUrl: string;
+    guardianDid?: string;
+    guardianEndpoint?: string;
+    autonomyLevel?: number;
+    registryUrls?: string[];
+    interests?: string[];
+    dailyInteractionCap?: number;
+    quietPeriod?: [number, number];
+  };
 }
 
 // ── Memory (Tier 1) ────────────────────────────────────────────────
