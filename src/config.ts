@@ -19,7 +19,7 @@ import type { AppConfig } from "./types.js";
 /** Absolute path to the project root (parent of src/). */
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const ConfigSchema = z.object({
+export const ConfigSchema = z.object({
   telegramBotToken: z.string().min(1),
   allowedChatId: z.number().int(),
   anthropicApiKey: z.string().min(1),
@@ -69,9 +69,17 @@ const ConfigSchema = z.object({
     dailyInteractionCap: z.number().int().optional(),
     quietPeriod: z.tuple([z.number(), z.number()]).optional(),
   }).optional(),
+}).superRefine((data, ctx) => {
+  if (data.conversationProvider === "openai" && !data.openaiApiKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "openaiApiKey is required when conversationProvider is \"openai\"",
+      path: ["openaiApiKey"],
+    });
+  }
 });
 
-function resolveHome(p: string): string {
+export function resolveHome(p: string): string {
   if (p.startsWith("~/")) {
     return path.join(os.homedir(), p.slice(2));
   }

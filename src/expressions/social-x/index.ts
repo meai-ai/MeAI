@@ -9,8 +9,10 @@
 
 import type { AppConfig } from "../../types.js";
 import type { ExpressionProvider, ExpressionType } from "../types.js";
+import { XClient, type XCredentials } from "../../x-client.js";
 
 let hasCredentials = false;
+let xClient: XClient | null = null;
 
 const provider: ExpressionProvider = {
   id: "social-x",
@@ -25,6 +27,12 @@ const provider: ExpressionProvider = {
       config.xAccessTokenSecret
     );
     if (hasCredentials) {
+      xClient = new XClient({
+        apiKey: config.xApiKey!,
+        apiKeySecret: config.xApiKeySecret!,
+        accessToken: config.xAccessToken!,
+        accessTokenSecret: config.xAccessTokenSecret!,
+      });
       console.log("[expressions:social-x] X API credentials configured");
     }
   },
@@ -34,12 +42,15 @@ const provider: ExpressionProvider = {
   },
 
   async postSocial(text: string, _media?: Buffer): Promise<{ postId?: string; url?: string }> {
-    if (!hasCredentials) throw new Error("X API credentials not configured");
+    if (!hasCredentials || !xClient) throw new Error("X API credentials not configured");
 
-    // This provider delegates to the existing SocialEngine/XClient
-    // for now. Full extraction would move XClient logic here.
-    console.log(`[expressions:social-x] Would post: ${text.slice(0, 100)}`);
-    return { postId: undefined, url: undefined };
+    const result = await xClient.postTweet(text);
+    if (!result.success) {
+      throw new Error(`X post failed: ${result.error ?? "unknown error"}`);
+    }
+
+    const url = result.tweetId ? `https://x.com/i/status/${result.tweetId}` : undefined;
+    return { postId: result.tweetId, url };
   },
 };
 

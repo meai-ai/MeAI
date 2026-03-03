@@ -17,15 +17,26 @@
  * - Always-on skills (e.g. claude-code) bypass scoring entirely
  */
 
-import type { Skill } from "../types.js";
+import type { Skill, AppConfig } from "../types.js";
 
 // ── Configuration ────────────────────────────────────────────────────
 
 /** Maximum number of skills to fully inject per turn (excluding always-on). */
 const MAX_SKILLS_PER_TURN = 6;
 
-/** Skills that are always loaded regardless of relevance score. */
-const ALWAYS_ON_SKILLS = new Set(["claude-code", "datetime", "weather", "web-search", "x-browser", "selfie", "tts"]);
+/** Base skills that are always loaded regardless of relevance score. */
+const BASE_ALWAYS_ON_SKILLS = ["claude-code", "datetime", "weather", "web-search", "x-browser"];
+
+/**
+ * Get the set of always-on skills, conditionally including skills
+ * that depend on API keys being configured.
+ */
+export function getAlwaysOnSkills(config?: AppConfig): Set<string> {
+  const skills = [...BASE_ALWAYS_ON_SKILLS];
+  if (config?.falApiKey) skills.push("selfie");
+  if (config?.fishAudioApiKey) skills.push("tts");
+  return new Set(skills);
+}
 
 /** Boost multiplier for skills whose tools were called in the last N turns. */
 const RECENCY_BOOST = 2.0;
@@ -173,13 +184,17 @@ export interface SkillSelection {
  * @param userMessage       Current user message text
  * @param recentlyUsedSkills  Set of skill names used in the last few turns
  * @param maxSkills         Max skills to select (default: MAX_SKILLS_PER_TURN)
+ * @param config            App config — used to determine conditional always-on skills
  */
 export function selectSkills(
   allSkills: Skill[],
   userMessage: string,
   recentlyUsedSkills: Set<string> = new Set(),
   maxSkills: number = MAX_SKILLS_PER_TURN,
+  config?: AppConfig,
 ): SkillSelection {
+  const alwaysOnSkills = getAlwaysOnSkills(config);
+
   // Build compact directory (always included for the model's awareness)
   const directory = new Map<string, string>();
   for (const skill of allSkills) {
@@ -192,7 +207,7 @@ export function selectSkills(
   }
 
   // If there are few enough skills, just load them all (no filtering needed)
-  if (allSkills.length <= maxSkills + ALWAYS_ON_SKILLS.size) {
+  if (allSkills.length <= maxSkills + alwaysOnSkills.size) {
     return {
       selected: allSkills,
       scores: allSkills.map((s) => ({ skill: s, score: 1, reason: "all loaded (below threshold)" })),
@@ -218,7 +233,7 @@ export function selectSkills(
   const candidates: SkillScore[] = [];
 
   for (const entry of scores) {
-    if (ALWAYS_ON_SKILLS.has(entry.skill.name)) {
+    if (alwaysOnSkills.has(entry.skill.name)) {
       alwaysOn.push(entry.skill);
     } else {
       candidates.push(entry);
@@ -240,7 +255,7 @@ export function selectSkills(
   // recently used skills so context is maintained
   if (selected.length === alwaysOn.length && recentlyUsedSkills.size > 0) {
     for (const skill of allSkills) {
-      if (recentlyUsedSkills.has(skill.name) && !ALWAYS_ON_SKILLS.has(skill.name)) {
+      if (recentlyUsedSkills.has(skill.name) && !alwaysOnSkills.has(skill.name)) {
         selected.push(skill);
       }
     }

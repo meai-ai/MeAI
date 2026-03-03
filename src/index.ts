@@ -317,6 +317,8 @@ async function main(): Promise<void> {
           maipChannel.onMessage(async (text, chatId, sendReply, editReply, sendTyping) => {
             await agent.handleMessage(text, chatId, sendReply, editReply, sendTyping);
           });
+        } else {
+          console.warn("[maip] Bridge started but getChannel() returned null");
         }
 
         console.log(`[maip] Bridge started — DID: ${maipBridge.getDid()}`);

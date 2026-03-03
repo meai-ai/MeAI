@@ -5,7 +5,7 @@
  * Install Ollama (https://ollama.ai), pull a model, and configure:
  *   { "llm": { "background": "ollama" } }
  *
- * TODO: Implement complete() using Ollama's REST API.
+ * Uses Ollama's REST API for completion and embeddings.
  */
 
 import type { AppConfig } from "../../types.js";

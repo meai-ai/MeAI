@@ -636,7 +636,7 @@ export class AgentLoop {
       recentToolCalls,
       allSkills.map((s) => s.name),
     );
-    const skillSelection = selectSkills(allSkills, text, recentlyUsed);
+    const skillSelection = selectSkills(allSkills, text, recentlyUsed, undefined, this.config);
     this.lastSkillSelection = skillSelection;
 
     const selectedNames = new Set(skillSelection.selected.map((s) => s.name));

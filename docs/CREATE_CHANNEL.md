@@ -57,6 +57,8 @@ The `sendReply`, `editReply`, and `sendTyping` closures let the agent loop inter
 
 ## Registration
 
+**Important:** Every new channel must be registered in `src/channel/factory.ts` with a `case` entry in the switch statement, or it won't be selectable via `config.channel`.
+
 Add your channel to `src/channel/factory.ts`:
 
 ```typescript

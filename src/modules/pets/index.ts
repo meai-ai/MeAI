@@ -9,19 +9,29 @@
  * This serves as a template for contributors creating new modules.
  */
 
+import path from "node:path";
 import type { AppConfig, ToolDefinition } from "../../types.js";
 import type { SimModule, ContextBlock, HeartbeatActionDef } from "../types.js";
 import { getCharacter } from "../../character.js";
+import { readJsonSafe, writeJsonAtomic } from "../../lib/atomic-file.js";
 
 /** Track last pet interaction for cooldown. */
 let lastInteractionAt = 0;
+let persistPath = "";
+
+interface PetsState {
+  lastInteractionAt: number;
+}
 
 const petsModule: SimModule = {
   id: "pets",
   name: "Pet Simulation",
 
-  init(_config: AppConfig): void {
+  init(config: AppConfig): void {
     const char = getCharacter();
+    persistPath = path.join(config.statePath, "modules", "pets.json");
+    const saved = readJsonSafe<PetsState>(persistPath, { lastInteractionAt: 0 });
+    lastInteractionAt = saved.lastInteractionAt;
     if (char.pet) {
       console.log(`[modules:pets] Loaded pet: ${char.pet.name} (${char.pet.type})`);
     } else {
@@ -86,6 +96,9 @@ const petsModule: SimModule = {
     if (now - lastInteractionAt < 60 * 60 * 1000) return false;
 
     lastInteractionAt = now;
+    if (persistPath) {
+      writeJsonAtomic(persistPath, { lastInteractionAt } satisfies PetsState);
+    }
     console.log(`[modules:pets] Interacted with ${char.pet.name}`);
     return true;
   },

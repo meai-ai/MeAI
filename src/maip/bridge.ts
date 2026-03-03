@@ -52,9 +52,13 @@ export async function initMAIP(config: AppConfig): Promise<MAIPBridge | null> {
 
   // Periodic persona sync (every 5 min)
   personaSyncTimer = setInterval(async () => {
-    const snapshot = exportMemorySnapshot();
-    const emotion = await getCurrentMAIPEmotionalState();
-    bridge?.syncPersona(snapshot, emotion);
+    try {
+      const snapshot = exportMemorySnapshot();
+      const emotion = await getCurrentMAIPEmotionalState();
+      bridge?.syncPersona(snapshot, emotion);
+    } catch (err) {
+      console.warn("[maip] Persona sync failed:", (err as Error).message);
+    }
   }, 5 * 60 * 1000);
 
   // Initial persona sync
