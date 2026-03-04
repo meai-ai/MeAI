@@ -18,6 +18,31 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig, Memory } from "../types.js";
 
+// ── Types ────────────────────────────────────────────────────────────
+
+/** Shape of items returned by mem0's search/getAll */
+interface Mem0MemoryItem {
+  id: string;
+  memory: string;
+  score?: number;
+  metadata?: Record<string, unknown>;
+  hash?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Subset of the mem0 Memory class methods we actually use. */
+interface Mem0Client {
+  add(data: unknown, opts: Record<string, unknown>): Promise<{ results?: Mem0MemoryItem[] }>;
+  search(query: string, opts: Record<string, unknown>): Promise<{ results?: Mem0MemoryItem[] }>;
+  getAll(opts: Record<string, unknown>): Promise<{ results?: Mem0MemoryItem[] }>;
+}
+
+/** OpenAI embeddings API response */
+interface EmbeddingResponse {
+  data: Array<{ embedding: number[] }>;
+}
+
 // Re-export mem0 types we use
 export interface Mem0SearchResult {
   id: string;
@@ -62,7 +87,7 @@ function getDbPath(): string {
 const EMBEDDING_DIM = 1536;
 
 export class Mem0Engine {
-  private mem0: any = null;
+  private mem0: Mem0Client | null = null;
   private ready = false;
   private synced = false;
   private config: AppConfig;
@@ -141,7 +166,7 @@ export class Mem0Engine {
       },
       disableHistory: true,
       historyDbPath: path.join(this.config.statePath, "memory", "mem0-history.db"),
-    });
+    }) as unknown as Mem0Client;
 
     // Replace mem0's embedder with raw fetch()-based implementation.
     // Bypasses the OpenAI SDK entirely to guarantee correct dimensions.
@@ -149,6 +174,13 @@ export class Mem0Engine {
     const embedModel = "text-embedding-3-small";
 
     const callEmbedAPI = async (input: string | string[]): Promise<number[][]> => {
+      // Guard against empty/invalid input that OpenAI rejects
+      if (Array.isArray(input)) {
+        input = input.filter(s => typeof s === "string" && s.trim().length > 0);
+        if (input.length === 0) throw new Error("Empty input array after filtering");
+      } else if (typeof input !== "string" || input.trim().length === 0) {
+        throw new Error(`Invalid embed input: ${typeof input} "${String(input).slice(0, 50)}"`);
+      }
       const resp = await fetch("https://api.openai.com/v1/embeddings", {
         method: "POST",
         headers: {
@@ -165,11 +197,12 @@ export class Mem0Engine {
         const errText = await resp.text().catch(() => "");
         throw new Error(`OpenAI embeddings API error ${resp.status}: ${errText.slice(0, 200)}`);
       }
-      const json: any = await resp.json();
-      return json.data.map((d: any) => d.embedding);
+      const json = await resp.json() as EmbeddingResponse;
+      return json.data.map((d) => d.embedding);
     };
 
-    this.mem0.embedder = {
+    // eslint-disable-next-line -- accessing internal mem0 property to patch embedder
+    (this.mem0 as unknown as Record<string, unknown>).embedder = {
       model: embedModel,
       embeddingDims: EMBEDDING_DIM,
       embed: async (text: string) => {
@@ -186,7 +219,7 @@ export class Mem0Engine {
     };
 
     // Verify vector store dimension matches
-    const vsDim = this.mem0.vectorStore?.dimension;
+    const vsDim = (this.mem0 as unknown as { vectorStore?: { dimension?: number } }).vectorStore?.dimension;
     console.log(`[mem0] Replaced embedder with raw fetch (dimensions=${EMBEDDING_DIM}), vectorStore.dimension=${vsDim}`);
   }
 
@@ -214,9 +247,9 @@ export class Mem0Engine {
     // Check what's already in the vector index to avoid re-embedding
     let existingKeys = new Set<string>();
     try {
-      const existing = await this.mem0.getAll({ userId: "user" });
+      const existing = await this.mem0!.getAll({ userId: "user" });
       for (const r of existing.results ?? []) {
-        if (r.metadata?.key) existingKeys.add(r.metadata.key);
+        if (r.metadata?.key) existingKeys.add(String(r.metadata.key));
       }
     } catch { /* if getAll fails, just re-sync everything */ }
 
@@ -234,7 +267,7 @@ export class Mem0Engine {
     for (const m of toSync) {
       try {
         await withSuppressedMem0Errors(() =>
-          this.mem0.add(
+          this.mem0!.add(
             `${m.key}: ${m.value}`,
             {
               userId: "user",
@@ -264,7 +297,7 @@ export class Mem0Engine {
 
     try {
       await withSuppressedMem0Errors(() =>
-        this.mem0.add(
+        this.mem0!.add(
           `${key}: ${value}`,
           {
             userId: "user",
@@ -285,12 +318,12 @@ export class Mem0Engine {
     if (!this.ready) return [];
 
     try {
-      const result = await this.mem0.search(query, {
+      const result = await this.mem0!.search(query, {
         userId: "user",
         limit,
       });
 
-      return (result.results ?? []).map((r: any) => ({
+      return (result.results ?? []).map((r: Mem0MemoryItem) => ({
         id: r.id,
         memory: r.memory,
         score: r.score,
@@ -310,14 +343,14 @@ export class Mem0Engine {
     if (!this.ready) return [];
 
     try {
-      const result: any = await withSuppressedMem0Errors(() =>
-        this.mem0.add(
+      const result = await withSuppressedMem0Errors(() =>
+        this.mem0!.add(
           messages.map((m) => ({ role: m.role, content: m.content })),
           { userId: "user" },
         ),
       );
 
-      return (result.results ?? []).map((r: any) => r.memory).filter(Boolean);
+      return (result.results ?? []).map((r: Mem0MemoryItem) => r.memory).filter(Boolean);
     } catch (err) {
       console.error("[mem0] Conversation extraction error:", err);
       return [];
@@ -331,8 +364,8 @@ export class Mem0Engine {
     if (!this.ready) return [];
 
     try {
-      const result = await this.mem0.getAll({ userId: "user" });
-      return (result.results ?? []).map((r: any) => ({
+      const result = await this.mem0!.getAll({ userId: "user" });
+      return (result.results ?? []).map((r: Mem0MemoryItem) => ({
         id: r.id,
         memory: r.memory,
         score: r.score,

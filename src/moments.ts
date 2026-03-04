@@ -476,7 +476,7 @@ let _singleton: MomentsEngine | null = null;
 
 // ── Init ─────────────────────────────────────────────────────────────
 
-export function initMoments(cfg: AppConfig, telegrafBot: Telegraf): MomentsEngine {
+export function initMoments(cfg: AppConfig, telegrafBot: Telegraf | null): MomentsEngine {
   _singleton = new MomentsEngine(cfg, telegrafBot);
   return _singleton;
 }

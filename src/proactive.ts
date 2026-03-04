@@ -34,6 +34,7 @@ import { isVideoEnabled, generateVideoFromImage } from "./video.js";
 import { generateVoice, isTTSEnabled, getVoiceDailyCount } from "./tts.js";
 import { addTimelineEvent, enqueueTimelineJob, getTodayTimeline } from "./timeline.js";
 import { getCharacter, s, renderTemplate } from "./character.js";
+import { recordCharacterOutreach, markAwaitingReply, isGoodTimeToReachOut } from "./lib/relationship-model.js";
 
 const MIN_DAILY_SELFIES = 5;
 const MIN_DAILY_VOICES = 5;
@@ -65,6 +66,7 @@ export class ProactiveScheduler {
   private sendVoice: SendVoiceFn | null = null;
   private statePath: string;
   private stopped = false;
+  private inFlight = false; // mutex: only one maybeReachOut() at a time
   private curiosity: CuriosityEngine | null;
   private activities: ActivityScheduler | null;
 
@@ -142,12 +144,31 @@ export class ProactiveScheduler {
    * She can choose to reach out or skip — it's her call.
    */
   private async maybeReachOut(): Promise<boolean> {
+    // Mutex: if already in flight (LLM call + typing), skip
+    if (this.inFlight) {
+      console.log("[proactive] Skipping — already in flight");
+      return false;
+    }
+    this.inFlight = true;
+    try {
+      return await this._doReachOut();
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async _doReachOut(): Promise<boolean> {
     const now = new Date();
     const userTime = new Date(
       now.toLocaleString("en-US", { timeZone: getUserTZ() }),
     );
 
     const state = this.loadState();
+
+    // Gate on relationship model — respect user's active hours
+    try {
+      if (!isGoodTimeToReachOut(userTime.getHours())) return false;
+    } catch { /* non-fatal, fall through */ }
 
     // Reset daily counter on new day
     const todayStr = pstDateStr();
@@ -317,6 +338,12 @@ export class ProactiveScheduler {
     state.lastSentAt = Date.now();
     state.dailyCount++;
     this.saveState(state);
+
+    // Record outreach for relationship model
+    try {
+      recordCharacterOutreach();
+      markAwaitingReply();
+    } catch { /* non-fatal */ }
 
     console.log(`[proactive] ${getCharacter().name} reached out: ${message.slice(0, 60)}...`);
 

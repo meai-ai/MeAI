@@ -60,6 +60,35 @@ interface WeatherSnapshot {
   fetchedAt: number;       // timestamp
 }
 
+/** Yahoo Finance chart API response shape */
+interface YahooFinanceResponse {
+  chart?: {
+    result?: Array<{
+      meta: {
+        regularMarketPrice?: number;
+        chartPreviousClose?: number;
+        previousClose?: number;
+      };
+    }>;
+  };
+}
+
+/** Open-Meteo API response shape */
+interface OpenMeteoResponse {
+  current?: {
+    temperature_2m?: number;
+    apparent_temperature?: number;
+    weather_code?: number;
+  };
+  daily?: {
+    temperature_2m_max?: number[];
+    temperature_2m_min?: number[];
+    precipitation_probability_max?: number[];
+    sunrise?: string[];
+    sunset?: string[];
+  };
+}
+
 interface DailySchedule {
   date: string;
   isWorkDay: boolean;
@@ -464,7 +493,7 @@ export class WorldEngine {
       const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (!res.ok) return null;
 
-      const data = (await res.json()) as any;
+      const data = (await res.json()) as OpenMeteoResponse;
       const current = data?.current;
       const daily = data?.daily;
 
@@ -477,12 +506,13 @@ export class WorldEngine {
       const sunrise = rawSunrise ? rawSunrise.split("T")[1]?.slice(0, 5) ?? "" : "";
       const sunset = rawSunset ? rawSunset.split("T")[1]?.slice(0, 5) ?? "" : "";
 
+      const temp = current.temperature_2m ?? 0;
       const snapshot: WeatherSnapshot = {
-        temperature: Math.round(current.temperature_2m),
-        feelsLike: Math.round(current.apparent_temperature),
+        temperature: Math.round(temp),
+        feelsLike: Math.round(current.apparent_temperature ?? temp),
         condition: this.getWmoDescription(weatherCode),
-        high: Math.round(daily.temperature_2m_max?.[0] ?? current.temperature_2m),
-        low: Math.round(daily.temperature_2m_min?.[0] ?? current.temperature_2m),
+        high: Math.round(daily.temperature_2m_max?.[0] ?? temp),
+        low: Math.round(daily.temperature_2m_min?.[0] ?? temp),
         rainChance: daily.precipitation_probability_max?.[0] ?? 0,
         sunrise,
         sunset,
@@ -559,7 +589,7 @@ export class WorldEngine {
           });
           if (!res.ok) return null;
 
-          const data = (await res.json()) as any;
+          const data = (await res.json()) as YahooFinanceResponse;
           const result = data?.chart?.result?.[0];
           if (!result) return null;
 

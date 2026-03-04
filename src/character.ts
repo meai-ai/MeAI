@@ -558,6 +558,14 @@ const CharacterSchema = z.object({
 
   persona: PersonaSchema.default({}),
 
+  /** Seed subscriptions — overrides hardcoded defaults in interests.ts */
+  seeds: z.object({
+    rss: z.array(z.object({ name: z.string(), url: z.string(), category: z.string() })).optional(),
+    youtube: z.array(z.object({ name: z.string(), channelId: z.string(), category: z.string() })).optional(),
+    podcasts: z.array(z.object({ name: z.string(), url: z.string(), category: z.string() })).optional(),
+    local_feeds: z.array(z.object({ name: z.string(), url: z.string(), category: z.string() })).optional(),
+  }).optional(),
+
   strings: StringsSchema,
 
   /** Per-module configuration — each SimModule reads its key from here. */

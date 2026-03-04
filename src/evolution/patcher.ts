@@ -165,6 +165,80 @@ function runTest(command: string): { success: boolean; output: string } {
 }
 
 /**
+ * Restore pending patches from a previous session.
+ * Scans pending/ for approved patches and either rolls back (if expired)
+ * or restarts the dead man's switch timer (if still within 10 min window).
+ */
+export function restorePendingPatches(
+  config: AppConfig,
+  sendMessage: (text: string) => Promise<void>,
+): void {
+  const pendingDir = getPendingDir(config);
+  if (!fs.existsSync(pendingDir)) return;
+
+  const files = fs.readdirSync(pendingDir).filter(f => f.startsWith("patch-") && f.endsWith(".json"));
+  for (const file of files) {
+    try {
+      const pendingPath = path.join(pendingDir, file);
+      const proposal: PatchProposal = JSON.parse(fs.readFileSync(pendingPath, "utf-8"));
+
+      if (proposal.status !== "approved") continue;
+
+      const elapsed = Date.now() - proposal.timestamp;
+      const DEAD_MAN_TIMEOUT_MS = 10 * 60 * 1000;
+
+      if (elapsed >= DEAD_MAN_TIMEOUT_MS) {
+        // Expired — rollback immediately
+        if (proposal.snapshotPath) {
+          rollback(config, proposal.snapshotPath);
+        }
+        fs.unlinkSync(pendingPath);
+
+        logEvent(config, {
+          tier: 4,
+          action: "patch_timeout_rollback",
+          detail: { patchId: proposal.id },
+          timestamp: Date.now(),
+        });
+
+        sendMessage(`⚠️ Patch "${proposal.id}" expired during restart — rolled back.`).catch(() => {});
+        console.log(`[patcher] Rolled back expired patch: ${proposal.id}`);
+      } else {
+        // Still within window — restart timer with remaining time
+        const remaining = DEAD_MAN_TIMEOUT_MS - elapsed;
+        const patchId = proposal.id;
+
+        const timer = setTimeout(async () => {
+          activeTimers.delete(patchId);
+
+          if (proposal.snapshotPath) {
+            rollback(config, proposal.snapshotPath);
+          }
+          if (fs.existsSync(pendingPath)) fs.unlinkSync(pendingPath);
+
+          logEvent(config, {
+            tier: 4,
+            action: "patch_timeout_rollback",
+            detail: { patchId },
+            timestamp: Date.now(),
+          });
+
+          await sendMessage(
+            "⚠️ No confirmation received within 10 minutes. Rolled back patch and restarting.",
+          );
+          process.kill(process.pid, "SIGUSR1");
+        }, remaining);
+
+        activeTimers.set(patchId, timer);
+        console.log(`[patcher] Restored timer for patch ${patchId}: ${Math.round(remaining / 1000)}s remaining`);
+      }
+    } catch (err) {
+      console.error(`[patcher] Failed to restore pending patch ${file}:`, (err as Error).message);
+    }
+  }
+}
+
+/**
  * Set up inline keyboard callback handlers for patch approval/denial.
  */
 export function setupPatchApprovalHandlers(

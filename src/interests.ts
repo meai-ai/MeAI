@@ -18,7 +18,7 @@ import { URL } from "url";
 import type { Memory } from "./types.js";
 import { transcribeFromUrl } from "./media.js";
 import { getStoreManager } from "./memory/store-manager.js";
-import { s } from "./character.js";
+import { getCharacter, s } from "./character.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -267,6 +267,51 @@ const SEED_PODCASTS: PodcastSub[] = [
   { name: "Acquired", url: "https://feeds.simplecast.com/JbGcrmMG", category: "tech", source: "seed", subscribedAt: 0 },
 ];
 
+// ── Character seed helpers ────────────────────────────────────────────
+// Read from character.yaml seeds if available, fallback to hardcoded defaults
+
+function getFeeds(): FeedConfig[] {
+  try {
+    const seeds = getCharacter().seeds;
+    if (seeds?.rss && seeds.rss.length > 0) return seeds.rss;
+  } catch { /* character not loaded yet */ }
+  return FEEDS;
+}
+
+function getLocalFeeds(): FeedConfig[] {
+  try {
+    const seeds = getCharacter().seeds;
+    if (seeds?.local_feeds && seeds.local_feeds.length > 0) return seeds.local_feeds;
+  } catch { /* character not loaded yet */ }
+  return LOCAL_FEEDS;
+}
+
+function getSeedYouTube(): YouTubeSub[] {
+  try {
+    const seeds = getCharacter().seeds;
+    if (seeds?.youtube && seeds.youtube.length > 0) {
+      return seeds.youtube.map(s => ({
+        name: s.name, channelId: s.channelId, category: s.category,
+        source: "seed" as const, subscribedAt: 0,
+      }));
+    }
+  } catch { /* character not loaded yet */ }
+  return SEED_YOUTUBE;
+}
+
+function getSeedPodcasts(): PodcastSub[] {
+  try {
+    const seeds = getCharacter().seeds;
+    if (seeds?.podcasts && seeds.podcasts.length > 0) {
+      return seeds.podcasts.map(s => ({
+        name: s.name, url: s.url, category: s.category,
+        source: "seed" as const, subscribedAt: 0,
+      }));
+    }
+  } catch { /* character not loaded yet */ }
+  return SEED_PODCASTS;
+}
+
 // ── Class ────────────────────────────────────────────────────────────
 
 export class InterestsEngine {
@@ -295,10 +340,10 @@ export class InterestsEngine {
         return { youtube: data.youtube ?? [], podcasts: data.podcasts ?? [] };
       } catch { /* fall through to seed */ }
     }
-    // First run — seed defaults
+    // First run — seed defaults (from character.yaml or hardcoded)
     const subs: Subscriptions = {
-      youtube: [...SEED_YOUTUBE],
-      podcasts: [...SEED_PODCASTS],
+      youtube: [...getSeedYouTube()],
+      podcasts: [...getSeedPodcasts()],
     };
     this.saveSubscriptions(subs);
     return subs;
@@ -419,7 +464,8 @@ export class InterestsEngine {
 
     const allItems: ContentItem[] = [];
 
-    const promises = LOCAL_FEEDS.map(async (feed) => {
+    const localFeeds = getLocalFeeds();
+    const promises = localFeeds.map(async (feed) => {
       try {
         const xml = await fetchUrl(feed.url);
         return parseRSS(xml, feed.name).slice(0, 5);
@@ -450,7 +496,8 @@ export class InterestsEngine {
 
     const allItems: ContentItem[] = [];
 
-    const promises = FEEDS.map(async (feed) => {
+    const feeds = getFeeds();
+    const promises = feeds.map(async (feed) => {
       try {
         const xml = await fetchUrl(feed.url);
         return parseRSS(xml, feed.name).slice(0, 8);
@@ -465,7 +512,7 @@ export class InterestsEngine {
     }
 
     this.contentCache = { items: allItems, fetchedAt: Date.now() };
-    console.log(`[interests] Fetched ${allItems.length} headlines from ${FEEDS.length} feeds`);
+    console.log(`[interests] Fetched ${allItems.length} headlines from ${feeds.length} feeds`);
 
     return allItems;
   }

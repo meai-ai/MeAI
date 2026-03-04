@@ -62,9 +62,16 @@ const SAFETY_PATTERNS: Array<{ pattern: RegExp; flag: string }> = [
   { pattern: /base64.*decode.*exec/i, flag: "obfuscated-execution" },
 ];
 
+// ── Availability flag ─────────────────────────────────────────────────
+// After the first failed request, skip subsequent calls to avoid repeated timeouts
+
+let clawHubAvailable = true;
+
 // ── HTTP helper ──────────────────────────────────────────────────────
 
 function apiGet(urlPath: string): Promise<string> {
+  if (!clawHubAvailable) return Promise.reject(new Error("ClawHub unavailable"));
+
   return new Promise((resolve, reject) => {
     const parsed = new URL(urlPath, API_BASE);
     const fullUrl = parsed.href;
@@ -96,9 +103,13 @@ function apiGet(urlPath: string): Promise<string> {
       },
     );
 
-    req.on("error", reject);
+    req.on("error", (err) => {
+      clawHubAvailable = false;
+      reject(err);
+    });
     req.setTimeout(REQUEST_TIMEOUT, () => {
       req.destroy();
+      clawHubAvailable = false;
       reject(new Error("ClawHub API timeout"));
     });
     req.end();

@@ -105,14 +105,18 @@ export class TTSEngine {
 
     try {
       // Natural voice defaults — keep it simple, no emotion-based speed/temp tweaking
-      const voiceParams = { speed: 1.0, temperature: 0.85 };
+      const voiceParams = { speed: 1.0, temperature: 0.6 };
 
       log.info(
         `Generating voice: trigger=${trigger}, text="${text.slice(0, 40)}...", speed=${voiceParams.speed}, temp=${voiceParams.temperature}`,
       );
 
-      // Strip emoji — TTS can't pronounce them
-      const ttsText = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}✨⭐❤️💕🥰😘😄😂🤣😭😢😤😡😏😜🥺💪🔥👍🎉🎵✅❌⚠️]/gu, "").trim() || text;
+      // Strip emoji, newlines, and collapse whitespace — clean text for natural TTS
+      const ttsText = text
+        .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}✨⭐❤️💕🥰😘😄😂🤣😭😢😤😡😏😜🥺💪🔥👍🎉🎵✅❌⚠️]/gu, "")
+        .replace(/\n+/g, " ")
+        .replace(/ {2,}/g, " ")
+        .trim() || text;
 
       // Call Fish Audio TTS API
       const opusBuffer = await this.callFishAudio(ttsText, voiceParams);
@@ -164,7 +168,7 @@ export class TTSEngine {
         speed: params.speed,
       },
       temperature: params.temperature,
-      top_p: 0.8,
+      top_p: 0.7,
       repetition_penalty: 1.1,
     });
 

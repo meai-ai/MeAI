@@ -25,6 +25,8 @@ import type { ContextPlan } from "./context-planner.js";
 import { getRecentMoments } from "../moments.js";
 import { getCharacter, s, renderTemplate, isBlankSlate, BLANK_SLATE_PERSONA } from "../character.js";
 import { moduleRegistry } from "../modules/registry.js";
+import { formatAttentionContext } from "../lib/attention.js";
+import { formatRelationshipContext } from "../lib/relationship-model.js";
 
 const log = createLogger("context");
 
@@ -527,6 +529,18 @@ export async function assembleSystemPrompt(
     for (const block of moduleBlocks) {
       sections.push(`### ${block.header}\n${block.body}`);
     }
+  } catch { /* non-fatal */ }
+
+  // Attention state — ultradian rhythm, focus, decision fatigue
+  try {
+    const attentionCtx = formatAttentionContext();
+    if (attentionCtx) sections.push(`### Attention state\n${attentionCtx}`);
+  } catch { /* non-fatal */ }
+
+  // Relationship context — attachment, communication rhythm
+  try {
+    const relCtx = formatRelationshipContext();
+    if (relCtx) sections.push(`### Relationship with ${getCharacter().user.name}\n${relCtx}`);
   } catch { /* non-fatal */ }
 
   // Real-world context — grounds character in physical reality (budget-limited); skip in blank-slate mode

@@ -42,7 +42,7 @@ import { SessionManager } from "./session/manager.js";
 import { ToolRegistry } from "./agent/tools.js";
 import { AgentLoop } from "./agent/loop.js";
 import { setupToolApprovalHandlers } from "./evolution/installer.js";
-import { setupPatchApprovalHandlers } from "./evolution/patcher.js";
+import { setupPatchApprovalHandlers, restorePendingPatches } from "./evolution/patcher.js";
 import { PromptOptimizer } from "./evolution/prompt-optimizer.js";
 import { ProactiveScheduler } from "./proactive.js";
 import { CuriosityEngine } from "./curiosity.js";
@@ -71,6 +71,8 @@ import { initGoals } from "./goals.js";
 import { initJournal } from "./journal.js";
 import { initOpinions } from "./opinions.js";
 import { initRelationshipModel } from "./lib/relationship-model.js";
+import { initReinforcement } from "./lib/reinforcement.js";
+import { initAttention } from "./lib/attention.js";
 import { initNarrative } from "./narrative.js";
 import { initDocuments } from "./documents.js";
 import { initMoments } from "./moments.js";
@@ -150,6 +152,8 @@ async function main(): Promise<void> {
   await track("journal", () => initJournal(config.statePath));
   await track("opinions", () => initOpinions(config.statePath));
   await track("relationship-model", () => initRelationshipModel(config.statePath));
+  await track("reinforcement", () => initReinforcement(config.statePath));
+  await track("attention", () => initAttention(config.statePath));
   await track("narrative", () => initNarrative(config.statePath));
   await track("documents", () => initDocuments(config.statePath));
   await track("timeline", () => initTimeline(config.statePath));
@@ -163,9 +167,8 @@ async function main(): Promise<void> {
   ]);
 
   // Configure LLM role mapping from config
-  const llmConfig = (config as any).llm as Record<string, string> | undefined;
-  if (llmConfig) {
-    llmRegistry.setRoleMapping(llmConfig as any);
+  if (config.llm) {
+    llmRegistry.setRoleMapping(config.llm);
   }
 
   await Promise.all([
@@ -182,7 +185,7 @@ async function main(): Promise<void> {
   // Initialize moments — posts life moments to a channel
   // For Telegram, we still need the underlying bot for moments + approval handlers
   const telegramBot = channel instanceof TelegramChannel ? channel.getBot() : null;
-  await track("moments", () => initMoments(config, telegramBot!));
+  await track("moments", () => initMoments(config, telegramBot));
 
   // Wire up channel callbacks for tool approval gates
   tools.setCallbacks({
@@ -202,9 +205,9 @@ async function main(): Promise<void> {
   // (Telegram-specific — other channels implement approval differently)
   if (telegramBot) {
     setupToolApprovalHandlers(telegramBot, config);
-    setupPatchApprovalHandlers(telegramBot, config, async (text) => {
-      await channel.sendMessage(text);
-    });
+    const sendMsg = async (text: string) => { await channel.sendMessage(text); };
+    setupPatchApprovalHandlers(telegramBot, config, sendMsg);
+    restorePendingPatches(config, sendMsg);
   }
 
   // Curiosity engine — the character explores the web and learns autonomously
@@ -327,6 +330,29 @@ async function main(): Promise<void> {
       console.error("[maip] Failed to initialize:", (err as Error).message);
     }
   }
+
+  // ── Graceful shutdown ─────────────────────────────────────────────
+  const shutdown = async () => {
+    console.log("[shutdown] Stopping...");
+    heartbeat.stop();
+    watchdog.stop();
+    proactive.stop();
+    curiosity.stop();
+    social?.stop();
+    activities.stop();
+    optimizer.stop();
+    if (config.maip?.enabled) {
+      try {
+        const { stopMAIP } = await import("./maip/bridge.js");
+        await stopMAIP();
+      } catch { /* non-fatal */ }
+    }
+    await channel.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("SIGUSR1", shutdown);
 
   console.log(`[init] MeAI ready — ${moduleCount}/${moduleTotal} modules active`);
 

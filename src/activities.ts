@@ -55,10 +55,10 @@ function randMs(minMin: number, maxMin: number): number {
   return (minMin + Math.random() * (maxMin - minMin)) * 60 * 1000;
 }
 
-const DATA_DIR = path.join(os.homedir(), "Documents/MeAI/data");
-const PROJECTS_DIR = path.join(os.homedir(), "Documents/MeAI/projects");
-const READING_DIR = path.join(os.homedir(), "Documents/MeAI/reading");
-const STATE_FILE = path.join(DATA_DIR, "activities.json");
+let dataDir = "";
+let projectsDir = "";
+let readingDir = "";
+let stateFile = "";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ interface ActivityChoice {
 // ── State helpers ──────────────────────────────────────────────────────
 
 function loadState(): ActivitiesState {
-  const s = readJsonSafe<Record<string, unknown>>(STATE_FILE, {});
+  const s = readJsonSafe<Record<string, unknown>>(stateFile, {});
   return {
     lastActivityAt: (s.lastActivityAt as number) ?? (s.lastRunAt as number) ?? 0,
     recent: (s.recent as ActivityResult[]) ?? [],
@@ -103,7 +103,7 @@ function loadState(): ActivitiesState {
 }
 
 function saveState(state: ActivitiesState): void {
-  writeJsonAtomic(STATE_FILE, state);
+  writeJsonAtomic(stateFile, state);
 }
 
 function loadMemories(): Memory[] {
@@ -122,7 +122,7 @@ function saveToMemory(key: string, value: string, confidence = 0.8): void {
 
 /** Load recent discoveries from curiosity state (disk-based, no class dependency). */
 function loadRecentDiscoveries(maxCount = 5): Array<{ query: string; summary: string; category: string; timestamp: number }> {
-  const CURIOSITY_FILE = path.join(DATA_DIR, "curiosity.json");
+  const CURIOSITY_FILE = path.join(dataDir, "curiosity.json");
   try {
     const data = readJsonSafe<{ discoveries?: Array<{ query: string; summary: string; category: string; timestamp: number }> }>(CURIOSITY_FILE, {});
     const discoveries = data.discoveries ?? [];
@@ -293,7 +293,7 @@ export function formatActivityContext(): string {
 
   // ── In-progress projects ──
   try {
-    const projectsPath = path.join(DATA_DIR, "projects.json");
+    const projectsPath = path.join(dataDir, "projects.json");
     const projectsData = readJsonSafe<{ projects: Array<{ name: string; description: string; status: string; nextSteps?: string[] }> }>(projectsPath, { projects: [] });
     const active = projectsData.projects.filter(p => p.status === "in_progress");
 
@@ -328,6 +328,11 @@ export class ActivityScheduler {
 
   constructor(config: AppConfig) {
     this.config = config;
+    // Initialize module-level paths from config
+    dataDir = config.statePath;
+    projectsDir = path.join(config.statePath, "projects");
+    readingDir = path.join(config.statePath, "reading");
+    stateFile = path.join(config.statePath, "activities.json");
   }
 
   start(): void {
@@ -679,8 +684,8 @@ Output JSON only, do not write code or create files:
     }
 
     // Step 2: Actually build it
-    fs.mkdirSync(PROJECTS_DIR, { recursive: true });
-    const projectDir = path.join(PROJECTS_DIR, ideaJson.name.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase());
+    fs.mkdirSync(projectsDir, { recursive: true });
+    const projectDir = path.join(projectsDir, ideaJson.name.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase());
     fs.mkdirSync(projectDir, { recursive: true });
 
     console.log(`[activities] Vibe coding: ${ideaJson.name}`);
@@ -805,8 +810,8 @@ JSON format: {"summary": "...", "reaction": "your real feelings", "shareWorthy":
     const read = extractJson<ReflectResult>(readText, {});
 
     // Save reading note
-    fs.mkdirSync(READING_DIR, { recursive: true });
-    const noteFile = path.join(READING_DIR, `${Date.now()}-${readingTitle.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "-").slice(0, 40)}.md`);
+    fs.mkdirSync(readingDir, { recursive: true });
+    const noteFile = path.join(readingDir, `${Date.now()}-${readingTitle.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "-").slice(0, 40)}.md`);
     const sourceLinks = sources.length > 0 ? `\n\n**Sources:**\n${sources.map(s => `- ${s}`).join("\n")}` : "";
     fs.writeFileSync(noteFile, `# ${readingTitle}\n\n${read.summary ?? ""}${sourceLinks}\n\n**My thoughts:** ${read.reaction ?? ""}`, "utf-8");
 
@@ -947,8 +952,8 @@ JSON format: {"summary": "...", "reaction": "...", "shareWorthy": true/false}`;
     const reflect = extractJson<ReflectResult>(reflectText, {});
 
     // Save learning notes
-    fs.mkdirSync(READING_DIR, { recursive: true });
-    const noteFile = path.join(READING_DIR, `learn-${Date.now()}-${learningTopic.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "-").slice(0, 30)}.md`);
+    fs.mkdirSync(readingDir, { recursive: true });
+    const noteFile = path.join(readingDir, `learn-${Date.now()}-${learningTopic.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "-").slice(0, 30)}.md`);
     fs.writeFileSync(noteFile, `# Study notes: ${learningTopic}\n\n**Why:** ${learningWhy}\n\n${learnOutput}`, "utf-8");
 
     return {
@@ -1068,8 +1073,8 @@ JSON format: {"summary": "...", "reaction": "...", "shareWorthy": true/false}`;
     const reflect = extractJson<ReflectResult>(reflectText, {});
 
     // Save a note
-    fs.mkdirSync(READING_DIR, { recursive: true });
-    const noteFile = path.join(READING_DIR, `compose-${Date.now()}-${concept.title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "-").slice(0, 30)}.md`);
+    fs.mkdirSync(readingDir, { recursive: true });
+    const noteFile = path.join(readingDir, `compose-${Date.now()}-${concept.title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "-").slice(0, 30)}.md`);
     const lyricsSection = concept.lyrics ? `\n\n**Lyrics:**\n${concept.lyrics}` : "";
     fs.writeFileSync(noteFile, `# Composing: ${concept.title}\n\n**Style:** ${style}\n**Type:** ${instrumental ? "instrumental" : "with lyrics"}${lyricsSection}\n\n**Reason:** ${concept.why ?? ""}\n**My thoughts:** ${reflect.reaction ?? ""}`, "utf-8");
 

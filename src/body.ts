@@ -156,7 +156,7 @@ export class BodyEngine {
     return path.join(this.dataPath, "health-state.json");
   }
 
-  private loadHealthState(): HealthState {
+  loadHealthState(): HealthState {
     if (!this.dataPath) return defaultHealthState();
     const p = this.getHealthPath();
     if (!fs.existsSync(p)) {
@@ -171,7 +171,7 @@ export class BodyEngine {
     return loaded;
   }
 
-  private saveHealthState(state: HealthState): void {
+  saveHealthState(state: HealthState): void {
     if (!this.dataPath) return;
     state.lastUpdated = pstDateStr();
     writeJsonAtomic(this.getHealthPath(), state);
@@ -495,7 +495,7 @@ export async function getBodyState(now: Date = new Date()): Promise<BodyState> {
   const sickStatus = _singleton!.calculateSickStatus();
 
   // ── Health state (loaded via singleton for sleep debt) ──
-  const health = (_singleton as any).loadHealthState();
+  const health = _singleton!.loadHealthState();
 
   // ── Sleep debt tracking ──
   const todayStr = pstDateStr();
@@ -505,7 +505,7 @@ export async function getBodyState(now: Date = new Date()): Promise<BodyState> {
     health.sleepDebt = updateSleepDebt(health.sleepDebt, sleepHours, sleepQuality);
     health.sleepHistory.push({ date: todayStr, hours: sleepHours, quality: sleepQuality });
     if (health.sleepHistory.length > 7) health.sleepHistory = health.sleepHistory.slice(-7);
-    (_singleton as any).saveHealthState(health);
+    _singleton!.saveHealthState(health);
   }
 
   // ── Fatigue (Two-Process Model) ──

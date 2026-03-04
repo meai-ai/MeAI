@@ -99,6 +99,9 @@ export class TimelineEngine {
       log.info(`timeline: added ${event.category} at ${event.time} (source: ${event.source})`);
     }
 
+    // Sort chronologically by time string
+    events.sort((a, b) => a.time.localeCompare(b.time));
+
     writeJsonAtomic(filePath, events);
   }
 

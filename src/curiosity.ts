@@ -37,6 +37,7 @@ import {
 } from "./interests.js";
 import { getStoreManager } from "./memory/store-manager.js";
 import { getUserTZ } from "./lib/pst-date.js";
+import { repairAndParseJson } from "./lib/json-repair.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -175,6 +176,16 @@ export class CuriosityEngine {
     const topic = await this.pickTopic(userTime, timeSinceLastHr, state.discoveries);
     if (!topic) {
       return false;
+    }
+
+    // Dedup check: skip lazy re-searches of the same topic
+    const dedupResult = await this.checkDuplicate(topic.query, state.discoveries);
+    if (dedupResult === "duplicate") {
+      console.log(`[curiosity] Skipping duplicate topic: "${topic.query}"`);
+      return false;
+    }
+    if (dedupResult === "deepen") {
+      console.log(`[curiosity] Deepening previous exploration: "${topic.query}"`);
     }
 
     console.log(`[curiosity] Exploring: "${topic.query}" (${topic.reason})`);
@@ -373,8 +384,8 @@ Her recent interests and memories:\n${memText || "(no records yet)"}${mediaInspo
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (!parsed.query || parsed.reason === "SKIP") return null;
+        const parsed = repairAndParseJson(jsonMatch[0]);
+        if (!parsed || !parsed.query || parsed.reason === "SKIP") return null;
         return { query: parsed.query, reason: parsed.reason };
       }
     } catch (err) {
@@ -437,7 +448,8 @@ Summarize your findings.`,
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        const parsed = repairAndParseJson(jsonMatch[0]);
+        if (!parsed) return null;
         return {
           query: topic.query,
           summary: parsed.summary ?? "",
@@ -667,7 +679,7 @@ Come up with related search queries:`,
 
       const match = text.match(/\[[\s\S]*\]/);
       if (match) {
-        const parsed = JSON.parse(match[0]) as string[];
+        const parsed = (repairAndParseJson(match[0]) ?? []) as string[];
         return parsed.slice(0, 3);
       }
     } catch (err) {
@@ -737,7 +749,8 @@ Now write a deep summary.`,
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        const parsed = repairAndParseJson(jsonMatch[0]);
+        if (!parsed) return null;
         return {
           query: shallowDiscovery.query,
           summary: parsed.summary ?? shallowDiscovery.summary,
@@ -852,7 +865,7 @@ Extract knowledge points worth remembering long-term:`,
       const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (!jsonMatch) return;
 
-      const items = JSON.parse(jsonMatch[0]) as Array<{
+      const items = (repairAndParseJson(jsonMatch[0]) ?? []) as Array<{
         key: string;
         value: string;
         confidence?: number;
@@ -920,7 +933,8 @@ Did you encounter any YouTube channels or podcasts worth subscribing to?`,
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return;
 
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = repairAndParseJson(jsonMatch[0]);
+      if (!parsed) return;
 
       // Subscribe to YouTube channels
       for (const yt of parsed.youtube ?? []) {
@@ -947,6 +961,73 @@ Did you encounter any YouTube channels or podcasts worth subscribing to?`,
     return state.discoveries
       .filter(d => d.skillSuggestion && Date.now() - d.timestamp < DISCOVERY_MAX_AGE)
       .map(d => ({ discovery: d, suggestion: d.skillSuggestion! }));
+  }
+
+  // ── Dedup ────────────────────────────────────────────────────────────
+
+  /**
+   * LLM-based dedup: distinguishes three cases:
+   * - "new"       → genuinely new topic, go ahead
+   * - "deepen"    → same topic area but a meaningful new angle worth exploring
+   * - "duplicate" → boring repeat, skip
+   *
+   * This lets the character keep digging into high-interest topics (e.g. "OpenClaw architecture"
+   * → "OpenClaw security model" → "OpenClaw vs competitors") while blocking lazy
+   * re-searches of the exact same thing.
+   */
+  private async checkDuplicate(
+    query: string,
+    discoveries: Discovery[],
+  ): Promise<"new" | "deepen" | "duplicate"> {
+    if (discoveries.length === 0) return "new";
+
+    // Build context of past discoveries with what was already learned
+    const pastContext = discoveries.map(d => {
+      const ago = Math.round((Date.now() - d.timestamp) / 3600000);
+      let line = `[${ago}h ago/${d.depth}] "${d.query}" → ${d.summary.slice(0, 120)}`;
+      if (d.deepInsights) line += ` | Deep insight: ${d.deepInsights.slice(0, 80)}`;
+      return line;
+    }).join("\n");
+
+    try {
+      const text = await claudeText({
+        system: `You are a curiosity dedup system. The character wants to search a new topic. Compare it with recent searches and classify:
+
+1. "new" — genuinely new topic with no obvious overlap with past searches
+2. "deepen" — related to a past topic but with a meaningful new angle worth exploring (e.g. searched "OpenClaw architecture" before, now wants "OpenClaw security risks" — that's a worthwhile deepening)
+3. "duplicate" — basically the same as a past search, just rephrased with no new angle (e.g. searched "how OpenClaw architecture works" before, now wants "OpenClaw architecture principles" — that's a duplicate)
+
+Key rules:
+- If a topic was already deep-searched, it needs a very clear new angle to qualify as "deepen"
+- If only shallow-searched before, wanting to learn more details counts as "deepen"
+- News topics with new developments (e.g. evolving geopolitical situation) count as "deepen"
+- Same question rephrased differently is "duplicate"
+
+Output ONLY one word: new, deepen, or duplicate`,
+        prompt: `Proposed search: ${query}
+
+Recent searches:
+${pastContext}
+
+Classification:`,
+        model: "fast",
+        timeoutMs: 30_000,
+      });
+
+      const result = text.trim().toLowerCase();
+      const firstWord = result.split(/[\s.,!]+/)[0];
+      if (firstWord === "new") return "new";
+      if (firstWord === "deepen") return "deepen";
+      if (firstWord === "duplicate") return "duplicate";
+      // Fallback: scan full text but prefer "new" as safe default
+      if (result.includes("new")) return "new";
+      if (result.includes("deepen")) return "deepen";
+      if (result.includes("duplicate")) return "duplicate";
+      return "new";
+    } catch (err) {
+      console.error("[curiosity] Dedup check error:", err);
+      return "new"; // don't block on dedup failure
+    }
   }
 
   // ── State management ─────────────────────────────────────────────────

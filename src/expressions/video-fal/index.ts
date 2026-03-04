@@ -10,6 +10,13 @@
 import type { AppConfig } from "../../types.js";
 import type { ExpressionProvider, ExpressionType, VideoInput } from "../types.js";
 
+/** fal.ai Minimax video result shape */
+interface MinimaxVideoResult {
+  data: {
+    video?: { url?: string };
+  };
+}
+
 let falApiKey: string | undefined;
 
 const provider: ExpressionProvider = {
@@ -41,7 +48,7 @@ const provider: ExpressionProvider = {
       },
     });
 
-    const videoUrl = (result.data as any)?.video?.url;
+    const videoUrl = (result as MinimaxVideoResult).data?.video?.url;
     if (!videoUrl) throw new Error("No video returned from fal.ai");
 
     const res = await fetch(videoUrl);

@@ -108,6 +108,8 @@ function ensureDirectories(statePath: string): void {
     path.join(statePath, "music"),
     path.join(statePath, "music", "generated"),
     path.join(statePath, "maip"),
+    path.join(statePath, "projects"),
+    path.join(statePath, "reading"),
   ];
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true });
@@ -154,6 +156,13 @@ function getEnvOverrides(): Record<string, unknown> {
   if (process.env.FAL_API_KEY) overrides.falApiKey = process.env.FAL_API_KEY;
   if (process.env.FISH_AUDIO_API_KEY) overrides.fishAudioApiKey = process.env.FISH_AUDIO_API_KEY;
   if (process.env.TAVILY_API_KEY) overrides.tavilyApiKey = process.env.TAVILY_API_KEY;
+  if (process.env.X_API_KEY) overrides.xApiKey = process.env.X_API_KEY;
+  if (process.env.X_API_KEY_SECRET) overrides.xApiKeySecret = process.env.X_API_KEY_SECRET;
+  if (process.env.X_ACCESS_TOKEN) overrides.xAccessToken = process.env.X_ACCESS_TOKEN;
+  if (process.env.X_ACCESS_TOKEN_SECRET) overrides.xAccessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET;
+  if (process.env.SUNO_API_KEY) overrides.sunoApiKey = process.env.SUNO_API_KEY;
+  if (process.env.FISH_AUDIO_VOICE_ID) overrides.fishAudioVoiceId = process.env.FISH_AUDIO_VOICE_ID;
+  if (process.env.MOMENTS_CHANNEL_ID) overrides.momentsChannelId = process.env.MOMENTS_CHANNEL_ID;
   return overrides;
 }
 

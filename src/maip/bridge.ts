@@ -31,8 +31,8 @@ export async function initMAIP(config: AppConfig): Promise<MAIPBridge | null> {
     dataDir: path.join(config.statePath, "maip"),
     character: {
       name: char.name,
-      english_name: (char as any).english_name,
-      age: (char as any).age,
+      english_name: char.english_name,
+      age: char.age,
       gender: char.gender ?? "female",
       languages: char.languages ?? ["en"],
       user: { name: char.user.name, relationship: char.user.relationship ?? "friend" },

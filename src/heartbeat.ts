@@ -58,8 +58,12 @@ import { maybeMoment, isMomentsEnabled } from "./moments.js";
 import { maybeProactiveSelfie } from "./selfie.js";
 import { getBlockEvent, addTimelineEvent, getTodayTimeline, enqueueTimelineJob, type TimelineEvent } from "./timeline.js";
 import { pstDateStr, getUserTZ } from "./lib/pst-date.js";
+import { repairAndParseJson } from "./lib/json-repair.js";
 import { s, renderTemplate, getCharacter } from "./character.js";
 import { moduleRegistry } from "./modules/registry.js";
+import { recordSatisfaction, getActivityBias, getBurnoutRisk } from "./lib/reinforcement.js";
+import { startActivity, isInFlowState, shouldSuggestBreak, getDecisionFatigue } from "./lib/attention.js";
+import { updateAttachmentState } from "./lib/relationship-model.js";
 
 const log = createLogger("heartbeat");
 
@@ -547,6 +551,9 @@ export class Heartbeat {
     const shareWorthy = this.curiosity.getShareWorthy().length;
     const recentDiscoveries = this.curiosity.getRecentDiscoveries(10).length;
 
+    // Update relationship attachment state on each heartbeat
+    try { updateAttachmentState(); } catch { /* non-fatal */ }
+
     // Minutes since last action of each type
     const minutesSince = (ts: number) => ts === 0 ? 999 : Math.round((Date.now() - ts) / 60000);
 
@@ -694,6 +701,12 @@ export class Heartbeat {
       if (idx >= 0) available.splice(idx, 1);
     }
 
+    // Gate reach_out when in flow state (deep focus)
+    if (isInFlowState()) {
+      const idx = available.indexOf("reach_out");
+      if (idx >= 0) available.splice(idx, 1);
+    }
+
     // Intersect with schedule-allowed actions
     if (vitals) {
       const scheduleAllowed = this.getScheduleAllowedActions(vitals.scheduleBlock);
@@ -759,6 +772,8 @@ Format: {"action":"rest","reason":"short reason","confidence":0.7}`;
 - recent discoveries: ${vitals.recentDiscoveryCount}
 - unread notifications: ${vitals.unreadNotifications}
 - health: ${this.watchdog?.getHealthSummary() ?? "unknown"}
+- activity bias (historical preference): ${(() => { try { const b = getActivityBias(); return Object.entries(b).map(([k, v]) => `${k}:${v.toFixed(1)}`).join(", ") || "none"; } catch { return "none"; } })()}
+- burnout risk: ${(() => { try { return Math.round(getBurnoutRisk() * 100); } catch { return 0; } })()}%
 ${this.computeSignalBoosts(vitals)}
 Pick the best action:`,
         model: "fast",
@@ -771,7 +786,7 @@ Pick the best action:`,
         return { action: "rest", reason: "failed to parse decision", confidence: 0.5 };
       }
 
-      const parsed = JSON.parse(jsonMatch[0]) as HeartbeatDecision;
+      const parsed = (repairAndParseJson(jsonMatch[0]) ?? { action: "rest", reason: "JSON repair failed", confidence: 0.5 }) as HeartbeatDecision;
 
       // Validate action is available
       if (!availableActions.includes(parsed.action)) {
@@ -825,6 +840,8 @@ Pick the best action:`,
 
   private async execute(decision: HeartbeatDecision): Promise<boolean> {
     try {
+      startActivity(decision.action);
+      let success = false;
       switch (decision.action) {
         case "explore": {
           const explored = await this.curiosity.tick();
@@ -846,18 +863,20 @@ Pick the best action:`,
               }
             } catch { /* non-fatal */ }
           }
-          return explored;
+          success = explored;
+          break;
         }
         case "reach_out":
-          return await this.proactive.tick();
+          success = await this.proactive.tick();
+          break;
         case "post":
           if (this.social) {
             await this.social.tick();
-            return true;
+            success = true;
           }
-          return false;
+          break;
         case "activity": {
-          const success = await this.activities.tick();
+          success = await this.activities.tick();
           if (success) {
             try {
               const recent = this.activities.getRecentActivities(1);
@@ -892,14 +911,19 @@ Pick the best action:`,
               }
             } catch { /* non-fatal */ }
           }
-          return success;
+          break;
         }
         case "reflect":
-          return await this.doReflection();
+          success = await this.doReflection();
+          break;
         default:
           // Dispatch to SimModule heartbeat actions
-          return await moduleRegistry.executeHeartbeatAction(decision.action);
+          success = await moduleRegistry.executeHeartbeatAction(decision.action);
+          break;
       }
+      // Record outcome for reinforcement learning
+      try { recordSatisfaction(decision.action, success ? 7 : 4); } catch { /* non-fatal */ }
+      return success;
     } catch (err) {
       console.error(`[heartbeat] Execution error (${decision.action}):`, err);
       return false;
@@ -977,7 +1001,7 @@ Output strictly as a JSON array:
       const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (!jsonMatch) return false;
 
-      const insights = JSON.parse(jsonMatch[0]) as Array<{ key: string; value: string }>;
+      const insights = (repairAndParseJson(jsonMatch[0]) ?? []) as Array<{ key: string; value: string }>;
       if (insights.length === 0) return false;
 
       // Save insights to memory store (auto-routes to insights category)
@@ -1068,13 +1092,13 @@ JSON format:
     if (!jsonMatch) return;
 
     try {
-      const parsed = JSON.parse(jsonMatch[0]) as {
+      const parsed = repairAndParseJson(jsonMatch[0]) as {
         content?: string;
         mood?: string;
         themes?: string[];
         referencedPast?: string[];
-      };
-      if (!parsed.content || parsed.content.length < 50) return;
+      } | null;
+      if (!parsed?.content || parsed.content.length < 50) return;
 
       const entry: DiaryEntry = {
         date: today,
@@ -1137,7 +1161,7 @@ No changes? Return: []`,
     if (!jsonMatch) return;
 
     try {
-      const updates = JSON.parse(jsonMatch[0]) as Array<{
+      const updates = (repairAndParseJson(jsonMatch[0]) ?? []) as Array<{
         topic?: string;
         position?: string;
         confidence?: number;
@@ -1206,7 +1230,7 @@ JSON format:
     if (!jsonMatch) return;
 
     try {
-      const goals = JSON.parse(jsonMatch[0]) as Array<{
+      const goals = (repairAndParseJson(jsonMatch[0]) ?? []) as Array<{
         description?: string;
         category?: string;
         motivation?: string;
@@ -1256,6 +1280,11 @@ JSON format:
       if (lastThree.length === 3 && new Set(lastThree).size === 1) {
         boosts.push(`[signal] last 3 activities were all ${lastThree[0]} — too monotonous, switch it up`);
       }
+    } catch { /* non-fatal */ }
+    // Attention engine signals
+    try {
+      if (shouldSuggestBreak()) boosts.push("[signal] ultradian cycle peak — consider a break");
+      if (getDecisionFatigue() > 0.7) boosts.push("[signal] high decision fatigue — prefer lighter actions");
     } catch { /* non-fatal */ }
     return boosts.join("\n");
   }
@@ -1435,13 +1464,13 @@ Requirements:
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return;
 
-      const parsed = JSON.parse(jsonMatch[0]) as {
+      const parsed = repairAndParseJson(jsonMatch[0]) as {
         event?: string;
         mood_effect?: string;
         share_worthy?: boolean;
         duration_minutes?: number;
-      };
-      if (!parsed.event) return;
+      } | null;
+      if (!parsed?.event) return;
 
       // Update throttle tracking
       this.lastNarratedAt = now;

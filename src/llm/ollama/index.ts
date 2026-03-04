@@ -16,7 +16,7 @@ let available = false;
 const provider: LLMProvider = {
   id: "ollama",
   name: "Ollama (Local LLM)",
-  roles: ["conversation", "background", "vision", "embedding"] as LLMRole[],
+  roles: ["background", "embedding"] as LLMRole[],
 
   async init(_config: AppConfig): Promise<void> {
     // Check if Ollama is running

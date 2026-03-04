@@ -27,6 +27,7 @@ function getMsgId(reply: ReplyResult): number | string {
 }
 import type { AppConfig, TranscriptEntry, ToolCallRecord, Memory } from "../types.js";
 import { readJsonSafe, writeJsonAtomic } from "../lib/atomic-file.js";
+import { recordUserMessage, resetAttachmentOnUserMessage, recordUserMessageRhythm, recordDepthMessage } from "../lib/relationship-model.js";
 import { getStoreManager } from "../memory/store-manager.js";
 import { SessionManager } from "../session/manager.js";
 import { ToolRegistry } from "./tools.js";
@@ -589,6 +590,15 @@ export class AgentLoop {
 
     // Context eval: detect misses from previous turn (before block selection)
     evaluatePreviousTurn(actualText);
+
+    // Record user message for relationship model
+    try {
+      const hour = new Date().getHours();
+      recordUserMessage(hour);
+      resetAttachmentOnUserMessage();
+      recordUserMessageRhythm(actualText.length);
+      recordDepthMessage(hour, actualText.length);
+    } catch { /* non-fatal */ }
 
     if (useOpenAI && !this.openai) {
       await sendReply("OpenAI not available. Install the openai package and add openaiApiKey to config.json, or remove the gpt: prefix.");
