@@ -511,8 +511,10 @@ Fast Loop (3s, pure math, no LLM)
 | `src/brainstem/planner.ts` | Beam search planner: goal → candidate actions → world model rollout (D=3) → EU reward → counterfactual explanation. A*/ToT strategies | ~350 |
 | `src/brainstem/world-model.ts` | Belief state (observable + 6 latent vars), factorized transition rules, Beta/Dirichlet conjugate learning, EU computation, state persistence | ~400 |
 | `src/brainstem/curiosity-engine.ts` | Epistemic/aleatoric decomposition, LearningNeed scoring, VOI via planner rollout, 4 exploration action types, write-back loop | ~250 |
-| `src/brainstem/self-model.ts` | SelfState (8 vars), SelfTransition (predict + outcome-correct), SelfCost per action family, self-return for planner, self gate thresholds, recovery dynamics | ~300 |
+| `src/brainstem/self-model.ts` | SelfState (8 vars), SelfBelief (30 evidence-backed beliefs with half-life), SelfTransition (predict + outcome-correct), SelfCost per action family, self-return for planner, self gate thresholds, recovery dynamics | ~400 |
 | `src/brainstem/cortex.ts` | Cortex API layer: C1-C4 typed interfaces, unified budget/priority, call logging, schema validation, whitelist enforcement, degradation paths, PromptPolicy (Loop B) | ~350 |
+| `src/brainstem/ltm.ts` | LTM graph: LTMNode storage, eviction write-back, selectWorkingSet() with diversity loading, nightly consolidation (prune/merge/decay), 10K node cap | ~250 |
+| `src/brainstem/social-model.ts` | Per-target SocialState, responsiveness EWMA, act gate hard rules (low responsiveness throttle, pending reply awareness), relationship decay | ~120 |
 
 ## Modified Files
 
@@ -552,7 +554,13 @@ Fast Loop (3s, pure math, no LLM)
     "uncertainty": 0.5, "social_energy": 0.5, "affect_valence": 0.0,
     "self_coherence": 0.5, "safety_margin": 0.5
   },
-  "selfTransitionStats": []
+  "selfTransitionStats": [],
+  "selfBeliefs": {},
+  "ltmGraph": { "nodes": {}, "lastConsolidatedAt": 0 },
+  "socialStates": {},
+  "edgeDirectionStats": {},
+  "conceptBirthLog": [],
+  "autoTuneHistory": []
 }
 ```
 
@@ -886,7 +894,8 @@ Each tick:
 1. `tickGraph(graph, forces)` — spread → decay → fatigue inhibition → noise → clamp → energy scaling (top-3 protect) → fatigue update → clamp F (~0.1ms)
 2. Every 10th tick (~30s): **memory replay** — sample 1-3 memories using weighted distribution. **Anti-confirmation-bias**: if current winner has held top-1 for > 6 minutes continuously, shift distribution to prevent self-reinforcing echo:
    - Normal mode: **70%** similar / **20%** goal / **10%** random
-   - Entrenched mode (winner > 6 min): **40%** similar / **30%** adjacent-but-not-in-winner / **20%** goal / **10%** random
+   - Entrenched mode (winner > 6 min): **40%** similar / **25%** adjacent-but-not-in-winner / **15%** counter-evidence / **15%** goal / **5%** random
+   - **Counter-evidence replay** (entrenched mode only): From the winner cluster's primary grounding memory, find memories with **opposite valence** or **failure outcomes** related to the same topic. If none found, find memories where the same action type led to negative outcomes. Boost these onto **neighboring-but-not-in-winner** nodes. Effect: the system naturally encounters "wait, but last time this didn't work" or "there's another side to this" — attention diversifies without destabilizing. Guard: only triggers when `groundingSource !== "goal"` (if the system is stuck on a goal, counter-evidence replay is counterproductive — goals need persistence, not doubt).
    - **Adjacent-but-not-in-winner selection**: From cluster nodes, take top-K (K=10) outgoing edges by weight. Collect neighbor set. Filter out nodes already in cluster. Score remaining neighbors by `edge.weight × (1 - neighbor.fatigue) × (1 + neighbor.uncertainty)`. Sample from top-3 by this score. Then replay memories linked to the sampled node's `memoryKeys`. This pulls attention "one hop out" from the stuck topic — related but not the same.
    - **70% (normal) / 40% (entrenched)**: similar to current winner cluster. Two-stage retrieval:
      (a) Jaccard keyword pre-filter → top 200 candidates from cached memories
@@ -1070,7 +1079,8 @@ const ACT_TARGETS: ActTarget[] = [
 ```
 
 Triggers:
-- **Self gate passes** (CS5b.6): `social_energy ≥ minSocialEnergy` AND `fatigue ≤ maxFatigue` AND `safety_margin ≥ minSafetyMargin` AND `self_coherence ≥ minCoherence`. Thresholds managed by stabilizer via `SelfGatePolicy`. Self gate runs FIRST — if denied, remaining checks are skipped.
+- **Social gate passes** (CS8): `SocialState.responsivenessEwma ≥ 0.2` (or cooldown multiplied 3× if below). If `pendingType === "waiting_reply"` → only follow-up type allowed, new topics blocked. Social gate runs FIRST.
+- **Self gate passes** (CS5b.6): `social_energy ≥ minSocialEnergy` AND `fatigue ≤ maxFatigue` AND `safety_margin ≥ minSafetyMargin` AND `self_coherence ≥ minCoherence`. Thresholds managed by stabilizer via `SelfGatePolicy`. Self gate runs SECOND — if denied, remaining checks are skipped.
 - A micro-thought with `anchor` = `"grounded"` or `"inferred"` (NEVER `"speculative"`) whose **primary grounding** (`grounding[0]`) is goal-type or involves an act target's concept patterns
 - Max activation among its concepts > 0.7
 - Not in quiet hours
@@ -1332,6 +1342,16 @@ Runtime metrics to track — without these, you can't tune the system:
 | `selfCoherence` | Identity-action alignment | 0.4-0.9. < 0.4 = force reflect |
 | `selfGateRejectRate` | Fraction of act gate attempts blocked by self gate | 0.05-0.2. Too high → recovery dynamics too slow or thresholds too tight |
 | `selfEfficacyByAction` | Per-action-family success rate (from Beta posterior) | Track trend. Convergence = learning working |
+| `clusterLifetimeAvg` | Average duration (seconds) a cluster holds winner before dethrone | 120-600. Too short = restless. Too long = fixated |
+| `clusterLifetimeP90` | 90th percentile cluster lifetime | < 1200 (20 min). Sustained > 1800 = likely fixation |
+| `conceptTurnover24h` | Fraction of WM nodes that entered from LTM in last 24h | 0.05-0.20. Too low = stale WM. Too high = fragmented attention |
+| `ltmSize` | Total nodes in LTM graph | Track trend. Should grow then plateau at ~5K-10K |
+| `ltmPruneRate` | Nodes pruned per nightly consolidation | 0-20. Sustained high = system generating too many throwaway concepts |
+| `socialResponsiveness` | Per-target EWMA responsiveness | Track per target. Sustained < 0.2 = throttling active |
+| `selfBeliefCount` | Active beliefs in SelfBelief system | 5-30. 0 = not learning about self |
+| `selfBeliefAvgConfidence` | Mean confidence across all beliefs | 0.3-0.7. Very high = stale beliefs (half-life too long). Very low = nothing confirmed |
+| `conceptBirthRate` | Synthetic concept births per week | 1-10. 0 = structure learning not working |
+| `counterEvidenceReplayRate` | Fraction of entrenched-mode replays using counter-evidence | 0.1-0.3. Track alongside rotation health |
 
 ### Decision Explanation Log (per slow-loop tick)
 
@@ -1346,6 +1366,7 @@ Each slow-loop tick logs a structured decision record:
   thoughtGate: { passed: boolean, rejectedReason?: "low_score" | "not_novel" | "no_grounding" | "budget_exceeded" | "quiet_hours" | "no_trigger", triggerType?: string },
   reflectGate: { armed: boolean, reason?: string },
   actGate: { armed: boolean, reason?: string },
+  socialGate: { passed: boolean, throttled?: boolean, restricted?: "waiting_reply" | null, snapshot: { responsivenessEwma: number, outboundCount7d: number, inboundCount7d: number, pendingType: string | null } },
   selfGate: { passed: boolean, deniedReason?: "low_social_energy" | "high_fatigue" | "low_safety" | "low_coherence", snapshot: { energy: number, social_energy: number, safety_margin: number, fatigue: number, self_coherence: number } },
   energy: { utilization: number, sumProtected: number, bgAllocation: number },
   budget: { used: number, limit: number, scaleFactor: number },
@@ -1823,7 +1844,75 @@ Self-model variables sync bidirectionally with existing systems:
 - Yellow: `minSocialEnergy` increases (more protective), `maxFatigue` decreases (more sensitive)
 - Red: all outward actions blocked (existing behavior), self gate redundant
 
-##### 5b.9 v2/v3 Self-Model Upgrade Roadmap
+##### 5b.9 Self-Belief System — Evidence-Backed Narrative Self (v1.5)
+
+Beyond continuous variables (SelfState), the self-model needs **discrete beliefs about itself** — auditable assertions with evidence chains and natural decay. This is what turns "I have fatigue=0.7" into "I'm good at helping Allen think through parenting questions" (backed by 5 positive outcomes).
+
+```typescript
+type BeliefCategory = "skill" | "trait" | "value" | "preference" | "limitation";
+
+interface SelfBelief {
+  id: string;                  // "skill.planning", "trait.patience", "value.family"
+  category: BeliefCategory;
+  statement: string;           // 中文一句话陈述, e.g., "我擅长帮Allen分析教育问题"
+  confidence: number;          // 0-1 (EWMA from evidence, NOT activation)
+  evidence: EvidenceRef[];     // auditable evidence chain (max 10, FIFO)
+  createdAt: number;
+  updatedAt: number;
+  halfLifeDays: number;        // confidence decay rate — varies by category
+}
+
+interface EvidenceRef {
+  type: "outcome" | "reflection" | "external_feedback" | "prediction_error";
+  refId: string;               // points to audit/outcome/reflection record
+  weight: number;              // 0-1, how strongly this evidence supports/contradicts
+  polarity: "support" | "contradict";
+  timestamp: number;
+}
+
+// Half-life defaults by category (prevents fossilized self-narratives):
+const BELIEF_HALF_LIFE: Record<BeliefCategory, number> = {
+  skill: 14,        // skills need frequent re-confirmation
+  trait: 30,        // personality traits shift slowly
+  value: 90,        // core values are most stable
+  preference: 21,   // preferences evolve moderately
+  limitation: 14,   // limitations should be re-tested frequently
+};
+```
+
+**Belief capacity**: Max 30 beliefs. When at cap, LRU eviction (oldest `updatedAt` with lowest `confidence`). This prevents unbounded self-narrative growth.
+
+**Three update loops**:
+
+1. **Outcome → SelfBelief**: After each act/reflect outcome (via OutcomeTracker/Cortex-3):
+   - Success outcome → find matching beliefs by action family + context tags → add `support` evidence, EWMA confidence up
+   - Failure outcome → add `contradict` evidence, EWMA confidence down
+   - `confidence = 0.8 × confidence + 0.2 × (supportCount / (supportCount + contradictCount))` per update
+
+2. **Prediction Error → Belief uncertainty**: When self-transition prediction error is high for an action family:
+   - Find beliefs about that skill/capability → increase uncertainty (reduce confidence by 0.05)
+   - High uncertainty beliefs become targets for curiosity engine (see CS6 integration)
+
+3. **Half-life decay** (applied every slow-loop tick):
+   ```
+   belief.confidence *= 2^(-Δt / (halfLifeDays × 86400000))
+   ```
+   Beliefs that aren't re-confirmed naturally fade. This prevents "I said this once 6 months ago" from persisting forever.
+
+**Belief birth** (when to create new beliefs):
+- After 3+ consistent outcomes for the same action family + context → auto-generate belief
+- During reflection: if reflection produces a self-insight → create belief with `type: "reflection"` evidence
+- LLM only names the belief (Cortex-1 or Haiku ~30 tokens: "根据这些结果，用一句话总结这个能力/倾向"); structure comes from statistics
+
+**Integration with existing systems**:
+- `self_coherence` gains a belief component: `0.4 × jaccardOverlap + 0.3 × goalAlignment + 0.3 × beliefConsistency`
+  where `beliefConsistency = mean(confidence of beliefs with category="value" or "trait")`
+- Curiosity engine: low-confidence skill beliefs → generate "calibration exploration" targets
+- Planner: high-confidence skill beliefs can bias action candidate scoring (bonus for actions matching strong skill beliefs)
+
+**Persistence**: `selfBeliefs: Record<string, SelfBelief>` added to `state.json`.
+
+##### 5b.10 v2/v3 Self-Model Upgrade Roadmap
 
 **v2: Self Capability Model** — "Can I succeed at this action?"
 
@@ -1902,6 +1991,316 @@ Coherence metric upgrades to: when plans/actions **chronically** conflict with n
 
 ---
 
+### CS6: Structure Learning — Concept Birth & Causal Edge Discovery
+
+The system can currently create concepts from external sources and learn edge weights via CS2 temporal credit. But it cannot **create new concepts from its own dynamics** or **discover causal direction** in edges. CS6 adds both capabilities with strict budgets.
+
+#### CS6a: Concept Birth — Pattern → Concept (statistics find, LLM names)
+
+**Principle**: The system discovers stable co-activation patterns (statistics). The LLM only provides a label (Cortex-1). Structure comes from data, not from LLM invention.
+
+**Trigger**: Every 6 hours (during low-activity periods or wake-up consolidation). Max 2 concept births/day.
+
+**Discovery algorithm**:
+1. Collect last 24h of co-activation data (from CS2 activation history + slow-loop cluster winners)
+2. Find **frequent node pairs/triplets** (all nodes with A > 0.3 simultaneously in ≥ 15% of slow-loop ticks):
+   ```typescript
+   interface CoActivationCandidate {
+     members: string[];          // 2-3 node IDs
+     support: number;            // fraction of ticks co-activated
+     avgEdgeWeightTrend: number; // are edges between members growing?
+     existingParent: boolean;    // do they already share a CS3 parent?
+   }
+   ```
+3. Filter: `support > 0.15` AND `avgEdgeWeightTrend > 0` AND `!existingParent`
+4. Dedup: if any existing node has Jaccard > 0.6 with combined `termVectors` of the candidate → skip (already captured)
+5. Top candidate by support → **create abstraction node**:
+   ```typescript
+   {
+     id: `synth-${hash(sorted member IDs)}`,   // deterministic
+     label: /* from Cortex-1 or Haiku fallback (~30 tokens) */,
+     source: "structure_learning",
+     depth: min(members.depth) - 1,
+     activation: 0,
+     salience: 0.2,
+     anchorText: /* Cortex-1 definition or fallback */,
+     parentId: /* Cortex-1 parentCandidate or null */,
+   }
+   ```
+   CS3 parent-child edges added to all members (type: "semantic", weight: 0.4).
+
+**Concept death**: If an abstraction node's member co-activation drops below 0.05 support for 7 consecutive days → **demote** (remove node, remove parent-child edges). Logged as `concept_death` in audit. This prevents graph bloat from one-time coincidences.
+
+**Concept birth audit**: Every birth logged with:
+```typescript
+{ event: "concept_birth", nodeId: string, members: string[], support: number, label: string, timestamp: number }
+```
+
+**Guard**: Max 2 births/day. Max 15 synthetic nodes total in graph (oldest demoted if at cap and all have low activation).
+
+#### CS6b: Causal Edge Direction — Temporal Lead/Lag Analysis
+
+CS2 already learns edge weights from temporal correlation. CS6b adds **directional confidence** — does A cause B, or B cause A?
+
+```typescript
+interface EdgeDirectionStat {
+  key: string;                 // "A->B"
+  forwardCount: number;        // A activated before B within 30-90s window
+  backwardCount: number;       // B activated before A
+  avgLeadMs: number;           // average time A leads B (positive = A first)
+  directionConfidence: number; // 0-1: how sure about the direction
+  lastUpdatedAt: number;
+}
+```
+
+**Update** (merged into CS2's 100-tick scan, no separate pass):
+```
+for each edge (A, B):
+  existing forward/backward counts from CS2
+  directionConfidence = |forwardCount - backwardCount| / (forwardCount + backwardCount + 1)
+  if directionConfidence > 0.6 AND (forwardCount + backwardCount) >= 10:
+    mark edge.directionTag = forwardCount > backwardCount ? "A_leads" : "B_leads"
+  if directionConfidence < 0.3 AND observations > 20:
+    mark edge.directionTag = "bidirectional"
+```
+
+**Usage**: `directionTag` is a **label only** — spreading activation still uses the symmetric weight. The tag serves explainability ("why did thinking about A lead to B?") and future causal reasoning (v2).
+
+**Rollback**: If `directionConfidence` drops below 0.3 after being > 0.6 → reset `directionTag` to null (evidence changed).
+
+**Cost**: Piggybacks on CS2 scan. ~0.5ms additional per 100-tick cycle.
+
+#### CS6 Acceptance Tests
+
+**Concept Birth Test**:
+- Procedure: Simulate 24h where nodes {A, B, C} co-activate in 25% of ticks. No shared parent exists.
+- Expected: Synthetic parent node created with label from Cortex-1. Parent-child edges to A, B, C. `concept_birth` audit record logged.
+- Validates: Co-activation → concept creation pipeline.
+
+**Concept Death Test**:
+- Procedure: After birth, stop co-activating A, B, C for 7 days.
+- Expected: Synthetic node demoted. `concept_death` logged. Parent-child edges removed.
+- Validates: Pruning prevents graph bloat.
+
+**Causal Direction Test**:
+- Procedure: Construct sequence where A always activates 45s before B, 15 times. B never activates before A.
+- Expected: `directionTag = "A_leads"`, `directionConfidence > 0.8`.
+- Procedure (reverse): Then reverse the pattern (B before A) for 15 times.
+- Expected: `directionTag` resets, then flips to `"B_leads"`.
+- Validates: Direction learning + rollback on evidence change.
+
+**Anti-Noise Test**:
+- Procedure: Random co-activation pattern (no consistent temporal order) for 24h.
+- Expected: No concept birth (support threshold not met if random). Edge `directionTag` stays null or "bidirectional".
+- Validates: System doesn't learn from noise.
+
+---
+
+### CS7: Long-Term Memory Graph — LTM/WM Dual-Layer Architecture
+
+The concept graph is capped at 100 nodes (working memory). This is correct for attention dynamics — but the system **forgets everything it evicts**. Over weeks, early-learned concepts are permanently lost. CS7 adds a cold storage layer.
+
+#### Architecture: Two Layers
+
+```
+┌──────────────────────────────────────────────┐
+│         WM Graph (Working Memory)             │
+│  MAX_NODES = 100, tickGraph runs here         │
+│  Hot: fast-loop + slow-loop operate on this   │
+└────────────┬───────────────┬──────────────────┘
+             │ evict (write-back)  │ load (bootstrap)
+┌────────────▼───────────────▼──────────────────┐
+│         LTM Graph (Long-Term Memory)           │
+│  1K-10K nodes, on-disk (kv store / JSON)       │
+│  Cold: no tickGraph, no spreading activation   │
+│  Stores: node data + co-activation stats +     │
+│          edge weights + last-active timestamp   │
+└───────────────────────────────────────────────┘
+```
+
+**Key invariant**: `tickGraph` only runs on WM (100 nodes). LTM is storage, not computation.
+
+#### LTM Node Format
+
+```typescript
+interface LTMNode {
+  // ── Core identity (same as ConceptNode, minus activation dynamics) ──
+  id: string;
+  label: string;
+  anchorText: string;
+  termVector: string[];
+  parentId: string | null;
+  depth: number;
+  source: string;
+  memoryKeys: string[];
+  tags: string[];
+
+  // ── LTM-specific stats ──
+  lastActiveAt: number;           // last time node was in WM
+  totalActiveTime: number;        // cumulative time in WM (seconds)
+  avgActivationWhenActive: number; // mean A while in WM (EWMA)
+  peakActivation: number;         // highest A ever recorded
+  winnerCount: number;            // times this node was in a winning cluster
+  coActivationStats: Record<string, number>;  // nodeId → co-activation count (aggregated)
+  edgeWeights: Record<string, number>;        // nodeId → latest edge weight
+
+  // ── Retrieval priority ──
+  importanceScore: number;        // computed at eviction time
+  accessCount: number;            // times loaded into WM
+}
+```
+
+#### Eviction: WM → LTM Write-Back
+
+When a node is evicted from WM (by node cap, 48h inactivity, or wake-up consolidation):
+1. Compute `importanceScore = 0.3 × winnerCount/totalTicks + 0.3 × avgActivation + 0.2 × |edges| + 0.2 × recency`
+2. Write full `LTMNode` to `data/brainstem/ltm.json`
+3. Write-back co-activation stats and learned edge weights (these accumulate over WM lifetimes)
+4. Remove from WM graph
+
+**Batch write**: Evictions are batched (not per-node) to avoid I/O pressure on fast loop. Write-back happens at most once per 5-min persist cycle or during wake-up consolidation.
+
+#### Loading: LTM → WM Bootstrap
+
+`ltm.selectWorkingSet(state)` runs at bootstrap and periodically (every 30 min during low-activity periods):
+
+```typescript
+function selectWorkingSet(state: BrainstemState): string[] {
+  const candidates = getAllLTMNodes();
+  const scored = candidates.map(node => ({
+    id: node.id,
+    score: computeLoadPriority(node, state),
+  }));
+  // Ensure diversity: group by parentId, take top-2 per group, then fill remaining by global score
+  return diverseTopK(scored, MAX_NODES - currentWMSize(), /* maxPerGroup */ 2);
+}
+
+function computeLoadPriority(node: LTMNode, state: BrainstemState): number {
+  const recency     = 0.25 × exp(-(now - node.lastActiveAt) / (7 * DAY));  // 7-day half-life
+  const importance  = 0.25 × node.importanceScore;
+  const driveMatch  = 0.20 × overlapWithActiveGoals(node, state);           // goal-relevant nodes
+  const uncertainty = 0.15 × overlapWithHighUNodes(node, state);            // curiosity targets
+  const priming     = 0.15 × overlapWithRecentConversation(node, state);    // conversation priming
+  return recency + importance + driveMatch + uncertainty + priming;
+}
+```
+
+**Diversity guarantee**: `diverseTopK` ensures loaded nodes span multiple `parentId` groups. This prevents the WM from being dominated by a single topic cluster (e.g., all 100 nodes about "工作").
+
+**Swap penalty**: Evicting a node that's currently in the winning cluster costs a penalty (node loses 50% of its co-activation stats). This prevents thrashing — nodes in active use are protected.
+
+#### Nightly LTM Consolidation (Memory Forgetting)
+
+During wake-up consolidation (7am), run LTM housekeeping:
+1. **Prune**: Nodes with `lastActiveAt > 90 days` AND `importanceScore < 0.1` AND `accessCount < 3` → delete permanently. These are concepts that were briefly considered and never revisited.
+2. **Merge**: Scan for LTM node pairs with Jaccard(termVector) > 0.7 → merge into single node (keep higher importanceScore, union memoryKeys).
+3. **Stats decay**: `importanceScore *= 0.99` per day (slow decay ensures even important nodes eventually cycle out if never re-accessed).
+4. Log: `ltm_consolidation: { pruned: number, merged: number, total: number }` in metrics.
+
+**LTM size cap**: Hard limit 10K nodes. If exceeded after consolidation → force-prune lowest `importanceScore` nodes until under cap.
+
+#### CS7 Acceptance Tests
+
+**Eviction + Recovery Test**:
+- Procedure: Fill WM to 100 nodes. Create a strongly-activated node X. Evict X (by adding 10 new nodes). Wait. Then activate a goal related to X's `memoryKeys`.
+- Expected: X appears in `selectWorkingSet()` result (high driveMatch). X loaded back into WM with its accumulated stats.
+- Validates: LTM preserves knowledge across WM cycles.
+
+**Topic Migration Test**:
+- Procedure: Run system for simulated 7 days. Days 1-3: inject topics A-cluster. Days 4-7: inject topics B-cluster.
+- Expected: By day 5, WM dominated by B-cluster nodes. A-cluster nodes in LTM. Querying LTM shows A-cluster nodes with high importanceScore but low recency.
+- Validates: WM migrates with interests, LTM preserves history.
+
+**Diversity Test**:
+- Procedure: LTM has 50 nodes from domain X, 10 from domain Y. Load into WM with `maxPerGroup=2`.
+- Expected: WM contains nodes from both X and Y. X doesn't monopolize despite higher count.
+- Validates: Diversity guarantee prevents single-domain lock-in.
+
+**Forgetting Test**:
+- Procedure: Create LTM node, never access for 90 simulated days, importanceScore < 0.1.
+- Expected: Node pruned during nightly consolidation. No trace in WM or LTM.
+- Validates: Active forgetting prevents unbounded growth.
+
+---
+
+### CS8: Social Model — Relationship State for Act Gate
+
+The act gate has cooldowns and daily caps, but no model of **relationship quality**. CS8 adds a per-target social state that makes externalization decisions more human-like and safer.
+
+```typescript
+interface SocialState {
+  targetId: string;              // e.g., "allen"
+  closeness: number;             // 0-1, slow variable (weekly EMA)
+  trust: number;                 // 0-1, very slow variable (monthly EMA)
+  responsivenessEwma: number;    // 0-1, how often target responds to outreach
+  lastOutboundAt: number;        // last time system sent message to this target
+  lastInboundAt: number;         // last time target sent message
+  pendingType?: "waiting_reply" | "scheduled_plan" | null;
+  outboundCount7d: number;       // outbound messages in last 7 days
+  inboundCount7d: number;        // inbound messages in last 7 days
+}
+```
+
+**Update rules** (pure math, no LLM):
+```typescript
+// After outbound message:
+state.lastOutboundAt = now;
+state.outboundCount7d++;
+
+// After inbound message:
+state.lastInboundAt = now;
+state.inboundCount7d++;
+state.responsivenessEwma = 0.85 × state.responsivenessEwma + 0.15 × 1.0;
+state.closeness = clamp(state.closeness + 0.02, 0, 1);
+
+// After outbound with no reply within 4h:
+state.responsivenessEwma = 0.85 × state.responsivenessEwma + 0.15 × 0.0;
+
+// Daily decay (during wake-up consolidation):
+state.closeness *= 0.995;     // very slow decay (~30 day half-life)
+state.trust *= 0.998;         // even slower (~50 day half-life)
+// Recount 7d windows from message logs
+```
+
+**Act gate hard rules** (integrated into self gate, before existing checks):
+
+1. **Low responsiveness protection**: If `responsivenessEwma < 0.2` AND `outboundCount7d > inboundCount7d × 2`:
+   - `actGateCooldownMultiplier = 3.0` (triple the normal cooldown)
+   - Log: `socialGate.throttled: "low_responsiveness"`
+   - Effect: System backs off when target isn't responding
+
+2. **Pending awareness**: If `pendingType === "waiting_reply"`:
+   - Only allow "follow_up" type outreach (not new topic introduction)
+   - Block new-topic reach_outs until reply received or 48h timeout
+   - Log: `socialGate.restricted: "waiting_reply"`
+
+**Relationship with SelfState**: CS8's `SocialState` is the **relationship side** (external). `SelfState.social_energy` is the **capacity side** (internal). Act gate needs BOTH:
+- `SocialState.responsivenessEwma > 0.2` (they'll probably respond)
+- `SelfState.social_energy > minSocialEnergy` (I have capacity to reach out)
+
+**Persistence**: `socialStates: Record<string, SocialState>` added to `state.json`.
+
+**Cold start**: For new targets, `closeness = 0.3, trust = 0.3, responsivenessEwma = 0.5` (neutral priors).
+
+#### CS8 Acceptance Tests
+
+**Responsiveness Throttling Test**:
+- Procedure: Set `responsivenessEwma = 0.15`, `outboundCount7d = 5`, `inboundCount7d = 1`. Trigger act gate.
+- Expected: Cooldown multiplied by 3×. Act gate fires much less frequently.
+- Validates: System reduces outreach to unresponsive targets.
+
+**Pending Reply Awareness Test**:
+- Procedure: Set `pendingType = "waiting_reply"`. Trigger act gate with a new topic.
+- Expected: Act gate blocks new-topic outreach. Only follow-up type allowed.
+- Validates: System doesn't spam new topics while waiting for reply.
+
+**Relationship Recovery Test**:
+- Procedure: `responsivenessEwma = 0.1` (low). Simulate 5 inbound messages over 3 days.
+- Expected: `responsivenessEwma` rises above 0.2. Cooldown multiplier returns to 1.0.
+- Validates: Throttling lifts when engagement improves.
+
+---
+
 ### Cognitive Subsystem Integration Map
 
 | Subsystem | Added to | Cadence | Cost |
@@ -1912,6 +2311,10 @@ Coherence metric upgrades to: when plans/actions **chronically** conflict with n
 | CS4: Future sim | thought-gate.ts | Every ~5 min | 0 LLM, 1 node creation |
 | CS5a: Self node | bootstrap.ts (init), graph.ts (special rules) | Continuous | 1 node + ~10 edges |
 | CS5b: Self-model | self-model.ts, planner.ts (self_return), thought-gate.ts (self gate), curiosity-engine.ts (SelfCost) | Every slow-loop tick + on outcome | ~0.2ms (pure math) |
+| CS6a: Concept birth | fast-loop.ts (co-activation tracking), bootstrap.ts (consolidation) | Every 6h (max 2/day) | 1 Cortex-1 call per birth |
+| CS6b: Causal direction | temporal-credit.ts (merged into CS2 scan) | Every ~100 ticks (~5 min) | ~0.5ms additional |
+| CS7: LTM graph | ltm.ts, bootstrap.ts (loading), fast-loop.ts (eviction write-back) | Eviction: per persist cycle. Load: bootstrap + 30 min | ~2ms (I/O batched) |
+| CS8: Social model | social-model.ts, thought-gate.ts (act gate), fast-loop.ts (message tracking) | On message event + daily consolidation | ~0.1ms (pure math) |
 | CS: Stabilizer | stabilizer.ts, thought-gate.ts, fast-loop.ts, watchdog.ts | Every slow-loop tick | ~0.1ms (pure math) |
 
 ### New files from cognitive subsystems
@@ -1920,9 +2323,11 @@ Coherence metric upgrades to: when plans/actions **chronically** conflict with n
 |------|---------|-----------|
 | `src/brainstem/prediction.ts` | PredictionBuffer, generate/validate predictions | ~120 |
 | `src/brainstem/temporal-credit.ts` | Edge weight learning from activation time series | ~80 |
-| `src/brainstem/self-model.ts` | SelfState, SelfTransition (predict + outcome-correct), action family table, SelfCost, self gate, recovery dynamics | ~300 |
+| `src/brainstem/self-model.ts` | SelfState (8 vars), SelfBelief system (30 beliefs with evidence chains + half-life), SelfTransition (predict + outcome-correct), action family table, SelfCost, self gate, recovery dynamics | ~400 |
+| `src/brainstem/ltm.ts` | LTM graph storage: LTMNode persistence, eviction write-back, selectWorkingSet(), nightly consolidation (prune + merge + decay), diversity loading | ~250 |
+| `src/brainstem/social-model.ts` | SocialState per target, responsiveness tracking, act gate hard rules (low responsiveness throttling, pending reply awareness), relationship decay | ~120 |
 
-CS3 (hierarchies) and CS5a (self node) are integrated into existing files (graph.ts, bootstrap.ts). CS4 (future sim) is integrated into thought-gate.ts. CS5b (self-model) is a standalone module read by planner, thought-gate, and curiosity-engine.
+CS3 (hierarchies) and CS5a (self node) are integrated into existing files (graph.ts, bootstrap.ts). CS4 (future sim) is integrated into thought-gate.ts. CS5b (self-model) is a standalone module read by planner, thought-gate, and curiosity-engine. CS6a (concept birth) is integrated into bootstrap.ts consolidation. CS6b (causal direction) is merged into temporal-credit.ts. CS7 (LTM) is standalone. CS8 (social model) is standalone, read by act gate.
 
 ### Goal System Closure (H1-H2)
 
@@ -1984,7 +2389,7 @@ This creates a true drive-reduction loop: thinking about a goal builds drive →
 ### State migration
 
 All cognitive subsystem and stabilizer fields are included in the main `state.json` (version 2). On load, `migrateState()` handles:
-- v1 → v2: add missing fields with defaults (`predictions: [], activationHistory: {}, hypotheticalNodes: [], selfValence: 0, csi: 1.0, csiMode: "green", valenceHistory: [], lastModeTransitionAt: 0, csiAtTransition: 1.0, selfState: {energy: 0.5, fatigue: 0, self_efficacy: 0.5, uncertainty: 0.5, social_energy: 0.5, affect_valence: 0, self_coherence: 0.5, safety_margin: 0.5}, selfTransitionStats: []`)
+- v1 → v2: add missing fields with defaults (`predictions: [], activationHistory: {}, hypotheticalNodes: [], selfValence: 0, csi: 1.0, csiMode: "green", valenceHistory: [], lastModeTransitionAt: 0, csiAtTransition: 1.0, selfState: {energy: 0.5, fatigue: 0, self_efficacy: 0.5, uncertainty: 0.5, social_energy: 0.5, affect_valence: 0, self_coherence: 0.5, safety_margin: 0.5}, selfTransitionStats: [], selfBeliefs: {}, ltmGraph: {nodes: {}, lastConsolidatedAt: 0}, socialStates: {}, edgeDirectionStats: {}, conceptBirthLog: [], autoTuneHistory: []`)
 - `graph.lastRebuilt`: timestamp of most recent full graph rebuild (NOT bootstrap time — bootstrap sets it once, subsequent rebuilds during reflection update it)
 
 ### Cognitive Subsystem Acceptance Tests
@@ -2070,6 +2475,7 @@ interface ControlPolicy {
     goal: number;                  // Green: 0.2, Yellow: 0.3→0.2, Red: 0.5
     grounded: number;              // Green: 0, Yellow: 0.1→0, Red: 0.5
     random: number;                // Green: 0.1, Yellow: 0.05→0.1, Red: 0
+    counterEvidence: number;       // Green: 0 (only in entrenched), Entrenched: 0.15, Yellow: 0.2→0.1, Red: 0
   };
 
   // ── Cortex control (read by cortex.ts) ──
@@ -2096,6 +2502,7 @@ interface ControlPolicy {
 - `fast-loop.ts`: reads `noiseScale`, `spreadScale`, `forceWinnerFatigue`, `externalOnlyDethrone`
 - `graph.ts` `boostNode()`: reads `externalAbsorbScale`
 - Memory replay in `fast-loop.ts`: reads `replayDistribution`
+- `social-model.ts`: reads `selfGate` (indirectly via act gate) for social throttling
 - `watchdog.ts`: reads `mode` and `csi` for logging/alerting ONLY — **never adjusts parameters**
 
 ### Three Operating Modes (ControlPolicy generation)
@@ -2215,6 +2622,7 @@ This prevents the system from stating speculative internal thoughts as facts. Ac
 | `fast-loop.ts` (every tick) | `noiseScale`, `spreadScale` | `effectiveNoise = NOISE_AMPLITUDE × policy.noiseScale`, `effectiveSpread = SPREAD_FACTOR × policy.spreadScale` |
 | `fast-loop.ts` (Red mode) | `forceWinnerFatigue`, `externalOnlyDethrone` | If `forceWinnerFatigue > 0`: set winner node's F to that value. If `externalOnlyDethrone`: skip internal winner changes. |
 | `thought-gate.ts` (slow loop) | `thoughtBudgetScale`, `dethroneMarginDelta`, `minGroundingWeight`, `wVScale`, `freezeVerbalization`, `selfGate` | Apply scales to base values. Skip LLM call if `freezeVerbalization`. Pass `selfGate` thresholds to self-model for act gate checks. |
+| `social-model.ts` (act gate) | `selfGate` (indirectly) | Social gate runs FIRST: check `SocialState.responsivenessEwma`, apply cooldown multiplier if low, block new topics if `pendingType = "waiting_reply"`. |
 | `self-model.ts` (act gate) | `selfGate` (via thought-gate) | Compare SelfState against `selfGate.{minSocialEnergy, maxFatigue, minSafetyMargin, minCoherence}`. Deny actions that violate thresholds. Yellow mode tightens thresholds; Red mode blocks all outward actions. |
 | `graph.ts` `boostNode()` | `externalAbsorbScale` | `effectiveBudget = EXTERNAL_ABSORB_BUDGET × policy.externalAbsorbScale` |
 | `fast-loop.ts` replay | `replayDistribution` | Use policy distribution instead of hardcoded 70/20/10. Entrenched mode still shifts within policy bounds. |
@@ -3629,17 +4037,27 @@ When exploration produces results, three systems update:
 | Curiosity | Epistemic/aleatoric decomposition, LearningNeed scoring, VOI via planner rollout, SelfCost-aware routing, 4 exploration action types | Bayesian optimal experiment design, information-theoretic active learning | `curiosity-engine.ts` |
 | Hierarchical goals | life → project → task levels, bottom-up progress, drive inheritance | Auto-decomposition, learned task templates | `goals.ts` (extended) |
 | **Cortex API** | 4 typed LLM interfaces (semantic compression, proposal gen, outcome extraction, uncertainty simulation), unified budget, degradation paths, Learning Loop B (PromptPolicy) | Model routing, proposal reranker, calibrated simulation, active learning from low-confidence extractions | `cortex.ts` |
+| **Structure learning** | Co-activation → concept birth (2/day, Cortex-1 naming). Causal edge direction (lead/lag analysis merged into CS2). Concept death (7-day inactivity prune) | Full FP-growth frequent itemset mining, cross-domain analogy detection, causal inference with interventions | `temporal-credit.ts`, `bootstrap.ts` |
+| **LTM/WM dual graph** | 100-node WM + 10K-node LTM cold storage. Diversity loading (selectWorkingSet). Nightly consolidation (prune/merge/decay). Swap penalty for active nodes | Semantic similarity retrieval from LTM (embedding-based), LTM graph queries for long-range association | `ltm.ts` |
+| **Social model** | Per-target SocialState (closeness, trust, responsiveness EWMA). Act gate hard rules (low responsiveness throttle, pending reply awareness). Relationship decay | Multi-target social dynamics, group relationship modeling, social context-aware planner | `social-model.ts` |
+| **Self-belief system** | 30 evidence-backed beliefs with half-life decay. Three update loops (outcome, prediction error, decay). Belief birth from consistent outcomes. LRU eviction | Belief clustering, self-narrative generation, belief-driven goal generation | `self-model.ts` |
 
 ### Learning Loop Architecture
 
 ```
+    ┌─────────────────┐
+    │  LTM Graph (CS7) │ selectWorkingSet() ──→ WM bootstrap
+    │  1K-10K cold     │ ◄── eviction write-back
+    └─────────────────┘
                     ┌─────────────────────────────────┐
-                    │     Concept Graph (dynamics)     │
+                    │     WM Concept Graph (dynamics)   │
                     │  spread → decay → compete → win  │
+                    │  + structure learning (CS6)       │
                     └──────────┬──────────────────────┘
                                │ winner cluster
                     ┌──────────▼──────────────────────┐
                     │  Gates (thought/reflect/act)      │
+                    │  + Social Gate (CS8)              │
                     │  + Self Gate (CS5b)               │
                     │  → micro-thought / action pref    │
                     └──────────┬──────────────────────┘
@@ -3667,26 +4085,41 @@ When exploration produces results, three systems update:
     │              └──────────┬────────────────────────┘
     │                         │ outcome signal
     │  ┌──────────────────────▼────────────────────────┐
-    │  │  OutcomeTracker + World Model + Self Model     │
-    │  │  outcome → belief state + self state update    │
-    │  │  (latent vars + conjugate priors + E_epi/alea  │
-    │  │   + selfOutcomeUpdate + action family EWMA)    │
+    │  ┌──────────────────────▼───────────────────────────┐
+    │  │  OutcomeTracker + World Model + Self Model      │
+    │  │  + Social Model (CS8) + Self Beliefs (CS5b.9)   │
+    │  │  outcome → belief state + self state update      │
+    │  │  (latent vars + conjugate priors + E_epi/alea    │
+    │  │   + selfOutcomeUpdate + action family EWMA       │
+    │  │   + social responsiveness + belief evidence)     │
     │  └──────────┬────────────────────────────────────┘
-    │             │ learned structure + updated beliefs + updated self
+    │             │ learned structure + updated beliefs + updated self + social
     └─────────────┘ back to Concept Graph ↑ (closed loop)
 ```
 
-The key insight: **learning happens at three levels**, not the LLM level. The graph learns structure (edges, grounding, hierarchy). The world model learns environment dynamics (latent states, transition probabilities). The **self-model learns self-dynamics** (action costs, recovery rates, success probabilities). The curiosity engine learns what's worth exploring (epistemic vs aleatoric, self-cost-aware). The planner learns what works (action utilities via EU, including self-return). The LLM remains a verbalizer — it doesn't learn, but the substrate it verbalizes from does.
+The key insight: **learning happens at five levels**, not the LLM level:
+1. **Graph** learns structure (edges via CS2, hierarchy via CS3, new concepts via CS6, causal direction via CS6b)
+2. **World model** learns environment dynamics (latent states, transition probabilities via conjugate priors)
+3. **Self-model** learns self-dynamics (action costs via EWMA, success rates via Beta-Bernoulli, beliefs via evidence chains)
+4. **Social model** learns relationship dynamics (responsiveness, closeness, trust via EWMA)
+5. **LTM** learns what matters (importance scores, access patterns, concept lifetimes via consolidation)
+
+The curiosity engine learns what's worth exploring (epistemic vs aleatoric, self-cost-aware). The planner learns what works (action utilities via EU, including self-return). The LLM remains a cortex module — it doesn't learn, but the substrate it processes does.
 
 The full cognitive loop is now:
 ```
-graph dynamics → thought → plan (beam search over world model + self model)
+LTM → WM bootstrap (diversity loading, goal/curiosity priming)
+  → graph dynamics → thought → plan (beam search over world model + self model)
+  → social gate → self gate → act gate
   → curiosity (VOI - SelfCost: explore what improves decisions at acceptable cost)
   → action → outcome
   → world model update (belief + latent + priors)
-  → self model update (self state + action family table + self_efficacy)
-  → graph update (edges + grounding + suppression)
-  → better thoughts → better plans → better self-awareness
+  → self model update (self state + action family table + self_efficacy + beliefs)
+  → social model update (responsiveness + closeness)
+  → graph update (edges + grounding + suppression + causal direction)
+  → structure learning (concept birth/death + edge direction)
+  → WM eviction → LTM write-back (stats preserved)
+  → better thoughts → better plans → better self-awareness → longer memory
 ```
 
 ---
@@ -3828,6 +4261,40 @@ CSI's bell-curve centers (novelty=0.5, rotation=9/h) are initial guesses. After 
 
 **Guard**: Only calibrate when `sampleSize > 500` slow-loop ticks (~8h of Green-mode data). If insufficient data → keep defaults.
 
+### Daily Auto-Tuning (target-range parameter adjustment)
+
+Beyond weekly CSI bell-curve calibration, run **daily** parameter micro-adjustments based on observed metrics. No LLM — pure metrics-driven.
+
+**Target ranges** (what "healthy" looks like):
+```typescript
+const AUTO_TUNE_TARGETS = {
+  winnerRotationRate: { min: 3, max: 15 },    // per hour
+  entropy: { min: 0.1, max: 0.6 },
+  groundingRejectRate: { max: 0.15 },
+  loopDetectorTriggerRate: { max: 3 },         // per day
+  clusterLifetimeAvg: { min: 120, max: 600 },  // seconds
+};
+```
+
+**Adjustment rules** (applied during wake-up consolidation, once per day):
+
+| Symptom | Adjustment |
+|---------|-----------|
+| `rotationRate > 15` (restless) | `DETHRONE_MARGIN += 0.005`, `WINNER_MIN_DWELL += 10s`, `NOISE_AMPLITUDE *= 0.95` |
+| `rotationRate < 3` AND `entropy < 0.1` (fixated) | `NOISE_AMPLITUDE *= 1.05`, increase entrenched-mode anti-bias replay weight by 0.05 |
+| `groundingRejectRate > 0.15` | `minGroundingWeight -= 0.02` (lower bar, allow more thoughts through) |
+| `loopDetectorTriggerRate > 3/day` | `DETHRONE_MARGIN -= 0.003` (make it easier to dethrone stuck winners) |
+| `clusterLifetimeAvg > 600` | Increase lateral inhibition on winner cluster by 0.005/tick |
+
+**Safety**: Each parameter has hard bounds (from `config.ts` `MIN_*` / `MAX_*` constants). Adjustments are **clamped** to ±10% of the parameter's baseline per day. This prevents runaway auto-tuning.
+
+**Rollback**: If CSI drops below 0.5 within 2 hours of an auto-tune → revert all adjustments from that cycle. Logged as `auto_tune_rollback`.
+
+**Persistence**: `data/brainstem/auto-tune.json`:
+```typescript
+{ version: number, tuneDate: string, adjustments: Record<string, { before: number, after: number }>, rolledBack: boolean }
+```
+
 ---
 
 ## Multi-Scale Memory Protocol
@@ -3876,6 +4343,17 @@ Features acknowledged but deferred to post-v1. v1 collects the data these featur
 | P2 | **Cortex model routing** | v1 all Cortex calls use same model (Haiku) | Route by task: Haiku for C-3 (parsing), Sonnet for C-2 (proposals), Opus for C-4 (simulation). Cost-quality tradeoff per API. |
 | P2 | **Cortex-3 active learning** | v1 passive extraction | When Cortex-3 confidence is low, generate targeted follow-up questions for clarification (feeds into curiosity engine) |
 
+### Structure, Memory & Social (v2 extensions)
+
+| Priority | Feature | v1 seed | v2 scope |
+|----------|---------|---------|----------|
+| P1 | **Full FP-growth concept mining** | v1 simple pair/triplet co-activation scan | Full frequent itemset mining (FP-growth), arbitrary cluster sizes, automated hierarchy construction |
+| P1 | **LTM embedding retrieval** | v1 Jaccard-based term vector matching for LTM loading | Semantic embedding similarity for LTM → WM selection (reuse existing text-embedding-3-small) |
+| P1 | **Causal intervention** | v1 observational lead/lag direction tags | Interventional queries: "what happens if I suppress node A?" via Cortex-4 simulation |
+| P2 | **Multi-target social dynamics** | v1 per-target SocialState with pairwise rules | Group dynamics modeling, social context in planner, multi-person conversation awareness |
+| P2 | **Belief clustering** | v1 flat 30-belief list | Cluster beliefs into "self-concept domains", track domain-level confidence, belief-driven goal generation |
+| P2 | **Cross-domain analogy** | v1 concept birth from co-activation | Structural analogy detection: map concept subgraph patterns across domains (e.g., "parenting patience" ↔ "debugging persistence") |
+
 ### Robustness & Operations (deferred from 48-item review)
 
 | Priority | Feature | Why deferred |
@@ -3883,7 +4361,7 @@ Features acknowledged but deferred to post-v1. v1 collects the data these featur
 | P1 | **Working memory slots** (3-7 explicit focus slots) | Graph + winner competition serves this adequately for v1 |
 | P2 | **Open loop tracking** (explicit pending items feeding D) | Goals + pending interaction gate cover key loops |
 | P2 | ~~**Task/subtask tree**~~ (promoted to v1 as hierarchical goals H0) | Now in v1: life → project → task levels |
-| P2 | **Anti-bias replay** (force counter-evidence when fixated) | Entrenched mode + adjacent replay partially covers |
+| ~~P2~~ | ~~**Anti-bias replay** (force counter-evidence when fixated)~~ | **Promoted to v1**: counter-evidence replay in entrenched mode (opposite valence + failure outcome memories) |
 | P3 | **Affect regulation actions** (active self-soothing) | Stabilizer + grounded replay achieves similar effect |
 | P3 | **Entity resolution layer** (typed nodes: person/place/project) | Concept ACL provides basic typing |
 | P3 | **Portability** (interface contracts for all deps) | sim.ts abstracts via Clock + mock |
@@ -3906,13 +4384,15 @@ Features acknowledged but deferred to post-v1. v1 collects the data these featur
 7. Phase 5c: `world-model.ts` — transition table, context binning, outcome probability queries, cold start priors
 8. Phase 5d: `curiosity-engine.ts` — EIG scoring, curiosity target selection, exploration query generation
 9. Phase 5e: `planner.ts` — goal decomposition, step simulation via world model, plan scoring, ActionPreference biasing
-10. Phase 5f: `self-model.ts` — SelfState init from existing metrics, SelfTransition (predict + outcome-correct), action family table, SelfCost, self gate policy, recovery dynamics. Wire into planner (self_return in EU), thought-gate (self gate before act gate), curiosity-engine (SelfCost in scoring)
+10. Phase 5f: `self-model.ts` — SelfState init from existing metrics, SelfBelief system (30 beliefs with evidence chains + half-life decay), SelfTransition (predict + outcome-correct), action family table, SelfCost, self gate policy, recovery dynamics. Wire into planner (self_return in EU), thought-gate (self gate before act gate), curiosity-engine (SelfCost in scoring)
 11. Phase 5g: `cortex.ts` — Cortex API layer: C1-C4 typed interfaces + schema validation + whitelist enforcement. Unified budget manager (per-API + global ceiling + priority queue). Call logging to cortex-log.jsonl. Degradation paths (fallback selection). PromptPolicy for Learning Loop B. Wire: C-1 → bootstrap consolidation, C-2 → planner candidate gen, C-3 → OutcomeTracker, C-4 → world-model transition (low-confidence path). Add cortex4Enabled to ControlPolicy.
-12. Phase 6: `index.ts` (brainstem) — wire together, expose API (incl. `brainstemGetSelfState()`), controller replay buffer, resource governor, cold start strategy
-13. Phase 7: Integrate heartbeat, main index.ts, context.ts, watchdog.ts (remove watchdog auto-degrade). Add data governance (provenance, quarantine, suppression labels, OutcomeTracker). Add identity regularizer + narrative trajectory. Wire ActionPreference → heartbeat. Extend `src/goals.ts` with hierarchical goal fields (H0).
-14. Phase 8: `sim.ts` + `debug.ts` — offline simulation, decision log summarizer, fault tree diagnostics, explainability API, daily report with auto-calibration
-15. Phase 9: Concept synthesis (wake-up consolidation), outcome credit propagation integration, learning loop verification, planner integration test, self-model integration test
-16. Typecheck + smoke test + SLO verification + must-not invariants + adversarial suite + learning loop test + planner test + self-model test
+12. Phase 5h: `ltm.ts` — LTM graph cold storage: LTMNode format, eviction write-back (batched at persist cycle), `selectWorkingSet()` with diversity loading (maxPerGroup=2), swap penalty for active nodes. Nightly consolidation: prune (90-day + low importance), merge (Jaccard > 0.7), stats decay. 10K node cap. Wire: bootstrap → ltm.selectWorkingSet(), fast-loop persist → ltm.writeBack(), wake-up consolidation → ltm.consolidate()
+13. Phase 5i: `social-model.ts` — Per-target SocialState (closeness, trust, responsiveness EWMA). Act gate hard rules: low responsiveness throttle (3× cooldown when ewma < 0.2), pending reply awareness (block new topics when waiting). Relationship decay (daily). Wire into act gate (before self gate), message event handlers (inbound/outbound tracking)
+14. Phase 6: `index.ts` (brainstem) — wire together, expose API (incl. `brainstemGetSelfState()`), controller replay buffer, resource governor, cold start strategy
+15. Phase 7: Integrate heartbeat, main index.ts, context.ts, watchdog.ts (remove watchdog auto-degrade). Add data governance (provenance, quarantine, suppression labels, OutcomeTracker). Add identity regularizer + narrative trajectory. Wire ActionPreference → heartbeat. Extend `src/goals.ts` with hierarchical goal fields (H0).
+16. Phase 8: `sim.ts` + `debug.ts` — offline simulation, decision log summarizer, fault tree diagnostics, explainability API, daily report with auto-calibration + daily auto-tuning
+17. Phase 9: Structure learning (CS6: concept birth during consolidation + causal edge direction in CS2), outcome credit propagation integration, learning loop verification, planner integration test, self-model integration test, counter-evidence replay integration
+18. Typecheck + smoke test + SLO verification + must-not invariants + adversarial suite + learning loop test + planner test + self-model test + LTM test + social model test + structure learning test
 
 ## Verification
 
@@ -3953,6 +4433,20 @@ Features acknowledged but deferred to post-v1. v1 collects the data these featur
 35. **Cortex-4 stabilizer gate**: Cortex-4 disabled in Red mode (`cortex4Enabled = false`). Simulation calls blocked during instability.
 36. **Learning Loop B**: PromptPolicy updates after 20+ Cortex-2 calls — `goodExamples` reflect actually-successful proposals, `avoidPatterns` reflect rejections. `cortex2AcceptRate` trends toward 0.3-0.7.
 37. **Cortex whitelist enforcement**: `grep -r "action.*whitelist" src/brainstem/cortex.ts` confirms all Cortex-2 outputs validated against action whitelist. No free-form LLM-generated actions reach the planner.
+38. **Structure learning — concept birth**: After 24h sim with stable co-activation pattern (support > 0.15), synthetic concept node created via CS6a. `concept_birth` audit record exists. Node has parent-child edges to source members.
+39. **Structure learning — concept death**: After concept birth, suppress co-activation for 7 days → synthetic node pruned. `concept_death` logged. Graph doesn't bloat.
+40. **Causal edge direction**: After 15 consistent A-before-B activations, `directionTag = "A_leads"` with `directionConfidence > 0.6`. Reverse pattern → tag flips. Random pattern → tag stays null.
+41. **LTM eviction + recovery**: Fill WM to cap → evict node X → verify X in LTM with stats preserved → activate related goal → X loaded back into WM via `selectWorkingSet()`.
+42. **LTM diversity**: 50 LTM nodes from domain X, 10 from Y. `selectWorkingSet()` loads nodes from both domains (maxPerGroup=2 enforced).
+43. **LTM forgetting**: Node inactive for 90+ days with low importance → pruned during nightly consolidation. LTM size stays bounded.
+44. **Social model responsiveness throttle**: `responsivenessEwma < 0.2` AND outbound >> inbound → act gate cooldown 3×. System reduces outreach to unresponsive targets.
+45. **Social model pending awareness**: `pendingType = "waiting_reply"` → new-topic reach_outs blocked. Only follow-up type allowed.
+46. **Self-belief evidence chain**: After 3+ consistent positive outcomes for `reach_out`, matching SelfBelief created with `support` evidence refs. Confidence > 0.5.
+47. **Self-belief half-life**: Belief with `halfLifeDays = 14` not re-confirmed for 14 days → confidence halved. Prevents fossilized narratives.
+48. **Self-belief capacity**: At 30 belief cap, new belief birth → lowest-confidence oldest belief evicted (LRU). Total never exceeds 30.
+49. **Counter-evidence replay**: In entrenched mode with memory-grounded winner, counter-evidence replay surfaces opposing-valence memories. Winner rotation rate increases modestly (not into restless range). Counter-evidence NOT triggered when winner is goal-grounded.
+50. **Daily auto-tuning**: After 24h with `rotationRate > 15`, auto-tune increases `DETHRONE_MARGIN`. After CSI drop < 0.5 within 2h → auto-tune rolled back. Parameters stay within ±10% bounds.
+51. **New metrics**: `clusterLifetimeAvg`, `conceptTurnover24h`, `ltmSize`, `selfBeliefCount`, `counterEvidenceReplayRate` all logged in `metrics.jsonl` with correct values.
 
 ### Service Level Objectives (SLOs)
 
@@ -4007,6 +4501,20 @@ Hard pass/fail criteria. Measured over 1-hour observation windows. All must hold
 - Exploration ROI: EIG-directed explorations produce actionable discoveries at ≥ 1.5× rate of random
 - Goal hierarchy: task completion → parent progress update within 1 slow-loop tick
 - Failure: planner never generates plans, EIG scores all zero, or hierarchy propagation broken
+
+**SLO-8: Structure Learning & LTM**
+- Concept birth: ≥ 1 synthetic concept per week (when co-activation data sufficient). Max 2/day enforced.
+- Concept death: synthetic nodes inactive for 7+ days are pruned. No zombie concepts accumulate.
+- LTM size: stays under 10K after nightly consolidation. Growth rate stabilizes after ~3 months.
+- WM topic migration: `conceptTurnover24h` in 0.05-0.20 range (WM refreshes but isn't chaotic).
+- LTM diversity: `selectWorkingSet()` loads nodes from ≥ 3 distinct parent groups.
+- Failure: concept birth never triggers, LTM grows unbounded, or WM locked to same nodes forever
+
+**SLO-9: Social Model & Self-Belief**
+- Social model: `responsivenessEwma` tracks actual response patterns (converges within 2 weeks). Low-responsiveness throttling functional (3× cooldown applied).
+- Self-beliefs: ≥ 5 beliefs created within first month of operation. Half-life decay prevents > 50% of beliefs from having `confidence > 0.8` (freshness maintained).
+- Counter-evidence replay: triggers in ≥ 50% of entrenched-mode episodes (when not goal-grounded). `counterEvidenceReplayRate` in 0.1-0.3.
+- Failure: social gate never throttles, self-beliefs at cap with stale high-confidence entries, or counter-evidence replay never fires
 
 ### Behavioral Acceptance Tests
 
