@@ -22,6 +22,7 @@ import { formatGoalContext } from "../goals.js";
 import { formatNarrativeContext } from "../narrative.js";
 import { formatDocumentContext, getDocumentsDir } from "../documents.js";
 import type { ContextPlan } from "./context-planner.js";
+import type { RetrievalPolicy } from "./cognitive-controller.js";
 import { getRecentMoments } from "../moments.js";
 import { getCharacter, s, renderTemplate, isBlankSlate, BLANK_SLATE_PERSONA } from "../character.js";
 import { moduleRegistry } from "../modules/registry.js";
@@ -31,10 +32,12 @@ import { formatRelationshipContext } from "../lib/relationship-model.js";
 const log = createLogger("context");
 
 // Token budget allocation (% of maxContextTokens, default 180K)
+// MEMORY and WORLD ratios are defaults that can be overridden via config.json
+// (memoryBudgetRatio, worldBudgetRatio).
 const SYSTEM_PROMPT_BUDGET_RATIO = 0.40; // 40% of context window for system prompt
-const MEMORY_BUDGET_RATIO = 0.15;        // 15% of system prompt budget for memories
-const WORLD_BUDGET_RATIO = 0.25;         // 25% for world/body/emotion context
-const SKILLS_BUDGET_RATIO = 0.20;        // 20% for skills
+const DEFAULT_MEMORY_BUDGET_RATIO = 0.15;  // 15% of system prompt budget for memories
+const DEFAULT_WORLD_BUDGET_RATIO = 0.25;   // 25% for world/body/emotion context
+const SKILLS_BUDGET_RATIO = 0.20;          // 20% for skills
 
 /**
  * Rank memories by recency (exponential decay over 30 days) weighted by confidence.
@@ -74,18 +77,37 @@ function latestPerTopic(memories: Memory[], maxTopics: number): Memory[] {
 /**
  * Category-aware memory assembly for system prompt.
  *
+ * Uses fused retrieval: a single semantic search + single BM25 search produce
+ * rank-based scores that are combined with configurable weights (via
+ * RetrievalPolicy.scoreWeights). Soft penalties per category and recency
+ * boost are applied before bucket-filling.
+ *
  * - Core: always loaded in full (user facts, family, healthcare)
- * - Emotional: top 8 by search relevance + recency
- * - Knowledge: 0-3 entries, only when conversationally relevant
+ * - Emotional: top N by fused score (default 8)
+ * - Knowledge + Character: top N by fused score (default 3)
  * - Insights: latest per topic (max 3)
  * - System: never included
  */
 async function assembleMemoryContext(
   config: AppConfig,
   conversationContext?: string,
+  memoryQuery?: string,
+  retrievalPolicy?: RetrievalPolicy,
 ): Promise<string> {
   const manager = getStoreManager();
   const sections: string[] = [];
+
+  // Brainstem-guided retrieval: augment search query with focus concept
+  let searchQuery = conversationContext ?? "";
+  if (memoryQuery && memoryQuery.length > 2) {
+    const normalized = memoryQuery.toLowerCase()
+      .replace(/[-_]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!searchQuery.toLowerCase().includes(normalized)) {
+      searchQuery = `${searchQuery} ${memoryQuery}`.trim();
+    }
+  }
 
   // 1. Core — always loaded in full
   const coreMemories = manager.loadCategory("core");
@@ -94,112 +116,172 @@ async function assembleMemoryContext(
     sections.push(`### ${renderTemplate(s().headers.user_key_info)}\n${lines.join("\n")}`);
   }
 
-  // 2. Emotional — top 8 by relevance+recency (always search, even on short messages)
+  // 2 + 3. Fused retrieval: one semantic + one BM25 search for all non-core memories
   const emotionalMemories = manager.loadCategory("emotional");
-  if (emotionalMemories.length > 0) {
-    let topEmotional: Memory[];
-    if (conversationContext) {
-      // Search-based ranking
-      const seen = new Set<string>();
-      const merged: Memory[] = [];
+  const knowledgeMemories = [...manager.loadCategory("knowledge"), ...manager.loadCategory("character")];
 
-      // Semantic search
+  if (emotionalMemories.length > 0 || knowledgeMemories.length > 0) {
+    // Build lookup maps
+    const allSearchable = [...emotionalMemories, ...knowledgeMemories];
+    const memoryMap = new Map(allSearchable.map((m) => [m.key, m]));
+    const emotionalKeySet = new Set(emotionalMemories.map((m) => m.key));
+
+    // Fused score map: key -> { semanticRank, bm25Rank }
+    const fusedScores = new Map<string, { semanticRank: number; bm25Rank: number }>();
+
+    if (searchQuery && searchQuery.length >= 3) {
+      // Single semantic search (top 15)
       const mem0 = getMem0();
       if (mem0?.isReady) {
         try {
-          const semanticResults = await mem0.search(conversationContext, 10);
-          const emotionalKeys = new Set(emotionalMemories.map((m) => m.key));
-          const emotionalMap = new Map(emotionalMemories.map((m) => [m.key, m]));
+          const semanticResults = await mem0.search(searchQuery, 15);
+          let rank = 0;
           for (const sr of semanticResults) {
             const metaKey = sr.metadata?.key as string | undefined;
-            if (metaKey && emotionalKeys.has(metaKey) && !seen.has(metaKey)) {
-              seen.add(metaKey);
-              merged.push(emotionalMap.get(metaKey)!);
+            if (metaKey && memoryMap.has(metaKey)) {
+              fusedScores.set(metaKey, { semanticRank: rank, bm25Rank: -1 });
+              rank++;
             }
           }
         } catch (err) {
-          log.warn("semantic search failed for emotional memories", err);
+          log.warn("semantic search failed for memory retrieval", err);
         }
       }
 
-      // BM25 supplement (search broadly since results span all categories)
+      // Single BM25 search (top 40)
       const engine = getSearchEngine(config);
-      const bm25Results = engine.search(conversationContext, { limit: 30 });
-      const emotionalKeySet = new Set(emotionalMemories.map((m) => m.key));
+      const bm25Results = engine.search(searchQuery, { limit: 40 });
+      let bm25Rank = 0;
       for (const r of bm25Results) {
-        if (emotionalKeySet.has(r.memory.key) && !seen.has(r.memory.key)) {
-          seen.add(r.memory.key);
-          merged.push(r.memory);
+        if (memoryMap.has(r.memory.key)) {
+          const existing = fusedScores.get(r.memory.key);
+          if (existing) {
+            existing.bm25Rank = bm25Rank;
+          } else {
+            fusedScores.set(r.memory.key, { semanticRank: -1, bm25Rank });
+          }
+          bm25Rank++;
         }
       }
-
-      // Fill remaining slots with recency-ranked
-      const recencyFill = rankByRecency(
-        emotionalMemories.filter((m) => !seen.has(m.key)),
-        8 - merged.length,
-      );
-      merged.push(...recencyFill);
-
-      topEmotional = merged.slice(0, 8);
-    } else {
-      topEmotional = rankByRecency(emotionalMemories, 8);
     }
 
-    if (topEmotional.length > 0) {
-      const lines = topEmotional.map((m) => `- ${m.key}: ${m.value}`);
+    // Compute fused score for each hit
+    const now = Date.now();
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+    type ScoredMemory = { memory: Memory; baseScore: number; category: string };
+    const scored: ScoredMemory[] = [];
+
+    const sw = retrievalPolicy?.scoreWeights ?? { semantic: 1, bm25: 1, recency: 1 };
+
+    for (const [key, ranks] of fusedScores) {
+      const memory = memoryMap.get(key)!;
+      let baseScore = 0;
+      // Semantic contribution: 1.0 -> 0.5 by rank (weighted)
+      if (ranks.semanticRank >= 0) {
+        baseScore += sw.semantic * (1.0 - (ranks.semanticRank / 15) * 0.5);
+      }
+      // BM25 contribution: 0.6 -> 0.3 by rank (weighted)
+      if (ranks.bm25Rank >= 0) {
+        baseScore += sw.bm25 * (0.6 - (ranks.bm25Rank / 40) * 0.3);
+      }
+      // Recency boost (weighted)
+      const ageDays = (now - memory.timestamp) / THIRTY_DAYS_MS * 30;
+      baseScore += sw.recency * 0.3 * Math.exp(-ageDays / 30);
+
+      const category = emotionalKeySet.has(key) ? "emotional" : "knowledge";
+      scored.push({ memory, baseScore, category });
+    }
+
+    // Apply soft penalty per category
+    if (retrievalPolicy?.softPenalty) {
+      for (const sm of scored) {
+        const penalty = retrievalPolicy.softPenalty[sm.category] ?? 1.0;
+        sm.baseScore *= penalty;
+      }
+    }
+
+    // Fill emotional bucket (policy-driven size, with category bonus)
+    const emoBucketSize = retrievalPolicy?.buckets?.emotional ?? 8;
+    const emoBonus = retrievalPolicy ? (retrievalPolicy.categoryBonus["emotional"] ?? 0) : 0.2;
+    const emotionalBucket: (ScoredMemory & { adjustedScore: number })[] = scored
+      .filter(sm => sm.category === "emotional")
+      .map(sm => ({ ...sm, adjustedScore: sm.baseScore + emoBonus }))
+      .sort((a, b) => b.adjustedScore - a.adjustedScore)
+      .slice(0, emoBucketSize);
+
+    // Fill remaining slots with recency-ranked emotional (only if search hits are sparse)
+    const emotionalHitKeys = new Set(emotionalBucket.map(sm => sm.memory.key));
+    if (emotionalBucket.length < Math.min(4, emoBucketSize) && emotionalMemories.length > 0) {
+      const recencyFill = rankByRecency(
+        emotionalMemories.filter(m => !emotionalHitKeys.has(m.key)),
+        emoBucketSize - emotionalBucket.length,
+      );
+      for (const m of recencyFill) {
+        emotionalBucket.push({ memory: m, baseScore: 0, adjustedScore: 0, category: "emotional" });
+      }
+    }
+
+    if (emotionalBucket.length > 0) {
+      const lines = emotionalBucket.map((sm) => `- ${sm.memory.key}: ${sm.memory.value}`);
       sections.push(`### ${s().headers.emotional_memories}\n${lines.join("\n")}`);
     }
-  }
 
-  // 3. Knowledge — 0-3 entries, only when conversationally relevant
-  if (conversationContext && conversationContext.length >= 5) {
-    const knowledgeMemories = [...manager.loadCategory("knowledge"), ...manager.loadCategory("character")];
-    if (knowledgeMemories.length > 0) {
-      const seen = new Set<string>();
-      const relevant: Memory[] = [];
+    // Fill knowledge bucket (policy-driven)
+    const knBucketSize = retrievalPolicy?.buckets?.knowledge ?? 3;
+    const knBonus = retrievalPolicy ? (retrievalPolicy.categoryBonus["knowledge"] ?? 0) : 0.2;
+    const knBucket: (ScoredMemory & { adjustedScore: number })[] = scored
+      .filter(sm => sm.category === "knowledge")
+      .map(sm => ({ ...sm, adjustedScore: sm.baseScore + knBonus }))
+      .sort((a, b) => b.adjustedScore - a.adjustedScore)
+      .slice(0, knBucketSize);
 
-      // Semantic search
-      const mem0 = getMem0();
-      if (mem0?.isReady) {
-        try {
-          const semanticResults = await mem0.search(conversationContext, 5);
-          const knowledgeKeys = new Set(knowledgeMemories.map((m) => m.key));
-          const knowledgeMap = new Map(knowledgeMemories.map((m) => [m.key, m]));
-          for (const sr of semanticResults) {
-            const metaKey = sr.metadata?.key as string | undefined;
-            if (metaKey && knowledgeKeys.has(metaKey) && !seen.has(metaKey)) {
-              seen.add(metaKey);
-              relevant.push(knowledgeMap.get(metaKey)!);
-            }
-          }
-        } catch (err) {
-          log.warn("semantic search failed for knowledge memories", err);
-        }
+    // Cross-category anchors: let high-scoring excluded items spill in
+    const anchors = retrievalPolicy?.crossCategoryAnchors ?? 0;
+    if (anchors > 0) {
+      const selectedKeys = new Set([
+        ...emotionalBucket.map(sm => sm.memory.key),
+        ...knBucket.map(sm => sm.memory.key),
+      ]);
+
+      const candidates = scored
+        .filter(sm => !selectedKeys.has(sm.memory.key))
+        .sort((a, b) => b.baseScore - a.baseScore);
+
+      const spilloverCategorySeen = new Set<string>();
+      let spillCount = 0;
+      for (const sm of candidates) {
+        if (spillCount >= anchors) break;
+        if (spilloverCategorySeen.has(sm.category)) continue;
+        const adjusted = { ...sm, adjustedScore: sm.baseScore };
+        if (sm.category === "emotional") emotionalBucket.push(adjusted);
+        else knBucket.push(adjusted);
+        spilloverCategorySeen.add(sm.category);
+        spillCount++;
       }
+    }
 
-      // BM25 (search broadly since results span all categories)
-      const engine = getSearchEngine(config);
-      const bm25Results = engine.search(conversationContext, { limit: 20 });
-      const knowledgeKeySet = new Set(knowledgeMemories.map((m) => m.key));
-      for (const r of bm25Results) {
-        if (knowledgeKeySet.has(r.memory.key) && !seen.has(r.memory.key)) {
-          seen.add(r.memory.key);
-          relevant.push(r.memory);
-        }
-      }
+    // Log retrieval distribution for observability
+    log.info(
+      `retrieval buckets: emo=${emotionalBucket.length}/${emoBucketSize} ` +
+      `kn=${knBucket.length}/${knBucketSize} ` +
+      `scored=${scored.length} sw=${sw.semantic}/${sw.bm25}/${sw.recency}`,
+    );
 
-      const topKnowledge = relevant.slice(0, 3);
-      if (topKnowledge.length > 0) {
-        const lines = topKnowledge.map((m) => `- ${m.key}: ${m.value}`);
+    // Render knowledge section (only when conversation context exists)
+    if (conversationContext && conversationContext.length >= 5) {
+      if (knBucket.length > 0) {
+        const lines = knBucket.map((sm) => `- ${sm.memory.key}: ${sm.memory.value}`);
         sections.push(`### ${s().headers.relevant_knowledge}\n${lines.join("\n")}`);
       }
     }
   }
 
-  // 4. Insights — latest per topic (max 3)
+  // 4. Insights — latest per topic (policy-driven)
+  const insightsBucketSize = retrievalPolicy?.buckets?.insights ?? 3;
   const insightsMemories = manager.loadCategory("insights");
   if (insightsMemories.length > 0) {
-    const topInsights = latestPerTopic(insightsMemories, 3);
+    const topInsights = latestPerTopic(insightsMemories, insightsBucketSize);
     if (topInsights.length > 0) {
       const lines = topInsights.map((m) => `- ${m.key}: ${m.value}`);
       sections.push(`### ${s().headers.recent_insights}\n${lines.join("\n")}`);
@@ -362,11 +444,15 @@ export async function assembleSystemPrompt(
   worldContext?: string,
   emotionContext?: string,
   plan?: ContextPlan,
+  memoryQuery?: string,
+  retrievalPolicy?: RetrievalPolicy,
 ): Promise<string> {
   const maxContextTokens = config.maxContextTokens ?? 180_000;
   const totalBudget = Math.floor(maxContextTokens * SYSTEM_PROMPT_BUDGET_RATIO);
-  const memoryBudget = Math.floor(totalBudget * MEMORY_BUDGET_RATIO);
-  const worldBudget = Math.floor(totalBudget * WORLD_BUDGET_RATIO);
+  const memoryBudgetRatio = (config as unknown as Record<string, unknown>).memoryBudgetRatio as number | undefined;
+  const worldBudgetRatio = (config as unknown as Record<string, unknown>).worldBudgetRatio as number | undefined;
+  const memoryBudget = Math.floor(totalBudget * (memoryBudgetRatio ?? DEFAULT_MEMORY_BUDGET_RATIO));
+  const worldBudget = Math.floor(totalBudget * (worldBudgetRatio ?? DEFAULT_WORLD_BUDGET_RATIO));
   const skillsBudget = Math.floor(totalBudget * SKILLS_BUDGET_RATIO);
 
   const identity = loadIdentity(config.statePath);
@@ -445,7 +531,7 @@ Use memory_set to remember things about the user themselves.`);
 
   // Memories — category-aware loading (budget-limited, skip when plan says false)
   if (!plan || plan.memories) {
-    const memorySection = await assembleMemoryContext(config, conversationContext);
+    const memorySection = await assembleMemoryContext(config, conversationContext, memoryQuery, retrievalPolicy);
     const { text: budgetedMemory, truncated: memTruncated } = truncateToTokenBudget(memorySection, memoryBudget);
     if (memTruncated) log.info(`memories truncated to ${memoryBudget} token budget`);
     prioritizedSections.push({ content: budgetedMemory, priority: 90, label: "memories" });

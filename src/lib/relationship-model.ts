@@ -54,6 +54,9 @@ export interface RelationshipState {
   // 7.5: Availability window learning — depth probability per hour
   depthHoursHistogram?: number[];  // 24 bins, 0-1 probability of deep messages
 
+  // Shared history markers — how they changed each other
+  sharedHistory?: SharedHistoryMarker[];
+
   // Meta
   lastUpdated: number;
   windowStart: number;        // start of 30-day tracking window
@@ -64,6 +67,18 @@ export interface CommunicationRhythm {
   recentMessageLengths: number[];  // last 10 user message lengths
   recentGaps: number[];            // last 10 inter-message gaps in minutes
   currentMode: "deep_conversation" | "checking_in" | "rapid_exchange" | "slow_thoughtful";
+}
+
+/** SharedHistoryMarker — records how the character and user changed each other */
+export interface SharedHistoryMarker {
+  id: string;
+  ts: number;
+  type: "user_changed_her" | "she_stayed_with_user" | "shared_theme" | "mutual_growth";
+  title: string;
+  summary: string;
+  whyItMatters: string;
+  relatedCareTopicIds: string[];
+  narratable: boolean;
 }
 
 /** 6.1: Emotional labor tracking */
@@ -481,7 +496,31 @@ export class RelationshipEngine {
       parts.push(modeLabels[rhythm.currentMode] ?? "");
     }
 
+    // Shared history — context layer always provides, behavior layer decides usage
+    const history = state.sharedHistory ?? [];
+    const narratable = history.filter(h => h.narratable);
+    if (narratable.length > 0) {
+      const latest = narratable[narratable.length - 1];
+      parts.push(`Shared memory: ${latest.title} — ${latest.summary}`);
+    }
+
     return parts.filter(Boolean).join("; ");
+  }
+
+  // ── Shared History CRUD ───────────────────────────────────────────
+
+  /** Add a shared history marker (max 20, oldest dropped). */
+  addSharedHistoryMarker(marker: SharedHistoryMarker): void {
+    const state = this.loadState();
+    if (!state.sharedHistory) state.sharedHistory = [];
+    state.sharedHistory.push(marker);
+    if (state.sharedHistory.length > 20) state.sharedHistory.shift();
+    this.saveState(state);
+  }
+
+  /** Get all shared history markers. */
+  getSharedHistory(): SharedHistoryMarker[] {
+    return this.loadState().sharedHistory ?? [];
   }
 }
 
@@ -594,4 +633,12 @@ export function getEmotionalLabor(): EmotionalLabor {
 /** Format relationship context for system prompt */
 export function formatRelationshipContext(): string {
   return _singleton!.formatRelationshipContext();
+}
+
+export function addSharedHistoryMarker(marker: SharedHistoryMarker): void {
+  _singleton!.addSharedHistoryMarker(marker);
+}
+
+export function getSharedHistory(): SharedHistoryMarker[] {
+  return _singleton!.getSharedHistory();
 }
