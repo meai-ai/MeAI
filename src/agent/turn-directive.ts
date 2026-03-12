@@ -79,7 +79,7 @@ let computeVetoFn: ((
   commitmentPressure: number,
   previousAdherence: number | null,
   consecutiveLow: number,
-) => BrainstemVeto) | undefined;
+) => BrainstemVeto) | undefined = undefined;
 
 // Optional care-topics and emotion imports
 let getActiveEmotionalCare: (() => Array<{
@@ -105,8 +105,9 @@ try {
 
 try {
   const governance = await import("../brainstem/governance.js").catch(() => null);
-  if (governance) {
-    computeVetoFn = governance.computeVeto;
+  if (governance?.computeVeto) {
+    computeVetoFn = (csi: any, selfState: any, cp: number, pa: number | null, cl: number) =>
+      governance.computeVeto(csi, selfState, cp, pa, cl);
   }
 } catch { /* governance not available */ }
 
@@ -118,14 +119,14 @@ try {
 } catch { /* care-topics not available */ }
 
 try {
-  const emotion = await import("../emotion.js").catch(() => null);
+  const emotion = await import("../emotion.js") as any;
   if (emotion?.getWeeklyClimate) {
     getWeeklyClimate = emotion.getWeeklyClimate;
   }
 } catch { /* emotion weekly climate not available */ }
 
 try {
-  const relModel = await import("../lib/relationship-model.js").catch(() => null);
+  const relModel = await import("../lib/relationship-model.js") as any;
   if (relModel?.getSharedHistory) {
     getSharedHistory = relModel.getSharedHistory;
   }
@@ -1345,7 +1346,7 @@ export function computeTurnDirective(
   // Fallback: recent behavioral.* memories (when no blackboard priors)
   if (!directive.behavioralPriors || directive.behavioralPriors.length === 0) {
     try {
-      const yuanMemories = getStoreManager().loadCategory("yuan");
+      const yuanMemories = getStoreManager().loadCategory("character" as any);
       const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
       const recent = yuanMemories
         .filter(m => m.key.startsWith("behavioral.") && m.timestamp > cutoff)

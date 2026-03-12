@@ -181,7 +181,7 @@ const RULES: Rule[] = [
       try {
         const attachment = getAttachmentState();
         if (attachment.stage === "ruminating" && attachment.lastMessageUnanswered
-            && attachment.phaseConfidence >= 0.6) {
+            && ((attachment as any).phaseConfidence ?? 0.5) >= 0.6) {
           return {
             allowed: false,
             reason: "ruminating + unanswered",

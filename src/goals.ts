@@ -15,16 +15,22 @@ import { s } from "./character.js";
 
 const log = createLogger("goals");
 
+export type GoalLevel = "life" | "project" | "task";
+
 export interface Goal {
   id: string;
   description: string;
   category: "learning" | "project" | "social" | "health" | "personal";
-  status: "active" | "completed" | "abandoned";
+  status: "active" | "completed" | "abandoned" | "backlog";
   progress: number; // 0-1
   milestones: Array<{ description: string; completed: boolean; completedAt?: number }>;
   motivation: string;
   createdAt: number;
   updatedAt: number;
+  origin?: "reflect" | "self_generated";
+  priority?: number;           // 0-1
+  relatedTopics?: string[];
+  goalLevel?: GoalLevel;
 }
 
 interface GoalState {
@@ -143,3 +149,27 @@ export function addGoal(goal: Omit<Goal, "id" | "createdAt" | "updatedAt" | "sta
 export function updateGoalProgress(goalId: string, progress: number, milestoneIndex?: number): void { _get().updateGoalProgress(goalId, progress, milestoneIndex); }
 export function abandonGoal(goalId: string): void { _get().abandonGoal(goalId); }
 export function formatGoalContext(): string { return _get().formatGoalContext(); }
+
+/** Review stale/orphaned goals (called during wake-up consolidation). */
+export function reviewGoals(): { stalled: string[]; orphaned: string[]; demoted: string[] } {
+  const goals = _get().getGoals();
+  const now = Date.now();
+  const stalled: string[] = [];
+  const orphaned: string[] = [];
+  const demoted: string[] = [];
+
+  for (const goal of goals) {
+    if (goal.status !== "active") continue;
+
+    // Stalled > 14 days
+    const lastAction = goal.updatedAt;
+    const daysSinceAction = (now - lastAction) / 86_400_000;
+    if (daysSinceAction > 14 && goal.progress < 0.9) {
+      goal.priority = Math.max(0, (goal.priority ?? 0.5) - 0.2);
+      goal.updatedAt = now;
+      stalled.push(goal.id);
+    }
+  }
+
+  return { stalled, orphaned, demoted };
+}

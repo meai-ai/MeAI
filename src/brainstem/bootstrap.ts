@@ -669,7 +669,6 @@ export async function proposeConceptBirth(
   let label = memberLabels.join("+");
   try {
     const nameResult = await claudeText({
-      label: "brainstem.nameCortex",
       system: "Name the following co-activated concept group with a concise superordinate concept (2-5 words). Output only the name, no explanation.",
       prompt: memberLabels.join(", "),
       model: "fast",
@@ -821,7 +820,6 @@ async function synthesizeConcepts(
     let label: string;
     try {
       const result = await claudeText({
-        label: "brainstem.syntheticLabel",
         system: "Summarize these concepts with a short noun phrase (3-8 words) capturing their shared theme. Output only the phrase.",
         prompt: `Concepts: ${labels.join(", ")}`,
         model: "fast",

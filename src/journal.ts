@@ -20,6 +20,7 @@ export interface DiaryEntry {
   mood: string;             // mood label
   themes: string[];         // e.g. ["work", "friends", "pet"]
   referencedPast?: string[];// dates of past entries referenced
+  sourceType?: "narrative"; // diary entries are always narrative by design
 }
 
 interface DiaryState {
@@ -59,6 +60,8 @@ export class JournalEngine {
 
   /** Add a new diary entry (called from reflection in heartbeat). */
   addDiaryEntry(entry: DiaryEntry): void {
+    // Diary entries are always narrative by design
+    entry.sourceType = "narrative";
     const state = this.loadDiary();
     // Don't duplicate entries for the same date
     const existing = state.entries.find(e => e.date === entry.date);

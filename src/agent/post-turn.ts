@@ -480,8 +480,8 @@ Extraction rules:
     // Dispatch: user state
     if (parsed.allenState) {
       try {
-        const { updateAllenState } = await import("../allen-state.js");
-        updateAllenState({
+        const { updateUserState } = await import("../user-state.js");
+        updateUserState({
           focuses: parsed.allenState.focuses ?? [],
           stressor: parsed.allenState.stressor ?? null,
           mood: parsed.allenState.mood ?? undefined,

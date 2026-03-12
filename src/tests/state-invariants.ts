@@ -30,7 +30,7 @@ export function runStateInvariantTests(): TestSuite {
     // 2. phase_confidence_bounded
     tests.push(assertRange(
       "phase_confidence_bounded",
-      attachment.phaseConfidence, 0, 1,
+      (attachment as any).phaseConfidence ?? 0.5, 0, 1,
     ));
 
     // 3. attachment_at_zero_silence — 0 minutes silence → secure

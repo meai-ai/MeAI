@@ -668,7 +668,6 @@ ${perspectiveHint}${toneHint}
   } else {
     try {
       content = await claudeText({
-        label: "brainstem.generateThought",
         system: `你是${charName}的内心独白生成器。输出一句简短的内心想法。`,
         prompt,
         model: "fast",
@@ -921,7 +920,6 @@ async function evaluateActGate(
       const hour = new Date().getHours();
       const sanityPrompt = `想法：${thought.content}\n目标：${target.id}（${target.type}）\n触发：${thought.trigger}\n依据：${thought.grounding[0]?.type ?? "无"}\n当前时间：${hour}时\n对话中：${ctx.isConversationActive() ? "是" : "否"}`;
       const sanityResult = await claudeText({
-        label: "brainstem.verifySanity",
         system: "判断现在主动联系或执行某个行为是否合适。只回答 YES 或 NO。",
         prompt: sanityPrompt,
         model: "fast",
@@ -1091,7 +1089,6 @@ async function createHypotheticalNode(
 
 用一个简短的名词短语（3-8字）描述这个假设性想法。直接输出短语，不要解释。`;
     const llmLabel = await claudeText({
-      label: "brainstem.hypotheticalLabel",
       system: "你是概念命名器。只输出一个简短名词短语。",
       prompt,
       model: "fast",

@@ -1789,7 +1789,6 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
       }
 
       const result = await claudeText({
-        label: "brainstem.synthesizeGoal",
         system: `你是${getCharacter().name}的目标规划器。从潜意识想法中提炼出可执行的小目标。\n` +
           "description 必须简短自然（≤20字），像跟朋友说的一句话，不要写成工作计划书。\n" +
           "好的例子：「每天早上看一眼 dashboard」「试试用 Python 写个小爬虫」「读完那本陶瓷的书」\n" +
@@ -1880,7 +1879,6 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
       } else {
         try {
           const result = await claudeText({
-            label: "brainstem.reflect",
             system: `你是${getCharacter().name}的自我反思助手。从这个月的潜意识想法中提炼3-5条自我观察。每条一句话。`,
             prompt: `这个月的想法：\n${thoughtSummary}\n\n请用JSON数组格式回答：["观察1","观察2","观察3"]`,
             model: "fast",

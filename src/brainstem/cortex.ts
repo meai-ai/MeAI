@@ -388,7 +388,7 @@ ${input.fragments.map((f, i) => `[${i}] (${f.source}) ${f.text}`).join("\n")}
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ label: "brainstem.semanticAnalysis", system, prompt, model: "fast", timeoutMs: 15_000 });
+      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 15_000 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexSemanticOutput>(raw, ["concepts", "relations", "salienceHints"]);
 
@@ -468,7 +468,7 @@ ${input.beliefSnapshot.recentOutcomes.map(o => `- ${o.action}: ${o.outcome}`).jo
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ label: "brainstem.proposeConcept", system, prompt, model: "fast", timeoutMs: 15_000 });
+      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 15_000 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexProposalOutput>(raw, ["candidates"]);
 
@@ -568,7 +568,7 @@ ${input.rawExperience.timingMs ? `耗时: ${input.rawExperience.timingMs}ms` : "
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ label: "brainstem.predict", system, prompt, model: "fast", timeoutMs: 10_000 });
+      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 10_000 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexOutcomeOutput>(raw, ["outcome", "fields", "confidence"]);
 
@@ -658,7 +658,7 @@ caveats: 注意事项字符串数组
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ label: "brainstem.simulate", system, prompt, model: "fast", timeoutMs: 12_000, maxOutputChars: 900 });
+      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 12_000, maxOutputChars: 900 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexSimulationOutput>(raw, ["outcomes", "confidence"]);
 

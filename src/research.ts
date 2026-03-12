@@ -281,7 +281,6 @@ Reply format (JSON):
     model: "smart",
     timeoutMs: 60_000,
     maxOutputChars: 4000,
-    label: "research.observe",
   });
 
   try {

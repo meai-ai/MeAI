@@ -1403,7 +1403,7 @@ JSON format:
     // Attachment-aware signal boosts (soft only, no hard gate)
     try {
       const attachment = getAttachmentState();
-      if (attachment.phaseConfidence >= 0.6) {
+      if (((attachment as any).phaseConfidence ?? 0.5) >= 0.6) {
         if (attachment.stage === "anxious") {
           boosts.push("[relationship] haven't chatted in a while — reach_out weight +");
         } else if (attachment.stage === "ruminating" && attachment.lastMessageUnanswered) {

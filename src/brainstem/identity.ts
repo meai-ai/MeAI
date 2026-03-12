@@ -317,7 +317,6 @@ export class IdentityRegularizer {
       ).join("\n");
 
       const result = await claudeText({
-        label: "brainstem.quarterlyNarrative",
         system: `You are ${charName}'s self-narrative generator. Extract themes, key moments, and growth from quarterly snapshots.`,
         prompt: `Quarter ${quarter} monthly snapshots:
 ${snapshotSummary}

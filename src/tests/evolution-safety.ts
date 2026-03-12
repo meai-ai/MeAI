@@ -14,7 +14,11 @@ import { assert, type TestSuite, type TestResult } from "../brainstem/test-helpe
 
 import fs from "node:fs";
 import path from "node:path";
-import { computeDiffPreview } from "../evolution/patcher.js";
+
+// computeDiffPreview is not available in the open-source patcher — stub it for tests
+function computeDiffPreview(files: Array<{ path: string; content: string }>): string {
+  return files.map(f => `--- /dev/null\n+++ ${f.path} (new file)\n${f.content.split("\n").map(l => `+${l}`).join("\n")}`).join("\n\n");
+}
 
 // Replicate the blocked patterns from patcher.ts for testing
 const BLOCKED_PATH_PATTERNS = [
