@@ -1109,7 +1109,7 @@ const BINARY_FEATURES: Array<{ key: keyof ResponseStyleFeatures; label: string }
 export function computeRelationalPatterns(): void {
   if (!filePath) return;
   const state = loadState();
-  if (!state.styleLearning || state.styleLearning.pairs.length < 10) return;
+  if (!state.styleLearning || state.styleLearning.pairs.length < 5) return;
 
   const pairs = state.styleLearning.pairs;
   const patterns: RelationalPattern[] = [];

@@ -225,7 +225,8 @@ async function extractAndSaveMemories(recentHistory: TranscriptEntry[], tools: T
       "- Include date context in emotional.* values so we know when it happened.\n" +
       "- If there are NO new facts to save, output []\n" +
       "- Do NOT save system/config info, only personal user facts, interests, and emotional moments.\n" +
-      `- Do NOT confuse the AI character's world (${charName}'s hobbies, work) with the user's real life.\n\n` +
+      `- Do NOT confuse the AI character's world (${charName}'s hobbies, work) with the user's real life.\n` +
+      `- IMPORTANT: Always write the subject explicitly in the value. Write '${userName} did X' not just 'did X'. ${userName}'s experiences use user.*/family.*/emotional.* prefixes, ${charName}'s own use inner.*/activity.* prefixes.\n\n` +
       "Output ONLY a JSON array of memories to save:\n" +
       '[{"key": "namespace.key", "value": "the value"}]\n',
     prompt: conversationText,
@@ -651,7 +652,8 @@ export async function preCompactionFlush(sessionLoader: () => TranscriptEntry[],
         "- Capture emotional moments (stress, excitement, frustration, pride, sadness) using emotional.* keys with date context\n" +
         "- Be thorough — this conversation will be lost after compaction\n" +
         "- If nothing new to save, output []\n" +
-        `- Do NOT confuse the AI character's world (${charName}'s hobbies, work) with the user's real life.\n\n` +
+        `- Do NOT confuse the AI character's world (${charName}'s hobbies, work) with the user's real life.\n` +
+        `- IMPORTANT: Always write the subject explicitly in the value. Write '${userName} did X' not just 'did X'. ${userName}'s experiences use user.*/family.*/emotional.* prefixes, ${charName}'s own use inner.*/activity.* prefixes.\n\n` +
         "Output ONLY a JSON array of memories to save:\n" +
         '[{"key": "namespace.key", "value": "the value"}]\n',
       prompt: `Extract important facts from this conversation before it's compacted:\n\n${text}`,

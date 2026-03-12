@@ -26,6 +26,7 @@ import { getNarrativeEmotionSignals } from "./narrative.js";
 import { formatTimelineContext, enqueueTimelineJob, addTimelineEvent } from "./timeline.js";
 import { getUserTZ } from "./lib/pst-date.js";
 import { s, renderTemplate, getCharacter } from "./character.js";
+import { loadDiary } from "./journal.js";
 
 const log = createLogger("emotion");
 
@@ -67,7 +68,7 @@ export interface RuminationState {
 }
 
 /** A journal entry — one snapshot in the rolling emotion log. */
-interface JournalEntry {
+export interface JournalEntry {
   timestamp: number;
   mood: string;
   cause: string;
@@ -84,7 +85,7 @@ interface JournalEntry {
  *           "pottery class bowl is in the kiln, should be ready next Saturday"
  *           "the cat has been overeating recently and needs to diet"
  */
-interface NarrativeThread {
+export interface NarrativeThread {
   /** Short id: "tesla-report", "pottery-bowl", "cat-diet" */
   id: string;
   /** What's going on */
@@ -1345,20 +1346,54 @@ Generate the current emotional state and update narrative threads.`,
    * (e.g., market flash crash, breaking news about a company she covers).
    * Invalidates the cache so next getEmotionalState() generates fresh.
    */
-  public invalidateEmotionCache(): void {
+  /**
+   * Force a mood shift — call this when a significant real-time event happens.
+   * Invalidates the cache so next getEmotionalState() generates fresh.
+   *
+   * With `soft: true`, only invalidates if the cache is older than 5 minutes.
+   * This prevents rapid re-generation during back-to-back messages.
+   */
+  public invalidateEmotionCache(opts?: { soft?: boolean }): void {
     if (!this.dataPath) return;
     const p = this.getEmotionCachePath();
-    if (fs.existsSync(p)) {
-      try { fs.unlinkSync(p); } catch (err) { log.warn("failed to invalidate emotion cache", err); }
+    if (!fs.existsSync(p)) return;
+
+    if (opts?.soft) {
+      try {
+        const mtime = fs.statSync(p).mtimeMs;
+        if (Date.now() - mtime < 5 * 60 * 1000) return; // <5 min, skip
+      } catch { /* fall through to delete */ }
     }
+
+    try { fs.unlinkSync(p); } catch (err) { log.warn("failed to invalidate emotion cache", err); }
+  }
+
+  /** Return all narrative threads (for growth marker detection). */
+  public getNarrativeThreads(): NarrativeThread[] {
+    return this.loadJournal().threads;
+  }
+
+  /** Return journal entries (for weekly climate computation). */
+  public getJournalEntries(): JournalEntry[] {
+    return this.loadJournal().entries;
+  }
+
+  /** Return descriptions of all ongoing narrative threads. */
+  public getActiveThreads(): string[] {
+    const journal = this.loadJournal();
+    return journal.threads
+      .filter(t => t.status === "ongoing")
+      .map(t => t.description);
   }
 }
 
 // ── Backward-compatible singleton wrappers ───────────────────────────
 
 let _singleton: EmotionEngine | null = null;
+let _dataPath = "";
 
 export function initEmotion(config: { statePath: string }): EmotionEngine {
+  _dataPath = config.statePath;
   _singleton = new EmotionEngine(config.statePath);
   return _singleton;
 }
@@ -1394,6 +1429,161 @@ export function getEmotionTransition(): EmotionTransition | null {
   return _singleton!.getEmotionTransition();
 }
 
-export function invalidateEmotionCache(): void {
-  return _singleton!.invalidateEmotionCache();
+export function invalidateEmotionCache(opts?: { soft?: boolean }): void {
+  return _singleton!.invalidateEmotionCache(opts);
+}
+
+export function getNarrativeThreads(): NarrativeThread[] {
+  return _singleton!.getNarrativeThreads();
+}
+
+export function getJournalEntries(): JournalEntry[] {
+  return _singleton!.getJournalEntries();
+}
+
+export function getActiveThreads(): string[] {
+  return _singleton!.getActiveThreads();
+}
+
+// ── Weekly Climate ───────────────────────────────────────────────────
+
+export interface WeeklyClimate {
+  weekLabel: string;           // "03/03 - 03/09"
+  avgEnergy: number;
+  avgValence: number;
+  energyTrend: "rising" | "falling" | "stable";
+  valenceTrend: "rising" | "falling" | "stable";
+  dominantMoods: string[];     // top 3 by frequency
+  dominantThemes: string[];    // top themes from diary
+  summary: string;             // pre-formatted one-liner for prompt
+  computedAt: number;
+}
+
+const WEEKLY_CLIMATE_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
+let weeklyClimateCache: WeeklyClimate | null = null;
+
+function getWeeklyClimatePath(): string {
+  return path.join(_dataPath, "weekly-climate.json");
+}
+
+/** Compute rolling weekly climate from journal entries. */
+export function computeWeeklyClimate(): WeeklyClimate | null {
+  if (!_singleton) return null;
+
+  // Check cache
+  if (weeklyClimateCache && Date.now() - weeklyClimateCache.computedAt < WEEKLY_CLIMATE_CACHE_TTL) {
+    return weeklyClimateCache;
+  }
+
+  const entries = getJournalEntries();
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+  const weekEntries = entries.filter(e => now - e.timestamp < 7 * DAY);
+
+  if (weekEntries.length < 3) return null; // not enough data
+
+  // Compute averages
+  const avgEnergy = weekEntries.reduce((s, e) => s + e.energy, 0) / weekEntries.length;
+  const avgValence = weekEntries.reduce((s, e) => s + e.valence, 0) / weekEntries.length;
+
+  // Split into first half (days 1-3) and second half (days 4-7)
+  const midpoint = now - 4 * DAY;
+  const firstHalf = weekEntries.filter(e => e.timestamp < midpoint);
+  const secondHalf = weekEntries.filter(e => e.timestamp >= midpoint);
+
+  function computeTrend(first: typeof weekEntries, second: typeof weekEntries, field: "energy" | "valence"): "rising" | "falling" | "stable" {
+    if (first.length === 0 || second.length === 0) return "stable";
+    const avgFirst = first.reduce((s, e) => s + e[field], 0) / first.length;
+    const avgSecond = second.reduce((s, e) => s + e[field], 0) / second.length;
+    const delta = avgSecond - avgFirst;
+    if (delta > 0.5) return "rising";
+    if (delta < -0.5) return "falling";
+    return "stable";
+  }
+
+  const energyTrend = computeTrend(firstHalf, secondHalf, "energy");
+  const valenceTrend = computeTrend(firstHalf, secondHalf, "valence");
+
+  // Count mood labels -> top 3
+  const moodCounts = new Map<string, number>();
+  for (const e of weekEntries) {
+    moodCounts.set(e.mood, (moodCounts.get(e.mood) ?? 0) + 1);
+  }
+  const dominantMoods = [...moodCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([mood]) => mood);
+
+  // Load diary themes if available
+  const dominantThemes: string[] = [];
+  try {
+    const diary = loadDiary();
+    const themeCounts = new Map<string, number>();
+    const weekCutoff = now - 7 * DAY;
+    for (const entry of diary.entries) {
+      if (new Date(entry.date).getTime() > weekCutoff) {
+        for (const theme of entry.themes ?? []) {
+          themeCounts.set(theme, (themeCounts.get(theme) ?? 0) + 1);
+        }
+      }
+    }
+    const sortedThemes = [...themeCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([theme]) => theme);
+    dominantThemes.push(...sortedThemes);
+  } catch { /* diary may not be available */ }
+
+  // Format week label
+  const weekStart = new Date(now - 6 * DAY);
+  const weekEnd = new Date(now);
+  const fmt = (d: Date) => `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+  const weekLabel = `${fmt(weekStart)} - ${fmt(weekEnd)}`;
+
+  // Format summary
+  const trendWord = (t: "rising" | "falling" | "stable") =>
+    t === "rising" ? "rising slightly" : t === "falling" ? "declining slightly" : "stable";
+  const energyDesc = avgEnergy < 5 ? "low energy" : avgEnergy > 7 ? "high energy" : "moderate energy";
+  const themeStr = dominantThemes.length > 0 ? `mainly thinking about: ${dominantThemes.join(", ")}` : "";
+  const summary = `mood ${trendWord(valenceTrend)}, ${energyDesc}${themeStr ? ", " + themeStr : ""}`;
+
+  const climate: WeeklyClimate = {
+    weekLabel,
+    avgEnergy: Math.round(avgEnergy * 10) / 10,
+    avgValence: Math.round(avgValence * 10) / 10,
+    energyTrend,
+    valenceTrend,
+    dominantMoods,
+    dominantThemes,
+    summary,
+    computedAt: now,
+  };
+
+  // Cache and persist
+  weeklyClimateCache = climate;
+  persistWeeklyClimate(climate);
+
+  return climate;
+}
+
+/** Cached getter for weekly climate. */
+export function getWeeklyClimate(): WeeklyClimate | null {
+  return computeWeeklyClimate();
+}
+
+/** Persist weekly snapshots - rolling array of last 4. */
+function persistWeeklyClimate(climate: WeeklyClimate): void {
+  if (!_singleton) return;
+  try {
+    const filePath = getWeeklyClimatePath();
+    const existing = readJsonSafe<WeeklyClimate[]>(filePath, []);
+    // Dedup: remove existing entries with the same weekLabel
+    const filtered = existing.filter(e => e.weekLabel !== climate.weekLabel);
+    filtered.push(climate);
+    // Keep last 4 snapshots
+    const trimmed = filtered.slice(-4);
+    writeJsonAtomic(filePath, trimmed);
+  } catch (err) {
+    log.warn("failed to persist weekly climate", err);
+  }
 }

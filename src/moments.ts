@@ -148,6 +148,12 @@ export class MomentsEngine {
       };
       state.moments.push(record);
       state.lastPostedAt = Date.now();
+      // Reset daily counter on new day
+      const todayStr = new Date().toLocaleDateString("sv-SE", { timeZone: getUserTZ() });
+      if (state.dailyDate !== todayStr) {
+        state.dailyDate = todayStr;
+        state.dailyCount = 0;
+      }
       state.dailyCount++;
       this.saveState(state);
 

@@ -412,7 +412,7 @@ export const CS8_CONFIG = {
 
 export const CORTEX_LIMITS = {
   c1: { perDay: 3 },
-  c2: { perDay: 8 },
+  c2: { perHour: 8, perDay: 96 },
   c3: { perDay: 20 },
   c4: { perHour: 3, perDay: 12 },
   verbalize: { perHour: 18 },

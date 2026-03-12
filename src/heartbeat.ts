@@ -64,6 +64,7 @@ import {
   brainstemWantsToAct,
   brainstemGetTurnSignals,
   brainstemGetSkillIntent,
+  brainstemGetCuriosityTargets,
   brainstemResolvePendingOutcomes,
   brainstemRecordPendingReachOut,
   brainstemSetEmotion,
@@ -137,6 +138,73 @@ export function getGlobalActivationEntropy(): number {
 /** Get top N activations for context injection. */
 export function getTopActivations(n = 3): Array<{ topic: string; weight: number }> {
   return heartbeatInstance?.getTopActivations(n) ?? [];
+}
+
+// ── Prediction Types ────────────────────────────────────────────────
+
+export interface Prediction {
+  id: string;
+  predictedAt: number;
+  horizon: string;         // "next_reflection"
+  content: string;         // what the character predicted
+  category: "curiosity" | "emotion" | "activity" | "social";
+  resolved?: boolean;
+  actual?: string;
+  surprise?: number;       // 0=accurate, 1=totally wrong
+  resolvedAt?: number;
+}
+
+export interface PredictionState {
+  predictions: Prediction[];
+  accuracy: { total: number; surpriseSum: number; lastCalculated: number };
+}
+
+/** Get continuity value snapshot for context injection. */
+export function getContinuitySnapshot(): { value: number; components: string[] } {
+  return heartbeatInstance?.getContinuitySnapshot() ?? { value: 0, components: [] };
+}
+
+/** Trigger reflection from outside the heartbeat (e.g., from a tool call).
+ *  Returns a summary of what happened, or null if no heartbeat instance. */
+export async function triggerReflection(): Promise<string | null> {
+  if (!heartbeatInstance) return null;
+  const success = await heartbeatInstance.doReflection();
+  return success ? "reflection_complete" : "reflection_failed";
+}
+
+/** Format prediction context for system prompt injection. */
+export function formatPredictionContext(statePath: string): string {
+  const filePath = path.join(statePath, "predictions.json");
+  const state = readJsonSafe<PredictionState>(filePath, {
+    predictions: [],
+    accuracy: { total: 0, surpriseSum: 0, lastCalculated: 0 },
+  });
+
+  const parts: string[] = [];
+
+  // Surprising resolved predictions - things that didn't go as expected
+  const surprising = state.predictions
+    .filter(p => p.resolved && (p.surprise ?? 0) > 0.5)
+    .slice(-2);
+  if (surprising.length > 0) {
+    for (const p of surprising) {
+      parts.push(`- Expected: ${p.content.slice(0, 30)}, but actually: ${p.actual?.slice(0, 30) ?? "different"}`);
+    }
+  }
+
+  // Self-knowledge - expressed as a feeling, not a metric
+  if (state.accuracy.total >= 3) {
+    const avgSurprise = state.accuracy.surpriseSum / state.accuracy.total;
+    if (avgSurprise < 0.3) {
+      parts.push(`Lately I know myself pretty well - my self-predictions have been mostly accurate`);
+    } else if (avgSurprise > 0.6) {
+      parts.push(`Lately I keep surprising myself - doing things I didn't expect`);
+    }
+  }
+
+  if (parts.length === 0) return "";
+
+  return parts.join("\n") + "\nThese are self-reflections - don't proactively report them, only bring them up when naturally relevant.";
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -381,6 +449,28 @@ export class Heartbeat {
   /** Get the current heartbeat count */
   getPulseCount(): number {
     return this.pulseCount;
+  }
+
+  /** Get continuity snapshot for context injection. */
+  getContinuitySnapshot(): { value: number; components: string[] } {
+    const components: string[] = [];
+    let value = 0;
+
+    // Pulse count contribution
+    if (this.pulseCount > 5) {
+      value += 0.3;
+      components.push(`${this.pulseCount} heartbeats`);
+    }
+
+    // Topic activation contribution
+    const topActs = this.getTopActivations(3);
+    if (topActs.length > 0) {
+      value += 0.3;
+      const topicNames = topActs.map(a => a.topic.slice(0, 15)).join(", ");
+      components.push(`focus: ${topicNames}`);
+    }
+
+    return { value: Math.min(1, value), components };
   }
 
   // ── 7.2: Adaptive Interval ─────────────────────────────────────────
@@ -1042,6 +1132,20 @@ Pick the best action:`,
       let success = false;
       switch (decision.action) {
         case "explore": {
+          // Pass activation hints + EIG targets to curiosity
+          const hints = this.getTopActivations(5).map(a => a.topic);
+          this.curiosity.setActivationHints(hints, this.getActivationEntropy());
+          try {
+            const eigTargets = brainstemGetCuriosityTargets()
+              .filter(t => t.queryType === "search");  // only web-searchable targets
+            if (eigTargets.length > 0) {
+              this.curiosity.setEIGTargets(eigTargets.map(t => ({
+                query: t.suggestedQuery || t.nodeId,
+                reason: `EIG-directed (learningNeed=${t.learningNeed.toFixed(2)})`,
+              })));
+            }
+          } catch { /* brainstem may not be initialized */ }
+
           const explored = await this.curiosity.tick();
           // Post discovery moment if share-worthy
           if (explored && isMomentsEnabled()) {
@@ -1140,7 +1244,7 @@ Pick the best action:`,
   // ── Reflection ─────────────────────────────────────────────────────
 
   /** Synthesize recent memories, emotions, and life data into insights. */
-  private async doReflection(): Promise<boolean> {
+  async doReflection(): Promise<boolean> {
     try {
       // Load recent memories (last 7 days, max 15)
       let recentMemories: Array<{ key: string; value: string }> = [];
@@ -1424,6 +1528,10 @@ ${hobbyCtx || "(none)"}
 
 Based on recent life and interests, generate 1-2 new short-term goals (achievable in 1-2 weeks).
 Goals should be specific, actionable, and relevant to their life.
+
+IMPORTANT: Memories describe past events. Do not turn past events into future goals.
+For example, if a birthday already happened, do not generate "plan birthday".
+Only generate forward-looking, currently actionable goals.
 
 Categories: learning, project, social, health, personal
 

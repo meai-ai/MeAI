@@ -1099,6 +1099,7 @@ export function computeGroundingForCluster(
   goals: GoalRef[],
   discoveries: DiscoveryRef[],
   clock: Clock,
+  recentGroundedMemories?: Map<string, number>,
 ): GroundingResult {
   const now = clock.nowMs();
   const candidates: Array<{ type: "memory" | "goal" | "discovery"; id: string; weight: number; sourceNodeIds: string[]; why: GroundingRef["evidence"]["why"]; rawParts: GroundingRef["evidence"]["rawScoreParts"] }> = [];
@@ -1160,6 +1161,18 @@ export function computeGroundingForCluster(
       existing.sourceNodeIds = [...new Set([...existing.sourceNodeIds, ...c.sourceNodeIds])];
     } else {
       dedupMap.set(key, { ...c, sourceNodeIds: [...c.sourceNodeIds] });
+    }
+  }
+
+  // Diversity: penalize memories already used in recent thoughts
+  if (recentGroundedMemories) {
+    for (const [, c] of dedupMap) {
+      if (c.type === "memory") {
+        const recentUseCount = recentGroundedMemories.get(c.id) ?? 0;
+        if (recentUseCount > 0) {
+          c.weight *= Math.pow(0.7, recentUseCount); // 30% discount per recent use
+        }
+      }
     }
   }
 

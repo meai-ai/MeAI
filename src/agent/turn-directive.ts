@@ -243,7 +243,7 @@ function maybeCreatePlan(
   conversationGoal: TurnDirective["conversationGoal"],
 ): ConversationPlan | null {
   // Only create a plan when there are 2+ urgent commitments and we're in follow-up mode
-  const urgent = commitments.filter(c => c.urgency > 0.5);
+  const urgent = commitments.filter(c => c.urgency > 0.3);
   if (urgent.length < 2) {
     activePlan = null;
     return null;
@@ -1346,9 +1346,9 @@ export function computeTurnDirective(
   // Fallback: recent behavioral.* memories (when no blackboard priors)
   if (!directive.behavioralPriors || directive.behavioralPriors.length === 0) {
     try {
-      const yuanMemories = getStoreManager().loadCategory("character" as any);
+      const charMemories = getStoreManager().loadCategory("character" as any);
       const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
-      const recent = yuanMemories
+      const recent = charMemories
         .filter(m => m.key.startsWith("behavioral.") && m.timestamp > cutoff)
         .sort((a, b) => b.timestamp - a.timestamp)
         .slice(0, 3);
@@ -1440,7 +1440,7 @@ export interface ReplyControl {
 export function deriveReplyControl(directive: TurnDirective): ReplyControl {
   return {
     mustMention: directive.openCommitments
-      .filter(c => c.urgency > 0.5)
+      .filter(c => c.urgency > 0.3)
       .map(c => c.content),
     shouldGroundIn: directive.mustReferenceSlots.map(s => s.label),
     avoidTopicDrift: directive.conversationGoal === "follow_up_commitment",

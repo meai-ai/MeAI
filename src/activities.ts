@@ -340,7 +340,38 @@ const ACTIVITY_TYPE_LABELS: Record<string, string> = {
  */
 export function formatActivityContext(): string {
   const now = Date.now();
+  const tz = getUserTZ();
   const parts: string[] = [];
+
+  // ── Action Ledger: in-progress + today's completed/failed actions ──
+  try {
+    const ledger = loadRecentLedger(12); // last 12 hours
+    const inProgress = ledger.filter(e => e.phase === "in_progress");
+    const finished = ledger.filter(e => e.phase === "finished");
+
+    if (inProgress.length > 0) {
+      const lines = inProgress.map(e => {
+        const time = new Date(e.timestamp).toLocaleTimeString("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+        return `- ${time} ${e.type}: "${e.title}"`;
+      });
+      parts.push(`## Currently in progress\n${lines.join("\n")}`);
+    }
+
+    if (finished.length > 0) {
+      const lines = finished.map(e => {
+        const time = new Date(e.timestamp).toLocaleTimeString("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+        const mark = e.outcome === "success" ? "\u2713" : "\u2717";
+        const detail = e.outcome === "success" && e.artifacts.length > 0
+          ? ` -> ${e.artifacts[0].path || e.artifacts[0].url || e.artifacts[0].description}`
+          : e.outcome === "failed" && e.failureReason
+            ? ` (${e.failureReason.slice(0, 30)})`
+            : "";
+        return `- ${time} ${e.type}: "${e.title}"${detail} ${mark}`;
+      });
+      parts.push(`## Things actually done today (can reference)\n${lines.join("\n")}\n\n` +
+        `\u2713 -> completed ("I just...")\n\u2717 -> "I tried but didn't succeed"\nIn progress -> "I'm currently..."\nOther -> intent ("I'm planning to...") or ambient ("it's X time of day")`);
+    }
+  } catch { /* non-fatal */ }
 
   // ── Recent activities (always include today's + last 3 meaningful within 7 days) ──
   try {

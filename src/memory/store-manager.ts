@@ -297,7 +297,7 @@ export class MemoryStoreManager {
               const touchCount = touches.get(m.key);
               if (touchCount) {
                 m.lastAccessedAt = now;
-                m.accessCount = (m.accessCount ?? 0) + touchCount;
+                m.accessCount = (m.accessCount ?? 0) + Math.min(touchCount, 1);
               }
             }
             return { memories };

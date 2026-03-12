@@ -84,6 +84,12 @@ export function shouldReconsolidate(memory: Memory, category: MemoryCategory): b
   // sourceType gate — observed memories are facts, don't reconsolidate
   if (memory.sourceType === "observed") return false;
 
+  // Skip if there's already a pending proposal for this key
+  const pending = loadProposals();
+  if (pending.some(p => p.key === memory.key && p.status === "pending")) {
+    return false;
+  }
+
   return true;
 }
 
@@ -96,6 +102,8 @@ Criteria:
 - factual_update: facts are outdated (e.g., time, numbers, status changes)
 - perspective_evolution: viewpoint/attitude has evolved
 - context_refresh: needs additional context information
+
+IMPORTANT: For one-time events (e.g., being sick, working overtime, a dinner gathering), if the event has already concluded and the current context does not provide substantive new information about it, set shouldUpdate=false. Do NOT mechanically add time-refresh updates like "it is now morning/afternoon" — that is not a meaningful update. Only update when the current context contains genuinely new information about the memory.
 
 Output a strict JSON array, nothing else. Each element:
 {"key":"memory key","shouldUpdate":true/false,"updateType":"factual_update"|"perspective_evolution"|"context_refresh","newValue":"full updated content (if shouldUpdate=true)","confidence":0.0-1.0,"reason":"brief reason"}
