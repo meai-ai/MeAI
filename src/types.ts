@@ -46,6 +46,10 @@ export interface AppConfig {
     embedding?: string;
     vision?: string;
   };
+  /** Claude Max OAuth — optional, uses Max subscription for background LLM calls */
+  maxOAuthEnabled?: boolean;
+  /** Path to the OAuth token file — overrides default location */
+  maxOAuthTokenPath?: string;
   /** MAIP Protocol — optional, enables federated AI agent networking */
   maip?: {
     enabled: boolean;

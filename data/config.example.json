@@ -20,5 +20,8 @@
   "fishAudioVoiceId": "",
   "tavilyApiKey": "",
   "sunoApiKey": "",
-  "momentsChannelId": ""
+  "momentsChannelId": "",
+
+  "maxOAuthEnabled": false,
+  "maxOAuthTokenPath": ""
 }

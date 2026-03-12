@@ -1,13 +1,8 @@
 /**
- * Claude Runner — calls LLM via Claude Code CLI, not through the API.
+ * Claude Runner — unified LLM call layer for background tasks.
  *
- * Extracts the subprocess pattern from data/skills/claude-code/tools.ts into
- * reusable utility functions for all background modules.
- *
- * Benefits:
- *   - Uses Max subscription billing, no API token cost
- *   - Unified call entry point for watchdog monitoring
- *   - Shares the same binary lookup logic with skills
+ * Primary path (when maxOAuthEnabled): Anthropic API via Max OAuth ($0 cost).
+ * Fallback / default: Claude Code CLI (`claude --print`).
  *
  * Usage:
  *   const text = await claudeRun({ system: "...", prompt: "...", model: "fast" });
@@ -16,6 +11,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import type Anthropic from "@anthropic-ai/sdk";
+import { createAnthropicClient, isMaxOAuthAvailable } from "./max-oauth.js";
 
 // ── Binary Lookup ────────────────────────────────────────────────────
 
@@ -49,6 +46,14 @@ async function findClaude(): Promise<string | null> {
   });
 }
 
+// ── Model mapping ────────────────────────────────────────────────────
+
+function modelId(model: string): string {
+  return model === "smart"
+    ? "claude-sonnet-4-6"
+    : "claude-haiku-4-5-20251001";
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface ClaudeRunOptions {
@@ -58,7 +63,7 @@ export interface ClaudeRunOptions {
   prompt: string;
   /** "fast" = haiku (default), "smart" = sonnet */
   model?: "fast" | "smart";
-  /** Timeout in ms (default: 30s) */
+  /** Timeout in ms (default: 180s) */
   timeoutMs?: number;
   /** Max output chars to return (default: 16000) */
   maxOutputChars?: number;
@@ -68,13 +73,77 @@ export interface ClaudeRunResult {
   ok: boolean;
   text: string;
   error?: string;
+  /** Token usage — only available when using the API path */
+  usage?: { inputTokens: number; outputTokens: number };
+}
+
+// ── API Client (Max OAuth) ───────────────────────────────────────────
+
+let apiClient: Anthropic | null = null;
+
+/**
+ * Initialize the API-based runner. Call once at startup after initMaxOAuth().
+ * If Max OAuth is available, background tasks will use the API instead of CLI.
+ */
+export function initClaudeRunnerApi(apiKey: string): void {
+  if (isMaxOAuthAvailable()) {
+    apiClient = createAnthropicClient(apiKey);
+    console.log("[claude-runner] API path enabled (Max OAuth)");
+  }
+}
+
+async function runApi(
+  system: string,
+  prompt: string,
+  model: string,
+  timeoutMs: number,
+  maxOutputChars: number,
+): Promise<ClaudeRunResult> {
+  if (!apiClient) return { ok: false, text: "", error: "API client not initialized" };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await apiClient.messages.create(
+      {
+        model: modelId(model),
+        max_tokens: 4096,
+        system,
+        messages: [{ role: "user", content: prompt }],
+      },
+      { signal: controller.signal },
+    );
+    clearTimeout(timer);
+
+    const text = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    const usage = response.usage ? {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    } : undefined;
+
+    return {
+      ok: true,
+      text: text.length > maxOutputChars ? text.slice(0, maxOutputChars) : text,
+      usage,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, text: "", error: `API error: ${msg}` };
+  }
 }
 
 // ── Core Runner ──────────────────────────────────────────────────────
 
 /**
- * Run a prompt through Claude Code CLI (`claude --print`).
- * Uses Max subscription — no API key billing.
+ * Run a prompt through the best available backend.
+ * Primary: Anthropic API via Max OAuth (when enabled).
+ * Fallback: Claude Code CLI (`claude --print`).
  */
 export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
   const {
@@ -85,6 +154,19 @@ export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult
     maxOutputChars = 16_000,
   } = opts;
 
+  // Strip null bytes — scraped web content can contain them and spawn() rejects them
+  const cleanSystem = system.replace(/\0/g, "");
+  const cleanPrompt = prompt.replace(/\0/g, "");
+
+  // Primary path: API via Max OAuth
+  if (apiClient) {
+    const result = await runApi(cleanSystem, cleanPrompt, model, timeoutMs, maxOutputChars);
+    if (result.ok) return result;
+    // API failed — fall back to CLI
+    console.warn(`[claude-runner] API failed, falling back to CLI: ${result.error}`);
+  }
+
+  // Fallback: Claude CLI
   const claudePath = await findClaude();
   if (!claudePath) {
     return {
@@ -94,13 +176,7 @@ export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult
     };
   }
 
-  const modelFlag = model === "smart"
-    ? "claude-sonnet-4-6"
-    : "claude-haiku-4-5-20251001";
-
-  // Strip null bytes — scraped web content can contain them and spawn() rejects them
-  const cleanSystem = system.replace(/\0/g, "");
-  const cleanPrompt = prompt.replace(/\0/g, "");
+  const modelFlag = modelId(model);
 
   return new Promise((resolve) => {
     let stdout = "";

@@ -56,6 +56,10 @@ export const ConfigSchema = z.object({
     embedding: z.string().default("anthropic-api"),
     vision: z.string().default("anthropic-api"),
   }).default({}),
+  /** Claude Max OAuth — optional, uses Max subscription for background LLM calls ($0 API cost) */
+  maxOAuthEnabled: z.boolean().default(false),
+  /** Path to the OAuth token file — defaults to <projectRoot>/.oauth-tokens.json */
+  maxOAuthTokenPath: z.string().optional(),
   /** MAIP Protocol — optional, enables federated AI agent networking */
   maip: z.object({
     enabled: z.boolean().default(false),
@@ -163,6 +167,8 @@ function getEnvOverrides(): Record<string, unknown> {
   if (process.env.SUNO_API_KEY) overrides.sunoApiKey = process.env.SUNO_API_KEY;
   if (process.env.FISH_AUDIO_VOICE_ID) overrides.fishAudioVoiceId = process.env.FISH_AUDIO_VOICE_ID;
   if (process.env.MOMENTS_CHANNEL_ID) overrides.momentsChannelId = process.env.MOMENTS_CHANNEL_ID;
+  if (process.env.MAX_OAUTH_ENABLED) overrides.maxOAuthEnabled = process.env.MAX_OAUTH_ENABLED === "true";
+  if (process.env.MAX_OAUTH_TOKEN_PATH) overrides.maxOAuthTokenPath = process.env.MAX_OAUTH_TOKEN_PATH;
   return overrides;
 }
 

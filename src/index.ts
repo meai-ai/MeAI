@@ -95,6 +95,8 @@ import { initInteractionLearning, recordUserReply, getPendingProactive } from ".
 import { initResearch, ResearchEngine } from "./research.js";
 import { initSelfNarrative } from "./self-narrative.js";
 import { initRelationalImpact } from "./relational-impact.js";
+import { initMaxOAuth, isMaxOAuthAvailable } from "./max-oauth.js";
+import { initClaudeRunnerApi } from "./claude-runner.js";
 
 async function safeInit(name: string, fn: () => unknown | Promise<unknown>, critical = false): Promise<boolean> {
   try {
@@ -125,6 +127,20 @@ async function main(): Promise<void> {
 
   // Critical modules — crash on failure
   await track("character", () => initCharacter(config.statePath), true);
+
+  // Initialize Max OAuth (token-based auth via Claude Max subscription)
+  if (config.maxOAuthEnabled) {
+    await track("max-oauth", () => {
+      initMaxOAuth(config.statePath, config.maxOAuthTokenPath);
+      if (isMaxOAuthAvailable()) {
+        console.log("[max-oauth] Claude Max subscription active — $0 API cost for background tasks");
+        initClaudeRunnerApi(config.anthropicApiKey);
+      } else {
+        console.log("[max-oauth] Enabled but token file not found — falling back to CLI");
+        console.log("[max-oauth] Generate tokens with: npx anthropic-max-router");
+      }
+    });
+  }
 
   // Initialize prompt trace (JSONL recording of all LLM calls)
   await track("prompt-trace", () => initPromptTrace(config.statePath));

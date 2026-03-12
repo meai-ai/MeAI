@@ -44,9 +44,13 @@ let cached: OAuthTokens | null = null;
 
 // ── Public API ─────────────────────────────────────────────────────
 
-export function initMaxOAuth(statePath: string): void {
-  // Token file lives in project root (sibling of data/)
-  tokenPath = path.resolve(statePath, "..", ".oauth-tokens.json");
+export function initMaxOAuth(statePath: string, customTokenPath?: string): void {
+  if (customTokenPath) {
+    tokenPath = path.resolve(customTokenPath);
+  } else {
+    // Token file lives in project root (sibling of data/)
+    tokenPath = path.resolve(statePath, "..", ".oauth-tokens.json");
+  }
 }
 
 /** Whether a `.oauth-tokens.json` file exists at the expected path. */
