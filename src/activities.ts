@@ -273,13 +273,17 @@ export function formatActivityContext(): string {
   const now = Date.now();
   const parts: string[] = [];
 
-  // ── Recent activities (last 3 meaningful ones within 7 days) ──
+  // ── Recent activities (always include today's + last 3 meaningful within 7 days) ──
   try {
     const state = loadState();
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-    const recent = state.recent
-      .filter(r => r.timestamp > sevenDaysAgo && r.title !== "(no inspiration)" && r.title !== "(composing not enabled)")
-      .slice(-3);
+    const todayStr = pstDateStr();
+    const meaningful = state.recent
+      .filter(r => r.timestamp > sevenDaysAgo && r.title !== "(no inspiration)" && r.title !== "(composing not enabled)");
+    // Always include today's activities + last 3 from earlier
+    const todayActivities = meaningful.filter(r => pstDateStr(new Date(r.timestamp)) === todayStr);
+    const olderActivities = meaningful.filter(r => pstDateStr(new Date(r.timestamp)) !== todayStr).slice(-3);
+    const recent = [...todayActivities, ...olderActivities];
 
     if (recent.length > 0) {
       const lines = recent.map(r => {

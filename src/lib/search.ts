@@ -301,3 +301,39 @@ export async function fetchPage(url: string, maxChars = 3000): Promise<string> {
   if (!_singleton) throw new Error("SearchEngine not initialized — call initSearch first");
   return _singleton.fetchPage(url, maxChars);
 }
+
+/**
+ * Search GitHub repositories via the REST API.
+ * Unauthenticated rate limit: 10 req/min — fine for curiosity cadence.
+ */
+export async function searchGitHub(
+  query: string,
+  maxResults = 3,
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = [];
+
+  try {
+    const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&per_page=${maxResults}&sort=stars`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "MeAI-Curiosity/1.0", Accept: "application/vnd.github.v3+json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return results;
+    const repoJson = (await res.json()) as any;
+    for (const repo of (repoJson.items ?? []).slice(0, maxResults)) {
+      results.push({
+        title: `${repo.full_name} — ${repo.description ?? ""}`.slice(0, 200),
+        url: repo.html_url,
+        snippet: [
+          repo.description ?? "",
+          `Stars: ${repo.stargazers_count} | ${repo.language ?? ""}`,
+          repo.topics?.length ? `Topics: ${repo.topics.join(", ")}` : "",
+        ].filter(Boolean).join(" | "),
+      });
+    }
+  } catch (err) {
+    log.warn("GitHub repo search failed", err);
+  }
+
+  return results;
+}

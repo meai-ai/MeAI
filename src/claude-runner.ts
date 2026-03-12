@@ -176,16 +176,55 @@ export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult
   });
 }
 
+/** Check if an error is transient and worth retrying. */
+function isTransientError(error: string): boolean {
+  const transientPatterns = [
+    "overloaded_error",
+    "overloaded",
+    "rate_limit",
+    "529",
+    "503",
+    "502",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "socket hang up",
+    "network",
+    "connection reset",
+  ];
+  const lower = error.toLowerCase();
+  return transientPatterns.some(p => lower.includes(p.toLowerCase()));
+}
+
 /**
  * Convenience: run and extract text (returns "" on failure).
  * Most background modules just need the text output.
+ * Retries up to 10 times on transient errors (overloaded, connection reset)
+ * with 6-second intervals.
  */
 export async function claudeText(opts: ClaudeRunOptions): Promise<string> {
-  const result = await claudeRun(opts);
-  if (!result.ok) {
-    console.warn(`[claude-runner] Failed (${opts.model ?? "fast"}): ${result.error}`);
+  const MAX_RETRIES = 10;
+  const RETRY_DELAY_MS = 6_000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const result = await claudeRun(opts);
+
+    if (result.ok) return result.text;
+
+    const errorMsg = result.error ?? "";
+
+    // Retry on transient errors
+    if (attempt < MAX_RETRIES && isTransientError(errorMsg)) {
+      console.warn(`[claude-runner] Transient error (attempt ${attempt + 1}/${MAX_RETRIES + 1}): ${errorMsg} — retrying in ${RETRY_DELAY_MS / 1000}s`);
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      continue;
+    }
+
+    // Non-transient or exhausted retries
+    console.warn(`[claude-runner] Failed (${opts.model ?? "fast"}): ${errorMsg}`);
+    return result.text;
   }
-  return result.text;
+
+  return ""; // Should not reach here
 }
 
 /**

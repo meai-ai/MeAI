@@ -116,6 +116,10 @@ export class WatchdogEngine {
   private lastAlertKeys = new Map<string, number>();
   private readonly ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour per alert type
 
+  // Sleep detection — if the gap between checks is much larger than the interval,
+  // the machine was likely asleep (laptop lid closed). Suppress false stall alerts.
+  private lastCheckAt = Date.now();
+
   // Health report directory
   private watchdogDir: string;
 
@@ -234,11 +238,17 @@ export class WatchdogEngine {
     if (this.stopped) return;
 
     try {
+      // Detect machine sleep: if gap since last check is >2x the interval,
+      // the laptop was likely closed. Give heartbeat a grace period to catch up.
+      const sinceLastCheck = Date.now() - this.lastCheckAt;
+      const resumingFromSleep = sinceLastCheck > CHECK_INTERVAL_MS * 2;
+      this.lastCheckAt = Date.now();
+
       this.resetDailyIfNeeded();
       const checks: HealthCheck[] = [];
 
-      // Run all health checks
-      checks.push(this.checkHeartbeat());
+      // Run all health checks (skip heartbeat stall check right after sleep)
+      checks.push(resumingFromSleep ? this.sleepGraceHeartbeat() : this.checkHeartbeat());
       checks.push(this.checkCircuitBreaker());
       checks.push(this.checkMemoryIntegrity());
       checks.push(this.checkDiskUsage());
@@ -340,6 +350,17 @@ export class WatchdogEngine {
     } catch {
       return { name, status: "warn", message: "Cannot read heartbeat state", timestamp: Date.now() };
     }
+  }
+
+  /** After machine sleep, skip stall detection — heartbeat hasn't had time to resume */
+  private sleepGraceHeartbeat(): HealthCheck {
+    console.log("[watchdog] Machine resumed from sleep — skipping heartbeat stall check");
+    return {
+      name: "heartbeat_alive",
+      status: "ok",
+      message: "Grace period after machine sleep",
+      timestamp: Date.now(),
+    };
   }
 
   /** Check circuit breaker status */

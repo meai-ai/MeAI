@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { claudeText } from "./claude-runner.js";
+import { repairAndParseJson } from "./lib/json-repair.js";
 import { fetchLocalEvents } from "./interests.js";
 import { rollDailySickness, getCurrentPeriodPhase, getCurrentSickStatus } from "./body.js";
 import { getStoreManager } from "./memory/store-manager.js";
@@ -422,7 +423,7 @@ export class WorldEngine {
       });
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return null;
-      return JSON.parse(jsonMatch[0]);
+      return repairAndParseJson(jsonMatch[0]);
     };
 
     try {

@@ -22,7 +22,7 @@ import type { AppConfig, Memory } from "./types.js";
 import type { XClient } from "./x-client.js";
 import { searchSkills, evaluateSkill } from "./clawhub.js";
 import { createLogger } from "./lib/logger.js";
-import { searchWeb, fetchPage, type SearchResult } from "./lib/search.js";
+import { searchWeb, searchGitHub, fetchPage, type SearchResult } from "./lib/search.js";
 import { s, renderTemplate, getCharacter } from "./character.js";
 
 const log = createLogger("curiosity");
@@ -98,6 +98,7 @@ export class CuriosityEngine {
   private config: AppConfig;
   private stopped = false;
   private xClient: XClient | null = null;
+  private rejectedQueries: Set<string> = new Set(); // queries rejected as duplicates this cycle
 
   constructor(config: AppConfig) {
     this.config = config;
@@ -173,15 +174,16 @@ export class CuriosityEngine {
     const timeSinceLastHr = Math.round((Date.now() - state.lastExploredAt) / 3600000 * 10) / 10;
 
     // Step 1: Decide what she's curious about — model also decides if now is a good time
-    const topic = await this.pickTopic(userTime, timeSinceLastHr, state.discoveries);
+    const topic = await this.pickTopic(userTime, timeSinceLastHr, state.discoveries, this.rejectedQueries);
     if (!topic) {
       return false;
     }
 
-    // Dedup check: skip lazy re-searches of the same topic
+    // Dedup: LLM checks if this is a boring repeat vs meaningful deeper exploration
     const dedupResult = await this.checkDuplicate(topic.query, state.discoveries);
     if (dedupResult === "duplicate") {
       console.log(`[curiosity] Skipping duplicate topic: "${topic.query}"`);
+      this.rejectedQueries.add(topic.query);
       return false;
     }
     if (dedupResult === "deepen") {
@@ -190,15 +192,27 @@ export class CuriosityEngine {
 
     console.log(`[curiosity] Exploring: "${topic.query}" (${topic.reason})`);
 
-    // Step 2: Shallow search — web + X in parallel (request rawContent from Tavily)
+    // Step 2: Shallow search — web + GitHub + X in parallel (request rawContent from Tavily)
     let searchResults: SearchResult[] = [];
+    let githubResults: SearchResult[] = [];
     let xTweets = "";
+
+    // Detect queries likely to benefit from GitHub search
+    const isCodeQuery = /github|repo|architecture|open.?source|framework|implementation|code|library|sdk|api|agent/i.test(topic.query);
 
     const searchPromises: Promise<void>[] = [
       searchWeb(topic.query, 5, { includeRawContent: true })
         .then((r) => { searchResults = r; })
         .catch((err) => { console.error("[curiosity] Web search failed:", err); }),
     ];
+
+    if (isCodeQuery) {
+      searchPromises.push(
+        searchGitHub(topic.query, 3)
+          .then((r) => { githubResults = r; })
+          .catch(() => { /* GitHub search optional */ }),
+      );
+    }
 
     if (this.xClient) {
       searchPromises.push(
@@ -215,6 +229,16 @@ export class CuriosityEngine {
     }
 
     await Promise.all(searchPromises);
+
+    // Merge GitHub results (prepend — typically more relevant for code queries)
+    if (githubResults.length > 0) {
+      const existingUrls = new Set(searchResults.map(r => r.url));
+      for (const gr of githubResults) {
+        if (!existingUrls.has(gr.url)) {
+          searchResults.unshift(gr);
+        }
+      }
+    }
 
     if (searchResults.length === 0 && !xTweets) {
       return false;
@@ -303,6 +327,7 @@ export class CuriosityEngine {
     // Step 10: Save
     state.discoveries.push(discovery);
     state.lastExploredAt = Date.now();
+    this.rejectedQueries.clear(); // successful exploration resets rejection list
 
     // Prune old discoveries
     const cutoff = Date.now() - DISCOVERY_MAX_AGE;
@@ -324,6 +349,7 @@ export class CuriosityEngine {
     userTime: Date,
     timeSinceLastHr: number,
     recentDiscoveries: Discovery[],
+    rejectedQueries?: Set<string>,
   ): Promise<{ query: string; reason: string } | null> {
     const memories = this.loadMemories();
     const interestMems = memories.filter(m =>
@@ -336,9 +362,19 @@ export class CuriosityEngine {
     const dayNames = s().time.day_names;
     const dayName = dayNames[userTime.getDay()];
     const hour = userTime.getHours();
-    const recentQueries = recentDiscoveries.slice(-5).map(d => d.query);
-    const avoidText = recentQueries.length > 0
-      ? `Recently searched (avoid repeating): ${recentQueries.join(", ")}`
+    // Include ALL recent discoveries (not just last 5) so LLM doesn't repeat older topics
+    const avoidEntries = recentDiscoveries.map(d => {
+      const ago = Math.round((Date.now() - d.timestamp) / 3600000);
+      return `- "${d.query}" (${ago}h ago, ${d.category})`;
+    });
+    // Also include recently rejected queries so LLM doesn't propose them again
+    if (rejectedQueries && rejectedQueries.size > 0) {
+      for (const q of rejectedQueries) {
+        avoidEntries.push(`- "${q}" (just rejected, duplicate)`);
+      }
+    }
+    const avoidText = avoidEntries.length > 0
+      ? `Recently searched (avoid repeating):\n${avoidEntries.join("\n")}`
       : "";
 
     // Fetch YouTube + podcast feeds as topic inspiration (fire-and-forget on failure)
