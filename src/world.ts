@@ -24,6 +24,8 @@ import { getCharacter, s, renderTemplate } from "./character.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
+export type ExecutionMode = "real" | "experiential" | "groundable";
+
 export interface TimeBlock {
   start: number;        // hour (e.g. 7)
   end: number;          // hour (e.g. 8)
@@ -33,6 +35,8 @@ export interface TimeBlock {
   category: string;     // sleep | morning | commute | work | meal | exercise | hobby | social | entertainment | pet | chores | rest
   details?: string;     // optional color: e.g. "pet sitting on pillow staring at me"
   withPeople?: string[];// who the character is with
+  executionMode?: ExecutionMode;
+  groundTo?: string;    // when mode=groundable, which real activity to dispatch (e.g. "deep_read")
 }
 
 interface WatchlistItem {
@@ -105,6 +109,63 @@ interface DailySchedule {
 
 const WEATHER_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 const MARKET_CACHE_TTL = 30 * 60 * 1000;  // 30 minutes
+
+// ── Block Classification ─────────────────────────────────────────────
+
+/**
+ * Classify a schedule block's execution mode:
+ * - real: has existing tools to execute (coding, reading, etc.)
+ * - experiential: pure body/routine activities (eating, commuting, sleeping, rest)
+ * - groundable: can't be executed directly, but can be grounded to a real activity
+ */
+export function classifyBlock(block: TimeBlock): {
+  mode: ExecutionMode;
+  groundTo?: string;
+} {
+  if (block.executionMode) return { mode: block.executionMode, groundTo: block.groundTo };
+
+  // Experiential: body/routine activities, no tool can execute these
+  const experientialCategories = ["sleep", "morning", "commute", "meal", "exercise", "chores", "pet", "rest"];
+  if (experientialCategories.includes(block.category)) return { mode: "experiential" };
+
+  // Verb-based routing: match activity text to the most appropriate tool
+  const groundingRules: Array<{ pattern: RegExp; groundTo?: string }> = [
+    // Media grounding — watch/listen before generic patterns
+    { pattern: /watch|Netflix|video|YouTube|movie|show|series|stream/i, groundTo: "watch" },
+    { pattern: /podcast|listen|audio/i, groundTo: "listen" },
+    // Reading / research
+    { pattern: /read|book|article|browse/i, groundTo: "deep_read" },
+    // Music / creative
+    { pattern: /music|practice|instrument|compose|play.*guitar|play.*piano|drums/i, groundTo: "compose" },
+    // Coding
+    { pattern: /code|coding|program|develop|build|implement|refactor/i, groundTo: "vibe_coding" },
+    // Learning
+    { pattern: /learn|study|research|course|understand|tutorial/i, groundTo: "learn" },
+    // Planning
+    { pattern: /plan|organize|summarize|review|outline/i, groundTo: "learn" },
+    // Analysis / work research
+    { pattern: /report|analysis|model|DCF|investigate|search/i, groundTo: "deep_read" },
+    // Meetings → experiential
+    { pattern: /meeting|standup|sync|call/i },
+  ];
+
+  for (const rule of groundingRules) {
+    if (rule.pattern.test(block.activity)) {
+      if (rule.groundTo) return { mode: "groundable", groundTo: rule.groundTo };
+      return { mode: "experiential" };
+    }
+  }
+
+  // Work fallback: default to deep_read (research)
+  if (block.category === "work") return { mode: "groundable", groundTo: "deep_read" };
+
+  // Hobby/social/entertainment: groundable to deep_read (search related content)
+  if (["hobby", "social", "entertainment"].includes(block.category)) {
+    return { mode: "groundable", groundTo: "deep_read" };
+  }
+
+  return { mode: "experiential" };
+}
 
 // ── WorldEngine class ────────────────────────────────────────────────
 

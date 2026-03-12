@@ -254,6 +254,10 @@ export class WatchdogEngine {
       checks.push(this.checkDiskUsage());
       checks.push(this.checkDailyBudgets());
       checks.push(this.checkLogGrowth());
+      checks.push(this.checkBrainstem());
+      checks.push(this.checkCortexHealth());
+      checks.push(this.checkGroundingDiversity());
+      checks.push(this.checkMomentsDailyReset());
 
       // Determine overall health
       const hasCritical = checks.some((c) => c.status === "critical");
@@ -566,6 +570,187 @@ export class WatchdogEngine {
       };
     } catch {
       return { name, status: "ok", message: "Could not check logs", timestamp: Date.now() };
+    }
+  }
+
+  /** Check brainstem health — liveness, entropy, CSI */
+  private checkBrainstem(): HealthCheck {
+    const name = "brainstem";
+
+    try {
+      const statePath = path.join(this.config.statePath, "brainstem", "state.json");
+      if (!fs.existsSync(statePath)) {
+        return { name, status: "ok", message: "Brainstem not yet initialized", timestamp: Date.now() };
+      }
+
+      const state = readJsonSafe<{
+        tickCount?: number;
+        csi?: number;
+        csiMode?: string;
+        graph?: { nodes?: Record<string, unknown>; edges?: unknown[] };
+      }>(statePath, {});
+
+      const nodeCount = state.graph?.nodes ? Object.keys(state.graph.nodes).length : 0;
+      const edgeCount = state.graph?.edges ? (state.graph.edges as unknown[]).length : 0;
+      const csi = state.csi ?? 1.0;
+      const mode = state.csiMode ?? "green";
+
+      // Check for sustained red mode
+      if (mode === "red" && csi < 0.35) {
+        return {
+          name,
+          status: "warn",
+          message: `CSI=${csi.toFixed(2)} mode=${mode} — brainstem in deep recovery. ${nodeCount} nodes, ${edgeCount} edges`,
+          timestamp: Date.now(),
+        };
+      }
+
+      return {
+        name,
+        status: "ok",
+        message: `CSI=${csi.toFixed(2)} mode=${mode}, ${nodeCount} nodes, ${edgeCount} edges, tick=${state.tickCount ?? 0}`,
+        timestamp: Date.now(),
+      };
+    } catch {
+      return { name, status: "ok", message: "Could not check brainstem", timestamp: Date.now() };
+    }
+  }
+
+  /** Check cortex c3/c4 parse health */
+  private checkCortexHealth(): HealthCheck {
+    const name = "cortex_health";
+
+    try {
+      const logPath = path.join(this.config.statePath, "brainstem", "cortex-log.jsonl");
+      if (!fs.existsSync(logPath)) {
+        return { name, status: "ok", message: "No cortex log yet", timestamp: Date.now() };
+      }
+
+      const lines = fs.readFileSync(logPath, "utf-8").split("\n").filter(l => l.trim());
+      const tail = lines.slice(-20);
+      const entries: Array<{ cortexId?: string; outputValid?: boolean; degradedTo?: string }> = [];
+      for (const line of tail) {
+        try { entries.push(JSON.parse(line)); } catch { /* skip */ }
+      }
+
+      if (entries.length === 0) {
+        return { name, status: "ok", message: "No entries to check", timestamp: Date.now() };
+      }
+
+      // Check for consecutive parse failures (excluding budget_exceeded)
+      const realEntries = entries.filter(e =>
+        (e.cortexId === "c3" || e.cortexId === "c4") && e.degradedTo !== "budget_exceeded",
+      );
+
+      const consecutiveFailures = realEntries.length > 0 &&
+        realEntries.every(e => e.outputValid === false);
+
+      if (consecutiveFailures && realEntries.length >= 10) {
+        return {
+          name,
+          status: "critical",
+          message: `${realEntries.length} consecutive cortex parse failures`,
+          timestamp: Date.now(),
+        };
+      }
+
+      if (consecutiveFailures && realEntries.length > 0) {
+        return {
+          name,
+          status: "warn",
+          message: `All ${realEntries.length} recent c3/c4 calls failed (excluding budget_exceeded)`,
+          timestamp: Date.now(),
+        };
+      }
+
+      const validCount = realEntries.filter(e => e.outputValid === true).length;
+      return {
+        name,
+        status: "ok",
+        message: `${validCount}/${realEntries.length} valid (last 20 entries)`,
+        timestamp: Date.now(),
+      };
+    } catch {
+      return { name, status: "ok", message: "Could not check cortex log", timestamp: Date.now() };
+    }
+  }
+
+  /** Check grounding memory diversity in brainstem thoughts */
+  private checkGroundingDiversity(): HealthCheck {
+    const name = "grounding_diversity";
+
+    try {
+      const statePath = path.join(this.config.statePath, "brainstem", "state.json");
+      if (!fs.existsSync(statePath)) {
+        return { name, status: "ok", message: "No brainstem state yet", timestamp: Date.now() };
+      }
+
+      const state = readJsonSafe<{
+        thoughtHistory?: Array<{ grounding?: Array<{ id?: string }> }>;
+      }>(statePath, {});
+
+      const history = (state.thoughtHistory ?? []).slice(-10);
+      if (history.length === 0) {
+        return { name, status: "ok", message: "No thought history", timestamp: Date.now() };
+      }
+
+      const memIds = new Set<string>();
+      for (const t of history) {
+        for (const g of t.grounding ?? []) {
+          if (g.id) memIds.add(g.id);
+        }
+      }
+
+      if (memIds.size <= 2) {
+        return {
+          name,
+          status: "warn",
+          message: `Grounding monopoly: ${history.length} thoughts reference only ${memIds.size} unique memories`,
+          timestamp: Date.now(),
+        };
+      }
+
+      return {
+        name,
+        status: "ok",
+        message: `${memIds.size} unique memories across ${history.length} thoughts`,
+        timestamp: Date.now(),
+      };
+    } catch {
+      return { name, status: "ok", message: "Could not check grounding", timestamp: Date.now() };
+    }
+  }
+
+  /** Check if moments daily counter has reset properly */
+  private checkMomentsDailyReset(): HealthCheck {
+    const name = "moments_daily_reset";
+
+    try {
+      const momentsPath = path.join(this.config.statePath, "moments-state.json");
+      if (!fs.existsSync(momentsPath)) {
+        return { name, status: "ok", message: "No moments state yet", timestamp: Date.now() };
+      }
+
+      const state = readJsonSafe<{ dailyDate?: string; dailyCount?: number }>(momentsPath, {});
+      const today = pstDateStr();
+
+      if (state.dailyDate !== today && (state.dailyCount ?? 0) > 0) {
+        return {
+          name,
+          status: "warn",
+          message: `dailyDate=${state.dailyDate} but today=${today}, count=${state.dailyCount} (not reset)`,
+          timestamp: Date.now(),
+        };
+      }
+
+      return {
+        name,
+        status: "ok",
+        message: `dailyDate=${state.dailyDate ?? "none"}, count=${state.dailyCount ?? 0}`,
+        timestamp: Date.now(),
+      };
+    } catch {
+      return { name, status: "ok", message: "Could not check moments", timestamp: Date.now() };
     }
   }
 

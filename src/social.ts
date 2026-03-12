@@ -24,6 +24,7 @@ import { readJsonSafe, writeJsonAtomic } from "./lib/atomic-file.js";
 import { pstDateStr, getUserTZ } from "./lib/pst-date.js";
 import { getStoreManager } from "./memory/store-manager.js";
 import { createLogger } from "./lib/logger.js";
+import { checkSocialGate } from "./lib/action-gate.js";
 
 const log = createLogger("social");
 
@@ -155,6 +156,13 @@ export class SocialEngine {
     });
 
     if (!postContent) {
+      return false;
+    }
+
+    // Action gate: rumination veto, content filter
+    const gate = checkSocialGate(postContent);
+    if (!gate.allowed) {
+      log.info(`Blocked by action gate: [${gate.ruleName}] ${gate.reason}`);
       return false;
     }
 

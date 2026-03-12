@@ -77,6 +77,8 @@ export interface Discovery {
   connections?: string[];
   /** Deeper insights from deep dive (multi-source synthesis) */
   deepInsights?: string;
+  /** Associated care topic ID (if this exploration was for user's expressed need) */
+  careTopicId?: string;
 }
 
 interface CuriosityState {
@@ -92,12 +94,18 @@ const randMs = (minMin: number, maxMin: number) =>
 const DISCOVERY_MAX_AGE = 3 * 24 * 60 * 60 * 1000; // 3 days
 const DEEP_READ_CHARS = 8000; // deep dives read 8K chars per page (vs 3K shallow)
 
+/** Entropy floor — below this, diversity enforcement kicks in. */
+const ACTIVATION_ENTROPY_FLOOR = 0.3;
+
 // ── CuriosityEngine ──────────────────────────────────────────────────
 
 export class CuriosityEngine {
   private config: AppConfig;
   private stopped = false;
   private xClient: XClient | null = null;
+  private activationHints: string[] = [];
+  private activationEntropy = 1; // default: evenly spread
+  private eigTargets: Array<{ query: string; reason: string }> = [];
   private rejectedQueries: Set<string> = new Set(); // queries rejected as duplicates this cycle
 
   constructor(config: AppConfig) {
@@ -107,6 +115,18 @@ export class CuriosityEngine {
   /** Give the curiosity engine access to X for real-time info. */
   setXClient(xClient: XClient): void {
     this.xClient = xClient;
+  }
+
+  /** Set activation hints from heartbeat (topics currently on the character's mind). */
+  setActivationHints(topics: string[], entropy: number): void {
+    this.activationHints = topics;
+    this.activationEntropy = entropy;
+  }
+
+  /** Accept EIG-directed exploration targets from brainstem curiosity engine. */
+  setEIGTargets(targets: Array<{ query: string; reason: string }>): void {
+    // Filter out previously rejected targets to prevent explore-duplicate loops
+    this.eigTargets = targets.filter(t => !this.rejectedQueries.has(t.query));
   }
 
   start(): void {
@@ -173,8 +193,14 @@ export class CuriosityEngine {
     const state = this.loadState();
     const timeSinceLastHr = Math.round((Date.now() - state.lastExploredAt) / 3600000 * 10) / 10;
 
-    // Step 1: Decide what she's curious about — model also decides if now is a good time
-    const topic = await this.pickTopic(userTime, timeSinceLastHr, state.discoveries, this.rejectedQueries);
+    // Step 1: Use brainstem EIG target if available, otherwise LLM decides
+    let topic: { query: string; reason: string; careTopicId?: string; careNeed?: string } | null = null;
+    if (this.eigTargets.length > 0) {
+      topic = this.eigTargets.shift()!;
+      log.info(`using EIG-directed target: "${topic.query}"`);
+    } else {
+      topic = await this.pickTopic(userTime, timeSinceLastHr, state.discoveries, this.rejectedQueries);
+    }
     if (!topic) {
       return false;
     }
@@ -294,6 +320,11 @@ export class CuriosityEngine {
     let discovery = await this.synthesize(topic, searchResults, pages, xTweets);
     if (!discovery) return false;
 
+    // Attach care topic ID if this was a care-directed exploration
+    if (topic.careTopicId && topic.careNeed && discovery) {
+      discovery.careTopicId = topic.careTopicId;
+    }
+
     console.log(`[curiosity] Shallow discovery: ${discovery.summary.slice(0, 60)}...`);
 
     // Step 5: Triage — should she go deeper?
@@ -350,7 +381,60 @@ export class CuriosityEngine {
     timeSinceLastHr: number,
     recentDiscoveries: Discovery[],
     rejectedQueries?: Set<string>,
-  ): Promise<{ query: string; reason: string } | null> {
+  ): Promise<{ query: string; reason: string; careTopicId?: string; careNeed?: string } | null> {
+    // Care-directed exploration: 25% chance to search for user's expressed needs
+    if (Math.random() < 0.25) {
+      try {
+        const { getPendingCareTopics } = await import("./care-topics.js");
+        const careTopics = getPendingCareTopics();
+        if (careTopics.length > 0) {
+          const topic = careTopics[0];
+          const query = topic.searchQueries[
+            Math.floor(Math.random() * topic.searchQueries.length)
+          ];
+          return { query, reason: `searching for user's need: ${topic.need}`, careTopicId: topic.id, careNeed: topic.need };
+        }
+      } catch { /* care-topics module may not exist — non-fatal */ }
+    }
+
+    // Commitment-directed exploration: 15% base chance, 80% if deadline approaching
+    try {
+      const commitments = getStoreManager().loadCategory("commitment");
+      const open = commitments.filter(m =>
+        m.value.includes("status: open") && !m.value.includes("status: done"),
+      );
+      if (open.length > 0) {
+        // Sort by deadline urgency: overdue first, then soonest deadline, then oldest
+        const now = Date.now();
+        const withUrgency = open.map(m => {
+          const dlMatch = m.value.match(/deadline:\s*(\d+)/);
+          const deadline = dlMatch ? Number(dlMatch[1]) : Infinity;
+          const remaining = deadline - now;
+          return { mem: m, deadline, remaining };
+        }).sort((a, b) => a.remaining - b.remaining);
+
+        const top = withUrgency[0];
+        const hasUrgent = top.remaining < 4 * 60 * 60 * 1000; // <4h = urgent
+        const chance = hasUrgent ? 0.80 : 0.15;
+
+        if (Math.random() < chance) {
+          const match = top.mem.value.match(/commitment:\s*(.+?)(?:\s*\||$)/);
+          const what = match?.[1] ?? top.mem.value.slice(0, 60);
+          return { query: what, reason: `fulfilling commitment: ${what}${hasUrgent ? " (deadline approaching!)" : ""}` };
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    // Preference-directed exploration: 10% chance to explore user's preferred topics
+    try {
+      const { getTopicPreferences } = await import("./interaction-learning.js");
+      const { preferred } = getTopicPreferences();
+      if (preferred.length > 0 && Math.random() < 0.10) {
+        const topic = preferred[Math.floor(Math.random() * Math.min(preferred.length, 3))];
+        return { query: topic, reason: `user is interested in this topic: ${topic}` };
+      }
+    } catch { /* non-fatal */ }
+
     const memories = this.loadMemories();
     const interestMems = memories.filter(m =>
       m.key.startsWith("interests.") || m.key.startsWith("curiosity."),
@@ -392,6 +476,28 @@ export class CuriosityEngine {
       }
     } catch (err) { log.warn("failed to fetch media feeds for topic inspiration", err); }
 
+    // Build activation hints section
+    let activationSection = "";
+    if (this.activationHints.length > 0) {
+      activationSection = `\nTopics currently on her mind: ${this.activationHints.join(", ")}`;
+    }
+
+    // User's content preferences — bias toward topics they engage with
+    let topicPrefSection = "";
+    try {
+      const { getTopicPreferences } = await import("./interaction-learning.js");
+      const { preferred, avoided } = getTopicPreferences();
+      const parts: string[] = [];
+      if (preferred.length > 0) parts.push(`Topics the user is interested in (they would enjoy related findings): ${preferred.slice(0, 5).join(", ")}`);
+      if (avoided.length > 0) parts.push(`Topics the user is less interested in (don't go out of the way to search these): ${avoided.slice(0, 3).join(", ")}`);
+      if (parts.length > 0) topicPrefSection = `\n${parts.join("\n")}`;
+    } catch { /* non-fatal */ }
+
+    // Diversity enforcement when activation entropy is low
+    const diversityInstruction = this.activationEntropy < ACTIVATION_ENTROPY_FLOOR
+      ? "\n\nWARNING: Attention is too concentrated. This time, explore a completely different direction — don't search for anything related to recent topics."
+      : "";
+
     try {
       const char = getCharacter();
       const customCuriosityQuery = char.persona.curiosity_query;
@@ -403,7 +509,7 @@ Based on her interests, recent events, and current state, decide: does she feel 
 If yes, come up with a specific topic she would genuinely be curious about and search for.
 Inspiration can come from the latest content on YouTube channels and podcasts she follows.
 
-${avoidText}
+${avoidText}${diversityInstruction}
 
 Output strictly in this JSON format:
 {"query": "what she would search for", "reason": "why she is curious about this now"}
@@ -413,7 +519,7 @@ If she's not in the mood to explore right now (e.g., late at night, just searche
       const text = await claudeText({
         system: curiositySystem,
         prompt: `It's ${dayName} ${hour}:00, ${timeSinceLastHr} hours since last exploration.
-Her recent interests and memories:\n${memText || "(no records yet)"}${mediaInspo}\n\nIs her curiosity driving her to search for something?`,
+Her recent interests and memories:\n${memText || "(no records yet)"}${mediaInspo}${activationSection}${topicPrefSection}\n\nIs her curiosity driving her to search for something?`,
         model: "smart",
         timeoutMs: 90_000,
       });

@@ -81,6 +81,64 @@ import { startActivity, isInFlowState, shouldSuggestBreak, getDecisionFatigue } 
 
 const log = createLogger("heartbeat");
 
+// ── Structured Reflection Types ──────────────────────────────────────
+
+export interface ReflectionRecord {
+  type: "hypothesis_updated" | "preference_inferred" | "pattern_observed" | "anomaly_detected";
+  topic: string;
+  content: string;
+  confidence: number;
+  evidence: string;
+}
+
+// ── Growth Markers ──────────────────────────────────────────────────
+
+export interface GrowthMarker {
+  type: "recurring_theme" | "new_habit" | "milestone";
+  description: string;
+  evidence: string[];
+  detectedAt: number;
+}
+
+export interface GrowthMarkerState {
+  markers: GrowthMarker[];
+}
+
+// ── Activation Tracking ─────────────────────────────────────────────
+
+interface Activation {
+  weight: number;          // 0-1
+  decayRate: number;       // fraction lost per pulse (~0.15)
+  lastBoosted: number;
+  source: string;          // "curiosity" | "conversation" | "emotion" | "goal"
+  consecutiveBoosts: number;
+}
+
+/** Max consecutive boosts before forced cooldown (~1 day of continuous boosting). */
+const ACTIVATION_MAX_CONSECUTIVE = 8;
+/** Max activation entries to track. */
+const ACTIVATION_MAX_ENTRIES = 20;
+/** Entropy floor — below this, diversity enforcement kicks in. */
+const ACTIVATION_ENTROPY_FLOOR = 0.3;
+
+// Module-level activation reference (set during Heartbeat construction)
+let heartbeatInstance: Heartbeat | null = null;
+
+/** Boost a topic's activation from any module (curiosity, agent loop, etc). */
+export function boostGlobalActivation(topic: string, boost: number, source: string): void {
+  heartbeatInstance?.boostActivation(topic, boost, source);
+}
+
+/** Get current activation entropy (0 = concentrated, 1 = evenly spread). */
+export function getGlobalActivationEntropy(): number {
+  return heartbeatInstance?.getActivationEntropy() ?? 1;
+}
+
+/** Get top N activations for context injection. */
+export function getTopActivations(n = 3): Array<{ topic: string; weight: number }> {
+  return heartbeatInstance?.getTopActivations(n) ?? [];
+}
+
 // ── Constants ────────────────────────────────────────────────────────
 
 
@@ -101,6 +159,7 @@ const COOLDOWNS: Record<string, number> = {
   post: 120,        // Don't post again for at least 2 hours
   activity: 40,     // Don't do another activity for 40 min
   reflect: 480,     // Reflect at most ~2x/day (8 hours)
+  research: 60,     // Research every ~1 hour during night
 };
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -111,6 +170,7 @@ export type HeartbeatAction =
   | "post"         // Social: post on X
   | "activity"     // Activities: vibe coding, deep read, learn
   | "reflect"      // Introspection: synthesize recent memories & emotions into insights
+  | "research"     // Autonomous research: observe, experiment, improve
   | "rest";        // Do nothing — just log the heartbeat
 
 interface VitalSigns {
@@ -186,10 +246,14 @@ export class Heartbeat {
     post: 0,
     activity: 0,
     reflect: 0,
+    research: 0,
   };
 
   // Log directory
   private logDir: string;
+
+  // Activation tracking — what topics are currently on the character's mind
+  private activations: Map<string, Activation> = new Map();
 
   // Narration throttle: tracks last narrated block to avoid repeating
   private lastNarratedAt = 0;
@@ -221,6 +285,70 @@ export class Heartbeat {
 
     // Load persisted state
     this.loadActionTimes();
+
+    // Set module-level reference for global activation functions
+    heartbeatInstance = this;
+  }
+
+  // ── Activation Tracking Methods ───────────────────────────────────
+
+  /** Boost a topic's activation weight. Called from curiosity, agent loop, etc. */
+  boostActivation(topic: string, boost: number, source: string): void {
+    const existing = this.activations.get(topic);
+    if (existing) {
+      existing.weight = Math.min(1, existing.weight + boost);
+      existing.lastBoosted = Date.now();
+      existing.source = source;
+      existing.consecutiveBoosts++;
+      // Force cooldown if boosted too many times consecutively
+      if (existing.consecutiveBoosts >= ACTIVATION_MAX_CONSECUTIVE) {
+        existing.weight *= 0.3;
+        existing.consecutiveBoosts = 0;
+      }
+    } else {
+      this.activations.set(topic, {
+        weight: Math.min(1, boost),
+        decayRate: 0.15,
+        lastBoosted: Date.now(),
+        source,
+        consecutiveBoosts: 1,
+      });
+    }
+    // Prune to max entries
+    if (this.activations.size > ACTIVATION_MAX_ENTRIES) {
+      const sorted = [...this.activations.entries()].sort((a, b) => a[1].weight - b[1].weight);
+      for (let i = 0; i < sorted.length - ACTIVATION_MAX_ENTRIES; i++) {
+        this.activations.delete(sorted[i][0]);
+      }
+    }
+  }
+
+  /** Get Shannon entropy of activation weights (0 = concentrated, 1 = evenly spread). */
+  getActivationEntropy(): number {
+    if (this.activations.size <= 1) return 1;
+    const weights = [...this.activations.values()].map(a => a.weight);
+    const sum = weights.reduce((s, w) => s + w, 0);
+    if (sum === 0) return 1;
+    const probs = weights.map(w => w / sum);
+    const entropy = -probs.reduce((e, p) => e + (p > 0 ? p * Math.log2(p) : 0), 0);
+    const maxEntropy = Math.log2(this.activations.size);
+    return maxEntropy > 0 ? entropy / maxEntropy : 1;
+  }
+
+  /** Get top N activations sorted by weight. */
+  getTopActivations(n = 3): Array<{ topic: string; weight: number }> {
+    return [...this.activations.entries()]
+      .sort((a, b) => b[1].weight - a[1].weight)
+      .slice(0, n)
+      .map(([topic, a]) => ({ topic, weight: a.weight }));
+  }
+
+  /** Decay all activations (called each pulse). */
+  private decayActivations(): void {
+    for (const [topic, a] of this.activations) {
+      a.weight *= (1 - a.decayRate);
+      if (a.weight < 0.05) this.activations.delete(topic);
+    }
   }
 
   /** Connect watchdog for health checks + budget enforcement */
@@ -319,6 +447,9 @@ export class Heartbeat {
       await checkNotifications().catch(err =>
         console.error("[heartbeat] Notification check error:", err),
       );
+
+      // 0.9. Decay activations each pulse
+      this.decayActivations();
 
       // 1. Gather vital signs
       const vitals = await this.gatherVitals();
@@ -804,6 +935,7 @@ export class Heartbeat {
           post: "post (X/Twitter)",
           activity: "activity (project/read/learn)",
           reflect: "reflect (review & synthesize)",
+          research: "research (autonomous research & improvement)",
           rest: "rest (skip this cycle)",
         };
         return desc[a] ?? a;
@@ -986,6 +1118,11 @@ Pick the best action:`,
         case "reflect":
           success = await this.doReflection();
           break;
+        case "research": {
+          if (!this.research) { success = false; break; }
+          success = await this.research.tick();
+          break;
+        }
         default:
           // Dispatch to SimModule heartbeat actions
           success = await moduleRegistry.executeHeartbeatAction(decision.action);
