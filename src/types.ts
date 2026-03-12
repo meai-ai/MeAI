@@ -63,11 +63,27 @@ export interface AppConfig {
 
 // ── Memory (Tier 1) ────────────────────────────────────────────────
 
+export type ProvenanceType = "observed" | "inferred" | "narrative";
+
 export interface Memory {
   key: string;
   value: string;
   timestamp: number;
   confidence: number;
+  /** Provenance: how this fact was established */
+  sourceType?: ProvenanceType;
+  // Reconsolidation lifecycle (optional, backward-compatible)
+  lastAccessedAt?: number;
+  accessCount?: number;
+  lastReconsolidatedAt?: number;
+  reconsolidationCount?: number;
+  revisionHistory?: Array<{
+    timestamp: number;
+    reason: string;
+    oldValue: string;
+    newValue: string;
+    trigger: 'context_refresh' | 'factual_update' | 'perspective_evolution';
+  }>;
 }
 
 export interface MemoryStore {
