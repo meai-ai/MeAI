@@ -30,7 +30,7 @@ export function runStyleLearningTests(): TestSuite {
     // 1. extracts_empathy_features
     {
       const features = extractResponseStyleFeatures(
-        "我理解你的感受，这确实不容易。你最近是不是压力比较大？",
+        "I understand how you feel, that's really not easy. Have you been under a lot of pressure lately?",
       );
       tests.push(assert(
         "extracts_empathy_features",
@@ -42,7 +42,7 @@ export function runStyleLearningTests(): TestSuite {
     // 2. extracts_callback_features
     {
       const features = extractResponseStyleFeatures(
-        "上次你说想换工作的事，后来怎么样了？",
+        "Last time you said you wanted to switch jobs, how did that go?",
       );
       tests.push(assert(
         "extracts_callback_features",
@@ -68,8 +68,8 @@ export function runStyleLearningTests(): TestSuite {
     {
       // We test computeUserReaction returns correct structure
       const reaction = computeUserReaction(
-        Date.now() - 60000, "你最近在忙什么？",
-        Date.now(), "在做一个新项目，很有意思",
+        Date.now() - 60000, "What have you been up to lately?",
+        Date.now(), "Working on a new project, it's really interesting",
       );
       tests.push(assert(
         "pattern_lift_computed",
@@ -83,9 +83,9 @@ export function runStyleLearningTests(): TestSuite {
 
     // 5. opening_type_classification
     {
-      const questionOpening = extractResponseStyleFeatures("你怎么想？这件事我很好奇");
-      const empathyOpening = extractResponseStyleFeatures("感觉你最近不太开心诶");
-      const banterOpening = extractResponseStyleFeatures("哈哈 你这也太搞了吧");
+      const questionOpening = extractResponseStyleFeatures("What do you think? I'm really curious about this");
+      const empathyOpening = extractResponseStyleFeatures("I feel like you haven't been happy lately");
+      const banterOpening = extractResponseStyleFeatures("Haha that's way too funny");
 
       tests.push(assert(
         "opening_type_classification",
@@ -101,20 +101,20 @@ export function runStyleLearningTests(): TestSuite {
       const now = Date.now();
       // Cross-sleep: >6h delay
       const crossSleep = isPairingValid(
-        now - 7 * 60 * 60 * 1000, "你最近怎么样",
-        now, "还好啊",
+        now - 7 * 60 * 60 * 1000, "How have you been lately",
+        now, "Pretty good",
         false,
       );
       // Intervening assistant
       const intervening = isPairingValid(
-        now - 60000, "你最近怎么样",
-        now, "还好啊",
+        now - 60000, "How have you been lately",
+        now, "Pretty good",
         true,
       );
       // No topic overlap (long reply)
       const noOverlap = isPairingValid(
-        now - 60000, "今天天气真好",
-        now, "我刚刚做了一道新菜，红烧排骨",
+        now - 60000, "The weather is really nice today",
+        now, "I just cooked a new dish, braised pork ribs",
         false,
       );
       tests.push(assert(
@@ -127,22 +127,22 @@ export function runStyleLearningTests(): TestSuite {
     // 7. short_reaction_not_dropped_if_fast_and_reactive
     {
       const now = Date.now();
-      // Strong reactive: "哈哈" with fast reply
+      // Strong reactive: "haha" with fast reply
       const strongReactive = isPairingValid(
-        now - 30000, "我今天犯了一个超蠢的错误",
-        now, "哈哈",
+        now - 30000, "I made such a dumb mistake today",
+        now, "haha",
         false,
       );
-      // Weak reactive + fast: "嗯" with fast reply
+      // Weak reactive + fast: "ok" with fast reply
       const weakFast = isPairingValid(
-        now - 60000, "我觉得这个方案可以",
-        now, "嗯",
+        now - 60000, "I think this plan works",
+        now, "ok",
         false,
       );
-      // Weak reactive + slow: "好" with slow reply → should skip
+      // Weak reactive + slow: "sure" with slow reply -> should skip
       const weakSlow = isPairingValid(
-        now - 20 * 60 * 1000, "我帮你查一下",
-        now, "好",
+        now - 20 * 60 * 1000, "Let me look that up for you",
+        now, "sure",
         false,
       );
       tests.push(assert(
@@ -154,8 +154,8 @@ export function runStyleLearningTests(): TestSuite {
 
     // 8. content_word_overlap_ignores_stop_words
     {
-      const words1 = extractContentWords("的了是在我你他她");
-      const words2 = extractContentWords("今天天气很好");
+      const words1 = extractContentWords("the is at to in on it and");
+      const words2 = extractContentWords("today weather beautiful sunny");
       tests.push(assert(
         "content_word_overlap_ignores_stop_words",
         words1.size === 0 && words2.size > 0,

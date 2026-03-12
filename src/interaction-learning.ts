@@ -48,7 +48,7 @@ interface TopicPreference {
 }
 
 interface BehavioralPattern {
-  pattern: string;        // e.g. "周末下午 reply_rate 0.8"
+  pattern: string;        // e.g. "weekend afternoon reply_rate 0.8"
   metric: string;         // "reply_rate" | "depth" | "speed"
   value: number;          // 0-1 normalized
   sampleCount: number;
@@ -86,11 +86,11 @@ interface ResponseQualityEntry {
 export interface ResponseStyleFeatures {
   responseLength: number;
   hasQuestion: boolean;
-  hasCallback: boolean;         // referenced past conversation ("上次/之前/记得你")
-  hasEmpathy: boolean;          // empathy markers ("感受/辛苦/不容易/理解")
-  hasOpinion: boolean;          // opinion markers ("我觉得/不太同意")
-  hasHumor: boolean;            // humor/banter markers ("哈哈/笑死/你这")
-  hasVulnerability: boolean;    // self-disclosure ("说实话/其实我")
+  hasCallback: boolean;         // referenced past conversation
+  hasEmpathy: boolean;          // empathy markers
+  hasOpinion: boolean;          // opinion markers
+  hasHumor: boolean;            // humor/banter markers
+  hasVulnerability: boolean;    // self-disclosure markers
   openingType: "question" | "empathy" | "banter" | "info" | "reaction" | "other";
   conversationMode?: string;
   topics: string[];
@@ -119,7 +119,7 @@ export interface RelationalPattern {
   avgQualityWithout: number;
   lift: number;                 // avgQuality - avgQualityWithout
   sampleCount: number;
-  label: string;                // "聊情感话题时用共情开头（对用户有效）"
+  label: string;                // e.g. "use empathy opening in emotional topics (effective for user)"
 }
 
 interface InteractionLearningState {
@@ -146,7 +146,7 @@ interface InteractionLearningState {
   }>;
 }
 
-type HourBucket = "早上" | "下午" | "晚上" | "深夜";
+type HourBucket = "morning" | "afternoon" | "evening" | "late_night";
 type DayType = "workday" | "weekend";
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -171,10 +171,10 @@ function getHourBucket(date?: Date): HourBucket {
   const d = date ?? new Date();
   const pst = new Date(d.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
   const hour = pst.getHours();
-  if (hour >= 6 && hour < 12) return "早上";
-  if (hour >= 12 && hour < 18) return "下午";
-  if (hour >= 18 && hour < 24) return "晚上";
-  return "深夜";
+  if (hour >= 6 && hour < 12) return "morning";
+  if (hour >= 12 && hour < 18) return "afternoon";
+  if (hour >= 18 && hour < 24) return "evening";
+  return "late_night";
 }
 
 function getDayType(date?: Date): DayType {
@@ -454,7 +454,7 @@ export function computePatterns(): void {
 
   for (const [key, groupSignals] of groups) {
     const [dayType, hourBucket] = key.split("_");
-    const label = `${dayType === "weekend" ? "周末" : "工作日"}${hourBucket}`;
+    const label = `${dayType === "weekend" ? "weekend" : "workday"} ${hourBucket}`;
 
     const sent = groupSignals.filter(s => s.type === "proactive_sent").length;
     const replied = groupSignals.filter(s => s.type === "proactive_replied").length;
@@ -640,13 +640,6 @@ export function getTopicPreferences(): {
  */
 export function extractTopicsFromText(text: string): string[] {
   const topics: string[] = [];
-  // Chinese: extract segments of 2-6 chars between punctuation/whitespace
-  const zhMatches = text.match(/[\u4e00-\u9fff]{2,8}/g) ?? [];
-  // Filter out very common words
-  const stopwords = new Set(["的时候", "没什么", "怎么样", "可以吗", "知道吗", "觉得呢", "是不是", "有没有", "好不好", "什么时候"]);
-  for (const m of zhMatches) {
-    if (!stopwords.has(m) && m.length >= 2) topics.push(m);
-  }
   // English: extract capitalized words or multi-word terms
   const enMatches = text.match(/[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*/g) ?? [];
   for (const m of enMatches) {
@@ -667,10 +660,10 @@ export function formatTopicPreferences(): string {
 
   const parts: string[] = [];
   if (preferred.length > 0) {
-    parts.push(`用户感兴趣的话题: ${preferred.slice(0, 5).join("、")}`);
+    parts.push(`Topics user is interested in: ${preferred.slice(0, 5).join(", ")}`);
   }
   if (avoided.length > 0) {
-    parts.push(`用户不太回应的话题: ${avoided.slice(0, 3).join("、")}`);
+    parts.push(`Topics user rarely responds to: ${avoided.slice(0, 3).join(", ")}`);
   }
   return parts.join(" | ");
 }
@@ -725,12 +718,12 @@ export function formatLearningContext(): string {
   if (advice.bestTimes.length === 0 && advice.avoidTimes.length === 0) return "";
 
   const parts: string[] = [];
-  parts.push(`整体回复率: ${Math.round(advice.replyRate * 100)}%`);
+  parts.push(`Overall reply rate: ${Math.round(advice.replyRate * 100)}%`);
   if (advice.bestTimes.length > 0) {
-    parts.push(`回复率最高: ${advice.bestTimes.join("、")}`);
+    parts.push(`Highest reply rate: ${advice.bestTimes.join(", ")}`);
   }
   if (advice.avoidTimes.length > 0) {
-    parts.push(`回复率最低: ${advice.avoidTimes.join("、")}`);
+    parts.push(`Lowest reply rate: ${advice.avoidTimes.join(", ")}`);
   }
 
   // Add depth/speed insights
@@ -739,7 +732,7 @@ export function formatLearningContext(): string {
     .filter(p => p.metric === "depth" && p.value >= 0.6 && p.sampleCount >= 3);
   if (depthPatterns.length > 0) {
     const labels = depthPatterns.map(p => p.pattern.split(" ")[0]);
-    parts.push(`深度对话更多: ${labels.join("、")}`);
+    parts.push(`More deep conversations: ${labels.join(", ")}`);
   }
 
   // Add topic preferences
@@ -799,7 +792,7 @@ export function generateWeeklyReport(): string {
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const weekSignals = signals.filter(s => s.timestamp >= weekAgo);
 
-  if (weekSignals.length < 3) return "本周数据不足，暂无报告。";
+  if (weekSignals.length < 3) return "Not enough data this week for a report.";
 
   const sent = weekSignals.filter(s => s.type === "proactive_sent").length;
   const replied = weekSignals.filter(s => s.type === "proactive_replied").length;
@@ -813,13 +806,13 @@ export function generateWeeklyReport(): string {
   const advice = getTimingAdvice();
 
   const report = [
-    `本周互动学习报告`,
-    `主动消息: ${sent} 条`,
-    `回复率: ${Math.round(replyRate * 100)}%（${replied} 回复 / ${ignored} 忽略）`,
-    `深度回复比例: ${Math.round(depthRate * 100)}%`,
-    `快速回复: ${quickReplies} 次`,
-    advice.bestTimes.length > 0 ? `最佳时段: ${advice.bestTimes.join("、")}` : "",
-    advice.avoidTimes.length > 0 ? `避开时段: ${advice.avoidTimes.join("、")}` : "",
+    `Weekly Interaction Learning Report`,
+    `Proactive messages: ${sent}`,
+    `Reply rate: ${Math.round(replyRate * 100)}% (${replied} replied / ${ignored} ignored)`,
+    `Deep reply ratio: ${Math.round(depthRate * 100)}%`,
+    `Quick replies: ${quickReplies}`,
+    advice.bestTimes.length > 0 ? `Best times: ${advice.bestTimes.join(", ")}` : "",
+    advice.avoidTimes.length > 0 ? `Avoid times: ${advice.avoidTimes.join(", ")}` : "",
   ].filter(Boolean).join("\n");
 
   // Save weekly report
@@ -828,8 +821,8 @@ export function generateWeeklyReport(): string {
     summary: report,
     replyRate,
     avgResponseDepth: depthRate,
-    bestTiming: advice.bestTimes[0] ?? "暂无",
-    worstTiming: advice.avoidTimes[0] ?? "暂无",
+    bestTiming: advice.bestTimes[0] ?? "none",
+    worstTiming: advice.avoidTimes[0] ?? "none",
   };
   saveState(state);
 
@@ -841,41 +834,26 @@ export function generateWeeklyReport(): string {
 const MAX_STYLE_PAIRS = 200;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// Chinese stop words — common particles/pronouns
-const CHINESE_STOP_WORDS = new Set([
-  "的", "了", "是", "在", "我", "你", "他", "她", "们", "吗", "呢", "吧", "啊",
-  "哦", "嗯", "也", "都", "就", "会", "和", "与", "不", "很", "有", "到", "这",
-  "那", "说", "要", "把", "被", "让", "给", "从", "一", "个", "上", "下", "中",
-  "来", "去", "做", "着", "过", "还", "而", "但", "可", "才", "又", "等",
+// English stop words — common function words
+const EN_CONTENT_STOP_WORDS = new Set([
+  "the", "is", "at", "to", "in", "on", "it", "and", "or", "of", "a", "an",
+  "for", "by", "be", "am", "are", "was", "were", "been", "being", "have",
+  "has", "had", "do", "does", "did", "will", "would", "could", "should",
+  "may", "might", "can", "this", "that", "with", "from", "but", "not",
 ]);
 
 /**
  * Extract content words from text for topic overlap.
- * Chinese: character bigrams with stop-word removal.
  * English: whitespace-tokenized, lowercased, stop-word removed.
  */
 export function extractContentWords(text: string): Set<string> {
   const words = new Set<string>();
 
-  // Chinese character bigrams (skip stop words)
-  const chineseChars = text.match(/[\u4e00-\u9fff]/g) ?? [];
-  for (let i = 0; i < chineseChars.length - 1; i++) {
-    const bigram = chineseChars[i] + chineseChars[i + 1];
-    // Skip if both chars are stop words
-    if (CHINESE_STOP_WORDS.has(chineseChars[i]) && CHINESE_STOP_WORDS.has(chineseChars[i + 1])) continue;
-    words.add(bigram);
-  }
-  // Also add individual non-stop Chinese chars
-  for (const c of chineseChars) {
-    if (!CHINESE_STOP_WORDS.has(c)) words.add(c);
-  }
-
   // English words
   const englishWords = text.match(/[a-zA-Z]{2,}/g) ?? [];
-  const enStopWords = new Set(["the", "is", "at", "to", "in", "on", "it", "and", "or", "of", "a", "an", "for", "by"]);
   for (const w of englishWords) {
     const lower = w.toLowerCase();
-    if (!enStopWords.has(lower)) words.add(lower);
+    if (!EN_CONTENT_STOP_WORDS.has(lower)) words.add(lower);
   }
 
   return words;
@@ -909,21 +887,21 @@ export function extractResponseStyleFeatures(
 ): ResponseStyleFeatures {
   const firstChunk = response.slice(0, 200);
 
-  const hasQuestion = /[？?]/.test(firstChunk.slice(0, 80));
-  const hasEmpathy = /感受|感觉|辛苦|不容易|理解|心疼|不好受/.test(firstChunk);
-  const hasCallback = /上次|之前|记得你|你说过|你提到/.test(firstChunk);
-  const hasOpinion = /我觉得|我倒|不太同意|我的看法|我认为/.test(firstChunk);
-  const hasHumor = /哈哈|笑死|你这|笑了|搞笑|逗/.test(firstChunk);
-  const hasVulnerability = /说实话|其实我|讲真|坦白说|不瞒你/.test(firstChunk);
+  const hasQuestion = /[?]/.test(firstChunk.slice(0, 80));
+  const hasEmpathy = /feel|feeling|understand|tough|not easy|heartache/i.test(firstChunk);
+  const hasCallback = /last time|before|remember you|you said|you mentioned/i.test(firstChunk);
+  const hasOpinion = /I think|I'd say|disagree|my view|I believe/i.test(firstChunk);
+  const hasHumor = /haha|lol|lmao|funny|hilarious/i.test(firstChunk);
+  const hasVulnerability = /honestly|to be honest|actually I|truth is|I admit/i.test(firstChunk);
 
   // Classify opening type
   let openingType: ResponseStyleFeatures["openingType"] = "other";
   const opening = response.slice(0, 30);
-  if (/^[^。！？]{0,10}[？?]/.test(opening)) openingType = "question";
-  else if (/^(嗯|感觉|辛苦|不容易|理解|心疼)/.test(opening)) openingType = "empathy";
-  else if (/^(哈哈|笑|你这|诶|哎呀)/.test(opening)) openingType = "banter";
-  else if (/^(对了|说到|关于|其实)/.test(opening)) openingType = "info";
-  else if (/^(哦|天|真的|居然|不是吧)/.test(opening)) openingType = "reaction";
+  if (/^[^.!?]{0,10}[?]/.test(opening)) openingType = "question";
+  else if (/^(I feel|I understand|that's tough|not easy)/i.test(opening)) openingType = "empathy";
+  else if (/^(haha|lol|oh man|that's funny)/i.test(opening)) openingType = "banter";
+  else if (/^(by the way|speaking of|about|actually)/i.test(opening)) openingType = "info";
+  else if (/^(oh|wow|really|no way|wait)/i.test(opening)) openingType = "reaction";
 
   return {
     responseLength: response.length,
@@ -964,8 +942,8 @@ export function isPairingValid(
   const isShortReply = userContent.length < 15;
   if (isShortReply) {
     const trimmed = userContent.trim();
-    const STRONG_REACTIVE = /^(哈哈|笑死|真的|对啊|确实|是啊|可以|居然)/.test(trimmed);
-    const WEAK_REACTIVE = /^(嗯|行|好的|好|ok)$/i.test(trimmed);
+    const STRONG_REACTIVE = /^(haha|lol|really|exactly|right|totally|wow|no way)/i.test(trimmed);
+    const WEAK_REACTIVE = /^(ok|sure|yeah|yep|cool|fine)$/i.test(trimmed);
     // Use adaptive speedP25 from user's actual reply speed distribution
     const fastReplyThreshold = getAdaptiveThresholds().speedP25;
     const hasFastReply = delay < fastReplyThreshold;
@@ -995,7 +973,7 @@ export function computeUserReaction(
     replyDelayMs: userTimestamp - assistantTimestamp,
     replyLengthChars: userContent.length,
     topicContinued: hasTopicOverlap(assistantContent, userContent),
-    followUpQuestion: /[？?]/.test(userContent),
+    followUpQuestion: /[?]/.test(userContent),
   };
 }
 
@@ -1115,12 +1093,12 @@ export function recordStyleReactionPair(
 
 // Feature labels for pattern computation
 const BINARY_FEATURES: Array<{ key: keyof ResponseStyleFeatures; label: string }> = [
-  { key: "hasQuestion", label: "提问" },
-  { key: "hasCallback", label: "回忆" },
-  { key: "hasEmpathy", label: "共情" },
-  { key: "hasOpinion", label: "表态" },
-  { key: "hasHumor", label: "幽默" },
-  { key: "hasVulnerability", label: "自我暴露" },
+  { key: "hasQuestion", label: "questions" },
+  { key: "hasCallback", label: "callbacks" },
+  { key: "hasEmpathy", label: "empathy" },
+  { key: "hasOpinion", label: "opinions" },
+  { key: "hasHumor", label: "humor" },
+  { key: "hasVulnerability", label: "self-disclosure" },
 ];
 
 /**
@@ -1154,7 +1132,7 @@ export function computeRelationalPatterns(): void {
     const n = withFeature.length;
     const liftThreshold = Math.max(0.05, 0.5 / Math.sqrt(n));
     if (Math.abs(lift) > liftThreshold && n >= 5) {
-      const direction = lift > 0 ? "用" : "少用";
+      const direction = lift > 0 ? "use " : "less ";
 
       // Check if the effect is mode-conditional (e.g. empathy only helps in emotional mode)
       let condition: string | undefined;
@@ -1174,7 +1152,7 @@ export function computeRelationalPatterns(): void {
         }
       }
 
-      const conditionLabel = condition ? `聊${condition}话题时` : "";
+      const conditionLabel = condition ? `in ${condition} topics: ` : "";
       patterns.push({
         feature: key,
         condition,
@@ -1182,7 +1160,7 @@ export function computeRelationalPatterns(): void {
         avgQualityWithout: Math.round(avgWithout * 100) / 100,
         lift: Math.round(lift * 100) / 100,
         sampleCount: withFeature.length,
-        label: `${conditionLabel}${direction}${label}（对用户有效，lift=${lift.toFixed(2)}, n=${withFeature.length}）`,
+        label: `${conditionLabel}${direction}${label} (effective for user, lift=${lift.toFixed(2)}, n=${withFeature.length})`,
       });
     }
   }

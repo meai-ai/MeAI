@@ -42,15 +42,15 @@ function testSynonymSpam(): TestSuite {
   // Try to create 10 nodes for the same concept with different labels
   const labels = [
     "quantum computing",
-    "量子计算",
+    "quantum calc",
     "QC",
     "quantum-computing",
-    "量子信息",
+    "quantum information",
     "quantum info",
     "quantum-calculation",
-    "量子运算",
+    "quantum operations",
     "quantum computation",
-    "quantum计算",
+    "quantum compute",
   ];
 
   for (const label of labels) {

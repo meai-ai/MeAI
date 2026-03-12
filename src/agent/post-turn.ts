@@ -135,30 +135,30 @@ export async function maybeExtractExemplar(
 
 export function extractBehaviorPattern(response: string, type: PersonalExemplar["behaviorType"]): string | null {
   const firstSentences = response.slice(0, 200);
-  const hasQuestion = /[？?]/.test(firstSentences.slice(0, 80));
-  const hasEmpathy = /感受|感觉|辛苦|不容易|理解|心疼/.test(firstSentences);
-  const hasCallback = /上次|之前|记得你|你说过/.test(firstSentences);
-  const hasOpinion = /我觉得|我倒|不太同意|我的看法/.test(firstSentences);
+  const hasQuestion = /[?]/.test(firstSentences.slice(0, 80));
+  const hasEmpathy = /feel|feeling|tough|not easy|understand|heartache/i.test(firstSentences);
+  const hasCallback = /last time|before|remember you|you said/i.test(firstSentences);
+  const hasOpinion = /I think|I'd say|disagree|my view/i.test(firstSentences);
 
   const parts: string[] = [];
   if (type === "disagreed") {
-    if (hasQuestion) parts.push("先确认对方的意思");
-    if (hasOpinion) parts.push("再说出自己不同的看法");
-    if (!hasOpinion) parts.push("委婉表达了不同角度");
+    if (hasQuestion) parts.push("confirmed what they meant first");
+    if (hasOpinion) parts.push("then shared a different view");
+    if (!hasOpinion) parts.push("gently offered a different angle");
   } else if (type === "cared") {
-    if (hasQuestion) parts.push("先追问具体处境");
-    if (hasEmpathy) parts.push("回应了情绪");
-    if (hasCallback) parts.push("提起了之前的相关细节");
+    if (hasQuestion) parts.push("asked about specific situation first");
+    if (hasEmpathy) parts.push("acknowledged the emotion");
+    if (hasCallback) parts.push("brought up related past details");
   } else if (type === "disclosed") {
-    if (hasEmpathy) parts.push("先共情");
-    parts.push("分享了自己的真实感受");
+    if (hasEmpathy) parts.push("empathized first");
+    parts.push("shared genuine personal feelings");
   } else if (type === "resurfaced") {
-    if (hasCallback) parts.push("自然地提起了之前聊过的事");
-    if (hasQuestion) parts.push("追问了后续进展");
+    if (hasCallback) parts.push("naturally brought up something from before");
+    if (hasQuestion) parts.push("asked about follow-up progress");
   }
 
   if (parts.length === 0) return null;
-  return parts.join("，");
+  return parts.join(", ");
 }
 
 // ── shouldExtractMemories ───────────────────────────────────────────
@@ -258,7 +258,7 @@ async function postTurnUnderstanding(
   statePath?: string,
 ): Promise<void> {
   // Skip trivial messages
-  if (/^(嗯+|哦+|ok|好的?|谢谢|哈哈+|嘿|👍|😂|❤️|对|是的?)$/i.test(userMessage.trim())) return;
+  if (/^(ok|okay|sure|thanks|haha+|hey|👍|😂|❤️|yes|yeah|yep|cool)$/i.test(userMessage.trim())) return;
 
   const character = getCharacter();
   const charName = character.name;
@@ -267,7 +267,7 @@ async function postTurnUnderstanding(
   // Build open commitments context for fulfillment detection
   const manager = getStoreManager();
   const existing = manager.loadCategory("commitment");
-  const openCommitments = existing.filter(m => m.value.includes("状态: open"));
+  const openCommitments = existing.filter(m => m.value.includes("status: open"));
   const openList = openCommitments.length > 0
     ? openCommitments.map(m => `- [${m.key}] ${m.value}`).join("\n")
     : "(none)";
@@ -420,9 +420,9 @@ Extraction rules:
       // Handle fulfillment
       if (Array.isArray(parsed.commitment.fulfilled)) {
         for (const key of parsed.commitment.fulfilled) {
-          const match = existing.find(m => m.key === key && m.value.includes("状态: open"));
+          const match = existing.find(m => m.key === key && m.value.includes("status: open"));
           if (match) {
-            const updated = match.value.replace("状态: open", "状态: done");
+            const updated = match.value.replace("status: open", "status: done");
             manager.set(match.key, updated, match.confidence, "observed");
             log.info(`commitment fulfilled: "${match.key}"`);
           }
@@ -433,11 +433,11 @@ Extraction rules:
       if (parsed.commitment.newCommitment?.what) {
         const what = parsed.commitment.newCommitment.what;
         const isDupe = openCommitments.some(m => {
-          const existingWhat = m.value.split("|")[0]?.replace("承诺:", "").trim() ?? "";
+          const existingWhat = m.value.split("|")[0]?.replace("commitment:", "").trim() ?? "";
           return existingWhat.includes(what.slice(0, 8)) || what.includes(existingWhat.slice(0, 8));
         });
         if (!isDupe) {
-          const slug = what.slice(0, 20).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "_");
+          const slug = what.slice(0, 20).replace(/[^a-zA-Z0-9]/g, "_");
           const ts = Math.floor(Date.now() / 1000);
           const key = `commitment.${ts}_${slug}`;
           const deadlineLabel = parsed.commitment.newCommitment.deadline as string | null;

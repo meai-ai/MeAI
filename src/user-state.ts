@@ -18,30 +18,30 @@ const log = createLogger("user-state");
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface UserFocus {
-  topic: string;         // "Eli的幼儿园选择"
+  topic: string;         // e.g. "Eli's preschool choice"
   firstMentioned: number;
   lastMentioned: number;
   mentionCount: number;
 }
 
 export interface UserStressor {
-  what: string;          // "工作压力大，周末也在加班"
+  what: string;          // e.g. "high work pressure, working weekends too"
   detectedAt: number;
   lastMentioned: number;
   intensity: number;     // 0-1
 }
 
 export interface TemporalPattern {
-  pattern: string;           // "周一早上" | "周五晚上" | "周末下午"
-  observation: string;       // "通常会聊工作压力"
+  pattern: string;           // e.g. "Monday morning" | "Friday evening" | "weekend afternoon"
+  observation: string;       // e.g. "usually talks about work pressure"
   confidence: number;        // 0-1, increases with more observations
   observationCount: number;
   lastObserved: number;
 }
 
 export interface UserPrediction {
-  what: string;              // "他可能在想周末带孩子去哪玩"
-  basis: string;             // "上周六他也问了类似的问题"
+  what: string;              // e.g. "he might be thinking about where to take the kids this weekend"
+  basis: string;             // e.g. "he asked a similar question last Saturday"
   confidence: number;
   generatedAt: number;
 }
@@ -60,9 +60,9 @@ export interface UserState {
   moodHistory: number[];
 
   // Unspoken needs — things the character senses but user hasn't asked for
-  unspokenNeeds: string[];  // max 3, e.g. "可能需要有人听他说说工作的事"
+  unspokenNeeds: string[];  // max 3, e.g. "might need someone to listen about work"
 
-  // Temporal patterns — "周一早上他通常压力大"
+  // Temporal patterns — e.g. "Monday mornings he's usually stressed"
   temporalPatterns: TemporalPattern[];
 
   // Predicted current state — generated from patterns + time
@@ -250,15 +250,15 @@ export function updateUserState(update: UserStateUpdate): void {
   const dayOfWeek = nowDate.getDay();
 
   const observations: string[] = [];
-  if (update.focuses?.length) observations.push(`在聊${update.focuses.slice(0, 2).join("和")}`);
-  if (update.stressor) observations.push(`有压力：${update.stressor.what.slice(0, 15)}`);
+  if (update.focuses?.length) observations.push(`discussing ${update.focuses.slice(0, 2).join(" and ")}`);
+  if (update.stressor) observations.push(`stressed: ${update.stressor.what.slice(0, 30)}`);
   if (update.mood !== undefined) {
     const { low, high } = getMoodThresholds();
-    if (update.mood <= low) observations.push("情绪偏低");
-    else if (update.mood >= high) observations.push("心情不错");
+    if (update.mood <= low) observations.push("low mood");
+    else if (update.mood >= high) observations.push("good mood");
   }
   if (observations.length > 0) {
-    recordTemporalPattern(dayOfWeek, bucket, observations.join("，"));
+    recordTemporalPattern(dayOfWeek, bucket, observations.join(", "));
   }
 
   expireStale();
@@ -267,13 +267,13 @@ export function updateUserState(update: UserStateUpdate): void {
 
 // ── Temporal Pattern Recognition ─────────────────────────────────────
 
-const DAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 function getHourBucket(hour: number): string {
-  if (hour >= 0 && hour < 6) return "深夜";
-  if (hour >= 6 && hour < 12) return "早上";
-  if (hour >= 12 && hour < 18) return "下午";
-  return "晚上";
+  if (hour >= 0 && hour < 6) return "late-night";
+  if (hour >= 6 && hour < 12) return "morning";
+  if (hour >= 12 && hour < 18) return "afternoon";
+  return "evening";
 }
 
 /**
@@ -346,8 +346,8 @@ export function generatePredictions(): void {
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 3)
     .map(p => ({
-      what: `他可能${p.observation}`,
-      basis: `过去${p.observationCount}次${p.pattern}都观察到类似的情况`,
+      what: `they might be ${p.observation}`,
+      basis: `observed similar pattern ${p.observationCount} times on ${p.pattern}`,
       confidence: p.confidence,
       generatedAt: Date.now(),
     }));
@@ -361,8 +361,8 @@ export function generatePredictions(): void {
 export function formatPredictions(): string {
   if (_state.predictions.length === 0) return "";
   return _state.predictions
-    .map(p => `${p.what}（${p.basis}，置信度${Math.round(p.confidence * 100)}%）`)
-    .join("；");
+    .map(p => `${p.what} (${p.basis}, confidence ${Math.round(p.confidence * 100)}%)`)
+    .join("; ");
 }
 
 // ── Context formatting (for system prompt) ───────────────────────────
@@ -375,35 +375,35 @@ export function formatUserStateContext(): string {
   if (_state.focuses.length > 0) {
     const items = _state.focuses.map(f => {
       const ago = Math.round((Date.now() - f.lastMentioned) / 3_600_000);
-      const timeLabel = ago < 1 ? "刚才" : ago < 24 ? `${ago}小时前` : `${Math.round(ago / 24)}天前`;
-      return `${f.topic}（${timeLabel}提到，共${f.mentionCount}次）`;
+      const timeLabel = ago < 1 ? "just now" : ago < 24 ? `${ago}h ago` : `${Math.round(ago / 24)}d ago`;
+      return `${f.topic} (${timeLabel}, mentioned ${f.mentionCount}x)`;
     });
-    parts.push(`他最近在想的事：${items.join("、")}`);
+    parts.push(`What's on their mind recently: ${items.join(", ")}`);
   }
 
   if (_state.stressors.length > 0) {
     const items = _state.stressors.map(s => s.what);
-    parts.push(`他的压力源：${items.join("、")}`);
+    parts.push(`Stressors: ${items.join(", ")}`);
   }
 
   if (_state.recentMoods.length >= 2) {
     const recent = _state.recentMoods.slice(-3);
     const avg = recent.reduce((s, m) => s + m.valence, 0) / recent.length;
     const trend = recent[recent.length - 1].valence - recent[0].valence;
-    const trendLabel = trend > 1 ? "在好转" : trend < -1 ? "在变差" : "比较稳定";
-    parts.push(`他最近的情绪走向：均值${avg.toFixed(1)}/10，${trendLabel}`);
+    const trendLabel = trend > 1 ? "improving" : trend < -1 ? "declining" : "stable";
+    parts.push(`Recent mood trajectory: avg ${avg.toFixed(1)}/10, ${trendLabel}`);
   }
 
   if (_state.unspokenNeeds.length > 0) {
-    parts.push(`你感觉到但他没说出口的：${_state.unspokenNeeds.join("、")}`);
+    parts.push(`Sensed but unspoken: ${_state.unspokenNeeds.join(", ")}`);
   }
 
   // Predictions based on temporal patterns
   if (_state.predictions.length > 0) {
     const predItems = _state.predictions.map(p =>
-      `${p.what}（${p.basis}）`,
+      `${p.what} (${p.basis})`,
     );
-    parts.push(`你的预感（基于过去的规律）：\n- ${predItems.join("\n- ")}`);
+    parts.push(`Your hunches (based on past patterns):\n- ${predItems.join("\n- ")}`);
   }
 
   return parts.join("\n");

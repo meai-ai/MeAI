@@ -115,11 +115,11 @@ interface IntentSkillMapping {
 }
 
 const DEFAULT_INTENT_SKILL_MAP: IntentSkillMapping[] = [
-  { intentPattern: /搜索|查找|了解|探索|search|learn about/i, conceptDomains: ["general", "quant", "creative"], skillName: "web-search", actionType: "explore", minActivation: 0.4 },
-  { intentPattern: /阅读|读|深入|研究|read|study/i, conceptDomains: ["quant", "creative", "meta"], skillName: "deep-reading", actionType: "activity", minActivation: 0.5 },
-  { intentPattern: /代码|编程|写|code|vibe/i, conceptDomains: ["quant", "creative"], skillName: "claude-code", actionType: "activity", minActivation: 0.5 },
-  { intentPattern: /分享|发|post|tweet/i, conceptDomains: ["social", "creative"], skillName: "x-browser", actionType: "post", minActivation: 0.45 },
-  { intentPattern: /聊|说|找.*聊|reach out/i, conceptDomains: ["social"], skillName: "tts", actionType: "reach_out", minActivation: 0.5 },
+  { intentPattern: /search|look up|learn about|explore|discover/i, conceptDomains: ["general", "quant", "creative"], skillName: "web-search", actionType: "explore", minActivation: 0.4 },
+  { intentPattern: /read|study|dive into|research/i, conceptDomains: ["quant", "creative", "meta"], skillName: "deep-reading", actionType: "activity", minActivation: 0.5 },
+  { intentPattern: /code|program|write|vibe/i, conceptDomains: ["quant", "creative"], skillName: "claude-code", actionType: "activity", minActivation: 0.5 },
+  { intentPattern: /share|post|tweet/i, conceptDomains: ["social", "creative"], skillName: "x-browser", actionType: "post", minActivation: 0.45 },
+  { intentPattern: /chat|talk|reach out/i, conceptDomains: ["social"], skillName: "tts", actionType: "reach_out", minActivation: 0.5 },
 ];
 
 function resolveIntentToSkill(
@@ -1768,19 +1768,19 @@ class BrainstemEngine {
 
     try {
       const recentThoughts = this.state.thoughtHistory.slice(-10)
-        .map(t => `- ${t.content} (${t.trigger}, ${t.grounding[0]?.type ?? "无"}:${t.grounding[0]?.id ?? ""})`);
+        .map(t => `- ${t.content} (${t.trigger}, ${t.grounding[0]?.type ?? "none"}:${t.grounding[0]?.id ?? ""})`);
       const existingGoals = activeGoals
         .map(g => `- ${g.description} (${g.category})`);
 
-      const prompt = `最近的潜意识想法：
+      const prompt = `Recent subconscious thoughts:
 ${recentThoughts.join("\n")}
 
-现有目标：
-${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
+Existing goals:
+${existingGoals.length > 0 ? existingGoals.join("\n") : "(none)"}
 
-根据这些想法中的反复主题，提议一个新的小目标。
-如果没有明显的新主题，回答 SKIP。
-否则回答 JSON：{"description":"...", "category":"learning|project|social|health|personal", "motivation":"...", "relatedTopics":["..."]}`;
+Based on recurring themes in these thoughts, propose a new small goal.
+If there's no clear new theme, respond SKIP.
+Otherwise respond JSON: {"description":"...", "category":"learning|project|social|health|personal", "motivation":"...", "relatedTopics":["..."]}`;
 
       // Cortex unified budget: check goal slot
       if (!this.cortexManager.trackExternalCall("goal", 200)) {
@@ -1789,10 +1789,10 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
       }
 
       const result = await claudeText({
-        system: `你是${getCharacter().name}的目标规划器。从潜意识想法中提炼出可执行的小目标。\n` +
-          "description 必须简短自然（≤20字），像跟朋友说的一句话，不要写成工作计划书。\n" +
-          "好的例子：「每天早上看一眼 dashboard」「试试用 Python 写个小爬虫」「读完那本陶瓷的书」\n" +
-          "坏的例子：「制定 dashboard 日常使用的触发机制和仪式感：设计晨间打开……」（太长太正式）",
+        system: `You are ${getCharacter().name}'s goal planner. Distill actionable small goals from subconscious thoughts.\n` +
+          "description must be short and natural (<=20 words), like something you'd say to a friend, not a formal project plan.\n" +
+          "Good examples: 'check the dashboard every morning', 'try writing a small Python scraper', 'finish that ceramics book'\n" +
+          "Bad examples: 'Design a trigger mechanism and ritual for daily dashboard usage: design morning opening...' (too long and formal)",
         prompt,
         model: "fast",
         timeoutMs: 30_000,
@@ -1875,19 +1875,19 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
 
       let insights: string[] = [];
       if (!this.cortexManager.trackExternalCall("goal", 150)) {
-        insights = [`本月主题：${recentThoughts[0]?.content ?? "未知"}`];
+        insights = [`This month's theme: ${recentThoughts[0]?.content ?? "unknown"}`];
       } else {
         try {
           const result = await claudeText({
-            system: `你是${getCharacter().name}的自我反思助手。从这个月的潜意识想法中提炼3-5条自我观察。每条一句话。`,
-            prompt: `这个月的想法：\n${thoughtSummary}\n\n请用JSON数组格式回答：["观察1","观察2","观察3"]`,
+            system: `You are ${getCharacter().name}'s self-reflection assistant. Distill 3-5 self-observations from this month's subconscious thoughts. One sentence each.`,
+            prompt: `This month's thoughts:\n${thoughtSummary}\n\nRespond in JSON array format: ["observation1","observation2","observation3"]`,
             model: "fast",
             timeoutMs: 15_000,
           });
           const parsed = JSON.parse(result.trim());
           if (Array.isArray(parsed)) insights = parsed.slice(0, 5);
         } catch {
-          insights = [`本月主题：${recentThoughts[0]?.content ?? "未知"}`];
+          insights = [`This month's theme: ${recentThoughts[0]?.content ?? "unknown"}`];
         }
       }
 
@@ -2333,8 +2333,8 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
     const now = this.clock.nowMs();
 
     // Detect open questions from user
-    const isQuestion = /[?？]/.test(userText) ||
-      /^(为什么|怎么|什么|哪|谁|几|多少|how|what|why|where|when|which|who)/i.test(userText.trim());
+    const isQuestion = /[?]/.test(userText) ||
+      /^(how|what|why|where|when|which|who)/i.test(userText.trim());
     if (isQuestion && userText.length > 5) {
       const label = userText.slice(0, 60).replace(/\n/g, " ");
       loadSlot(this.workingMemory, "open_question", `q_${now}`, label, now);
@@ -2354,28 +2354,28 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
     if (top.length === 0 && thoughts.length === 0) return "";
 
     const lines: string[] = [];
-    lines.push("## 我脑子里在转的");
+    lines.push("## What's on my mind");
 
     if (top.length > 0) {
-      lines.push(`脑子里在转的：${top.map(t => t.topic).join("、")}`);
+      lines.push(`On my mind: ${top.map(t => t.topic).join(", ")}`);
     }
 
     if (thoughts.length > 0) {
       const latest = thoughts[thoughts.length - 1];
-      lines.push(`刚才在想：${latest.content}`);
+      lines.push(`Just thinking about: ${latest.content}`);
     }
 
     // Drive signal — what the character most wants to push forward
     const drive = this.getDriveSignal();
     if (drive && drive.strength > 0.3) {
-      lines.push(`当前驱动力：${drive.description}`);
+      lines.push(`Current drive: ${drive.description}`);
     }
 
     // CSI mode — only show when non-green
     const csi = this.getCSI();
     if (csi.mode !== "green") {
-      const modeDesc: Record<string, string> = { yellow: "注意力有点分散", red: "状态不太好，需要收敛" };
-      lines.push(`认知模式：${modeDesc[csi.mode]}`);
+      const modeDesc: Record<string, string> = { yellow: "Attention somewhat scattered", red: "Not in great shape, need to converge" };
+      lines.push(`Cognitive mode: ${modeDesc[csi.mode]}`);
     }
 
     // Inner state — only show when abnormal
@@ -2383,28 +2383,28 @@ ${existingGoals.length > 0 ? existingGoals.join("\n") : "（无）"}
     if (self.energy < 0.4 || self.social_energy < 0.3) {
       const e = Math.round(self.energy * 10);
       const s = Math.round(self.social_energy * 10);
-      lines.push(`内在状态：精力 ${e}/10，社交能量 ${s}/10`);
+      lines.push(`Inner state: energy ${e}/10, social energy ${s}/10`);
     }
 
     // Affect regulation context
     const affect = this.stabilizer.getAffectState();
     if (affect.regulationStrategy !== "none") {
       const strategyNames: Record<string, string> = {
-        reappraisal: "认知重评",
-        distraction: "注意力转移",
-        suppression: "情绪抑制",
+        reappraisal: "Cognitive reappraisal",
+        distraction: "Attention shifting",
+        suppression: "Emotion suppression",
       };
-      lines.push(`情绪调节: ${strategyNames[affect.regulationStrategy] ?? affect.regulationStrategy} (强度: ${affect.regulationIntensity.toFixed(1)})`);
+      lines.push(`Affect regulation: ${strategyNames[affect.regulationStrategy] ?? affect.regulationStrategy} (intensity: ${affect.regulationIntensity.toFixed(1)})`);
     }
 
     // Open commitments
     const openCommitments = this.outcomeTracker.getOpenCommitments();
     if (openCommitments.length > 0) {
       const maxUrgency = Math.max(...openCommitments.map(c => c.urgency));
-      lines.push(`待完成承诺: ${openCommitments.length}项 (最高紧急度: ${maxUrgency.toFixed(1)})`);
+      lines.push(`Open commitments: ${openCommitments.length} items (max urgency: ${maxUrgency.toFixed(1)})`);
     }
 
-    lines.push("这些是你潜意识里的念头——不需要主动说出来，只在自然聊到的时候才带出来。");
+    lines.push("These are subconscious thoughts -- don't bring them up proactively, only surface them when the conversation naturally touches on them.");
 
     // Working memory context
     const wmCtx = formatWorkingMemoryContext(this.workingMemory);

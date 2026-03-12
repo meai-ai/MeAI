@@ -156,9 +156,9 @@ export function getAliases(table: AliasTable, nodeId: string): string[] {
 
 // ── Domain inference (cross-domain transfer) ─────────────────────────
 
-const QUANT_KEYWORDS = ["market", "quant", "code", "trading", "stock", "finance", "algorithm", "data", "model", "math", "量化", "市场", "代码"];
-const CREATIVE_KEYWORDS = ["art", "music", "design", "writing", "photo", "draw", "creative", "aesthetic", "艺术", "音乐", "设计", "创意"];
-const PHYSICAL_KEYWORDS = ["health", "exercise", "body", "sleep", "food", "run", "walk", "yoga", "健康", "运动", "身体"];
+const QUANT_KEYWORDS = ["market", "quant", "code", "trading", "stock", "finance", "algorithm", "data", "model", "math"];
+const CREATIVE_KEYWORDS = ["art", "music", "design", "writing", "photo", "draw", "creative", "aesthetic"];
+const PHYSICAL_KEYWORDS = ["health", "exercise", "body", "sleep", "food", "run", "walk", "yoga"];
 
 export function inferDomain(label: string, source: ConceptSource, memoryKeys: string[]): ConceptDomain {
   if (source === "emotion") return "social";

@@ -389,7 +389,7 @@ Please respond in JSON:
 
     // Simple overlap: what % of thoughts align with declared core beliefs
     const beliefKeywords = beliefs.flatMap(b =>
-      b.belief.split(/[，、\s]+/).filter(w => w.length >= 2),
+      b.belief.split(/[,\s]+/).filter(w => w.length >= 2),
     );
     if (beliefKeywords.length === 0) return 1.0;
 
@@ -427,7 +427,7 @@ Please respond in JSON:
 
   isConsistentWithValues(goalDescription: string): boolean {
     // Simple keyword check against core values
-    const antiPatterns = ["违背", "不尊重", "忽视"];
+    const antiPatterns = ["violate", "disrespect", "ignore"];
     return !antiPatterns.some(p => goalDescription.includes(p));
   }
 

@@ -162,14 +162,14 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 // ── Counterevidence antonym patterns for diary scanning ──────────────
 
 const PATTERN_ANTONYMS: Record<ValuePattern, RegExp> = {
-  concreteness: /空泛|笼统|泛泛|抽象|大而化之/,
-  empathy:      /冷漠|无感|敷衍|心不在焉/,
-  callback:     /忘了|没记住|不记得|跳过/,
-  humor:        /严肃|沉闷|无趣|不好笑/,
-  vulnerability: /回避|封闭|不敢|隐藏/,
-  disagreement: /顺从|讨好|不敢说|附和/,
-  patience:     /催促|急躁|不耐烦|赶时间/,
-  follow_through: /忘了追|没跟进|放弃了|断了/,
+  concreteness: /vague|abstract|hand-wavy|generic|broad/i,
+  empathy:      /cold|indifferent|dismissive|distracted/i,
+  callback:     /forgot|didn't remember|skipped|overlooked/i,
+  humor:        /serious|dull|boring|unfunny/i,
+  vulnerability: /avoidant|closed off|guarded|hiding/i,
+  disagreement: /compliant|people-pleasing|afraid to say|agreeing blindly/i,
+  patience:     /rushed|impatient|hurried|pressed for time/i,
+  follow_through: /forgot to follow|didn't follow up|gave up|dropped/i,
 };
 
 // ── Display label templates ──────────────────────────────────────────
@@ -521,11 +521,11 @@ function scanOpinionStability(statePath: string, state: ValueFormationState): vo
       let domain: ValueDomain = "honesty"; // default
       let pattern: ValuePattern = "concreteness";
 
-      if (/关心|在乎|care/.test(topic)) { domain = "care"; pattern = "empathy"; }
-      else if (/真实|诚实|honest/.test(topic)) { domain = "honesty"; pattern = "vulnerability"; }
-      else if (/独立|自主|自由/.test(topic)) { domain = "autonomy"; pattern = "disagreement"; }
-      else if (/幽默|轻松|humor/.test(topic)) { domain = "playfulness"; pattern = "humor"; }
-      else if (/具体|落地|实际/.test(topic)) { domain = "grounding"; pattern = "concreteness"; }
+      if (/care|compassion/.test(topic)) { domain = "care"; pattern = "empathy"; }
+      else if (/honest|authentic/.test(topic)) { domain = "honesty"; pattern = "vulnerability"; }
+      else if (/independen|autonom|freedom/.test(topic)) { domain = "autonomy"; pattern = "disagreement"; }
+      else if (/humor|lighthearted/.test(topic)) { domain = "playfulness"; pattern = "humor"; }
+      else if (/concrete|practical|grounded/.test(topic)) { domain = "grounding"; pattern = "concreteness"; }
 
       const evidence: ValueEvidence[] = [{
         timestamp: op.evolvedAt,
@@ -617,14 +617,14 @@ function scanPreferenceBeliefs(statePath: string, state: ValueFormationState): v
       let domain: ValueDomain = "grounding"; // fallback
       let pattern: ValuePattern = "concreteness";
 
-      if (/关心|在乎|care|照顾/.test(stmt)) { domain = "care"; pattern = "empathy"; }
-      else if (/真实|诚实|honest|坦诚/.test(stmt)) { domain = "honesty"; pattern = "vulnerability"; }
-      else if (/独立|自主|自由|independence/.test(stmt)) { domain = "autonomy"; pattern = "disagreement"; }
-      else if (/幽默|搞笑|humor|轻松/.test(stmt)) { domain = "playfulness"; pattern = "humor"; }
-      else if (/亲近|亲密|连接|closeness/.test(stmt)) { domain = "closeness"; pattern = "callback"; }
-      else if (/耐心|等待|patience|空间/.test(stmt)) { domain = "restraint"; pattern = "patience"; }
-      else if (/互惠|平等|公平|reciproc/.test(stmt)) { domain = "reciprocity"; pattern = "follow_through"; }
-      else if (/具体|落地|实际|practical/.test(stmt)) { domain = "grounding"; pattern = "concreteness"; }
+      if (/care|compassion|nurtur/.test(stmt)) { domain = "care"; pattern = "empathy"; }
+      else if (/honest|authentic|sincer/.test(stmt)) { domain = "honesty"; pattern = "vulnerability"; }
+      else if (/independen|autonom|freedom/.test(stmt)) { domain = "autonomy"; pattern = "disagreement"; }
+      else if (/humor|funny|lighthearted/.test(stmt)) { domain = "playfulness"; pattern = "humor"; }
+      else if (/closeness|intimacy|connection/.test(stmt)) { domain = "closeness"; pattern = "callback"; }
+      else if (/patience|wait|space/.test(stmt)) { domain = "restraint"; pattern = "patience"; }
+      else if (/reciproc|equal|fair/.test(stmt)) { domain = "reciprocity"; pattern = "follow_through"; }
+      else if (/concrete|practical|grounded/.test(stmt)) { domain = "grounding"; pattern = "concreteness"; }
 
       const vector: ValueVector = {
         domain,

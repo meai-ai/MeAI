@@ -191,16 +191,16 @@ export function formatWorkingMemoryContext(wm: WorkingMemory): string {
   if (active.length === 0) return "";
 
   const SLOT_LABELS: Record<SlotName, string> = {
-    current_focus: "当前焦点",
-    background: "背景关注",
-    goal_active: "活跃目标",
-    recent_surprise: "意外发现",
-    open_question: "未解问题",
+    current_focus: "Current focus",
+    background: "Background attention",
+    goal_active: "Active goal",
+    recent_surprise: "Unexpected discovery",
+    open_question: "Open question",
   };
 
   const items = active.map(s =>
-    `${SLOT_LABELS[s.name]}：${s.label}（强度${(s.strength * 100).toFixed(0)}%）`,
+    `${SLOT_LABELS[s.name]}: ${s.label} (strength ${(s.strength * 100).toFixed(0)}%)`,
   );
 
-  return `工作记忆：${items.join("；")}`;
+  return `Working memory: ${items.join("; ")}`;
 }

@@ -16,7 +16,7 @@ import { readJsonSafe, writeJsonAtomic } from "./lib/atomic-file.js";
 export interface Intent {
   id: string;              // "intent_1709817600000_a3f2"
   what: string;            // the commitment or plan
-  when: string | null;     // "周末" | "明天" | null (original natural language)
+  when: string | null;     // "weekend" | "tomorrow" | null (original natural language)
   deadline: string | null; // parsed ISO date "2026-03-08"
   priority: "high" | "medium" | "low";
   status: "pending" | "scheduled" | "expired";
@@ -60,7 +60,7 @@ function parseDeadline(when: string | null): string | null {
   const now = new Date();
   const pst = new Date(now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
 
-  if (/周末/.test(when)) {
+  if (/weekend/i.test(when)) {
     // Next Saturday
     const dayOfWeek = pst.getDay();
     const daysUntilSat = dayOfWeek <= 6 ? (6 - dayOfWeek) || 7 : 1;
@@ -68,12 +68,12 @@ function parseDeadline(when: string | null): string | null {
     sat.setDate(sat.getDate() + (daysUntilSat === 0 ? 7 : daysUntilSat));
     return sat.toISOString().slice(0, 10);
   }
-  if (/明天/.test(when)) {
+  if (/tomorrow/i.test(when)) {
     const tomorrow = new Date(pst);
     tomorrow.setDate(tomorrow.getDate() + 1);
     return tomorrow.toISOString().slice(0, 10);
   }
-  if (/下周/.test(when)) {
+  if (/next week/i.test(when)) {
     const dayOfWeek = pst.getDay();
     const daysUntilMon = (8 - dayOfWeek) % 7 || 7;
     const mon = new Date(pst);
@@ -86,7 +86,7 @@ function parseDeadline(when: string | null): string | null {
 // ── Dedup normalization ──────────────────────────────────────────────
 
 function normalize(s: string): string {
-  return s.replace(/[，。！？、；：""''（）\s]+/g, " ").trim().toLowerCase();
+  return s.replace(/[,.!?;:'"()\s]+/g, " ").trim().toLowerCase();
 }
 
 function isDuplicate(what: string): boolean {
@@ -127,11 +127,11 @@ export function addIntent(opts: {
       const { getStoreManager } = require("./memory/store-manager.js");
       const memories = getStoreManager().loadAll();
       const whatLower = opts.what.toLowerCase();
-      const keywords = whatLower.replace(/[^\u4e00-\u9fff\w\s]/g, " ").split(/\s+/).filter(w => w.length > 1);
+      const keywords = whatLower.replace(/[^\w\s]/g, " ").split(/\s+/).filter(w => w.length > 1);
       for (const m of memories) {
         const text = `${m.key} ${m.value}`.toLowerCase();
         if (keywords.some(kw => text.includes(kw))) {
-          const urlMatch = m.value.match(/https?:\/\/[^\s,，）)]+/);
+          const urlMatch = m.value.match(/https?:\/\/[^\s,)]+/);
           if (urlMatch) {
             url = urlMatch[0];
             console.log(`[intents] Found URL from memory "${m.key}": ${url}`);
@@ -238,8 +238,8 @@ export function formatIntentsForSchedule(): string {
   if (pending.length === 0) return "";
 
   return pending.map(i => {
-    const deadline = i.deadline ? `（${i.deadline}前）` : i.when ? `（${i.when}）` : "";
-    const prio = i.priority === "high" ? " [高优]" : "";
+    const deadline = i.deadline ? ` (by ${i.deadline})` : i.when ? ` (${i.when})` : "";
+    const prio = i.priority === "high" ? " [high priority]" : "";
     const ctx = i.context ? ` — ${i.context}` : "";
     return `- ${i.what}${deadline}${prio}${ctx}`;
   }).join("\n");
@@ -253,12 +253,12 @@ export function formatIntentContext(): string {
 
   if (pending.length === 0 && scheduled.length === 0) return "";
 
-  const parts: string[] = ["## 我答应要做的事"];
+  const parts: string[] = ["## Things I committed to"];
 
   if (pending.length > 0) {
-    parts.push("待安排：");
+    parts.push("Not yet scheduled:");
     for (const i of pending) {
-      const deadline = i.deadline ? `（${i.deadline}前）` : i.when ? `（${i.when}）` : "";
+      const deadline = i.deadline ? ` (by ${i.deadline})` : i.when ? ` (${i.when})` : "";
       const ctx = i.context ? ` — ${i.context}` : "";
       parts.push(`- ${i.what}${deadline}${ctx}`);
     }
@@ -266,15 +266,15 @@ export function formatIntentContext(): string {
 
   if (scheduled.length > 0) {
     if (pending.length > 0) parts.push("");
-    parts.push("已经安排过：");
+    parts.push("Already scheduled:");
     for (const i of scheduled) {
       const ctx = i.context ? ` — ${i.context}` : "";
-      parts.push(`- ${i.what}（${i.scheduledDate}，已排进计划）${ctx}`);
+      parts.push(`- ${i.what} (${i.scheduledDate}, in plan)${ctx}`);
     }
   }
 
   parts.push("");
-  parts.push("已经安排过的事自然聊进度；不要反复把同一件 pending 事项当成全新想法提出来。");
+  parts.push("Naturally check progress on scheduled items; don't repeatedly bring up the same pending item as if it were a new idea.");
 
   return parts.join("\n");
 }

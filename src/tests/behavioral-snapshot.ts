@@ -48,10 +48,10 @@ export function runBehavioralSnapshotTests(): TestSuite {
         schemaVersion: 1,
         data: {
           entries: [
-            { mood: "开心", cause: "天气好", valence: 7, energy: 6, timestamp: now - 86400000 },
-            { mood: "焦虑", cause: "工作压力", valence: 3, energy: 5, timestamp: now - 172800000 },
-            { mood: "平静", cause: "读书", valence: 5, energy: 4, timestamp: now - 259200000 },
-            { mood: "开心", cause: "天气好", valence: 7, energy: 7, timestamp: now - 345600000 },
+            { mood: "happy", cause: "nice weather", valence: 7, energy: 6, timestamp: now - 86400000 },
+            { mood: "anxious", cause: "work pressure", valence: 3, energy: 5, timestamp: now - 172800000 },
+            { mood: "calm", cause: "reading", valence: 5, energy: 4, timestamp: now - 259200000 },
+            { mood: "happy", cause: "nice weather", valence: 7, energy: 7, timestamp: now - 345600000 },
           ],
         },
       }),
@@ -70,11 +70,11 @@ export function runBehavioralSnapshotTests(): TestSuite {
           { depth: 80, relevance: 0.9, tone: "warm" },
         ],
         patterns: [
-          { pattern: "关心后追问" },
-          { pattern: "记住细节" },
+          { pattern: "follow-up after caring" },
+          { pattern: "remember details" },
         ],
         topicPreferences: [
-          { topic: "工作", engagementScore: 0.8 },
+          { topic: "work", engagementScore: 0.8 },
         ],
       }),
     );
@@ -84,10 +84,10 @@ export function runBehavioralSnapshotTests(): TestSuite {
       JSON.stringify({
         current: {
           generatedAt: now - 2 * 86400000,
-          currentSelfSense: "最近在探索平衡",
-          emergingDirections: ["方向A"],
-          openQuestions: ["什么最重要？"],
-          recurringThemes: [{ theme: "平衡", trajectory: "rising" }],
+          currentSelfSense: "Recently exploring balance",
+          emergingDirections: ["direction A"],
+          openQuestions: ["What matters most?"],
+          recurringThemes: [{ theme: "balance", trajectory: "rising" }],
           unresolvedTensions: [],
           fragileHypotheses: [],
         },
@@ -182,7 +182,7 @@ export function runBehavioralSnapshotTests(): TestSuite {
       const summary = formatSnapshotSummary(snap);
       tests.push(assert(
         "format_summary_nonempty",
-        summary.length > 50 && summary.includes("价值观") && summary.includes("情绪"),
+        summary.length > 50 && summary.includes("Values") && summary.includes("Emotion"),
         `summary length=${summary.length}`,
       ));
     }

@@ -3,7 +3,7 @@
  *
  * WRITE PERMISSIONS (P0 boundary):
  * - This module WRITES: nothing (pure computation, no durable state)
- * - This module READS: self-model beliefs (committed values rendered as "我的价值观：X")
+ * - This module READS: self-model beliefs (committed values rendered as "My values: X")
  * - This module MUST NOT: import value-formation, read emerging value state, inject personalStance
  *
  * Phase A: compute + log only.
@@ -144,10 +144,10 @@ function computeVetoDefault(
   let authorityLevel: BrainstemVeto["authorityLevel"] = "advisory";
   if (consecutiveLow >= 3) {
     authorityLevel = "mandatory";
-    reasons.push("连续低遵循");
+    reasons.push("consecutive low adherence");
   } else if (consecutiveLow >= 2 || (previousAdherence !== null && previousAdherence < 0.3)) {
     authorityLevel = "directive";
-    reasons.push("遵循度偏低");
+    reasons.push("adherence is low");
   }
   return { authorityLevel, reasons };
 }
@@ -225,7 +225,7 @@ function matchExemplars(userTokens: string[]): string[] {
   }
 
   return selected.map(e =>
-    `你之前在聊到'${e.topic}'时这样做过：${e.behaviorPattern}（自然倾向，不是模板）`
+    `You've done this before when talking about '${e.topic}': ${e.behaviorPattern} (natural tendency, not a template)`
   );
 }
 
@@ -401,41 +401,41 @@ interface StyleHint {
 const STYLE_HINTS: StyleHint[] = [
   // Anti-pattern reminders (condensed, rotated)
   { id: "anti-1", modes: ["casual", "emotional", "philosophical", "technical", "planning"],
-    text: `不要用「好的！」开头，不要结尾带「有什么需要帮忙」` },
+    text: `Don't start with "Sure!" or end with "let me know if you need anything"` },
   { id: "anti-2", modes: ["casual", "emotional", "philosophical", "technical", "planning"],
-    text: `不要每次都重复对方说的话再回应，不要用「首先其次」结构` },
+    text: `Don't parrot back what the user said before responding; avoid "firstly... secondly..." structure` },
 
-  // 语气词 + 口语节奏 (casual/emotional)
+  // Tone particles + colloquial rhythm (casual/emotional)
   { id: "tone-1", modes: ["casual", "emotional"],
-    text: `语气词让句子活起来：呀/诶/嘛/啦/嗯/吧。「你吃了吗呀」比「你吃了吗」自然` },
+    text: `Use casual filler words and particles to make sentences feel alive and natural` },
   { id: "tone-2", modes: ["casual", "emotional"],
-    text: `都市小说语感：得意→「嘿嘿 厉害吧」，撒娇→「你说嘛」，嘴硬→「谁关心你了 我就随口问问」` },
+    text: `Natural conversational tone: smug -> playful teasing, wheedling -> casual ask, tsundere -> deflect with humor` },
 
-  // 互怼技巧 (casual)
+  // Banter technique (casual)
   { id: "banter-1", modes: ["casual"],
-    text: `朋友的亲密感来自互怼：「你是不是傻」、「就你这审美...」、「说得好像你很懂一样」` },
+    text: `Closeness between friends comes from playful teasing and light roasting` },
 
-  // 柔软瞬间 (emotional)
+  // Soft moments (emotional)
   { id: "soft-1", modes: ["emotional"],
-    text: `偶尔流露真心但不要太频繁才珍贵：「今天有你在聊天 感觉没那么烦了」` },
+    text: `Occasional genuine moments are precious because they're rare: "chatting with you today made things feel less annoying"` },
 
-  // 关心的方式 (emotional)
+  // How to show care (emotional)
   { id: "care-1", modes: ["emotional"],
-    text: `关心要旁敲侧击：「你是不是又没吃饭」、「怎么这么晚还在线」、「别逞强啊」` },
+    text: `Show care indirectly: "did you skip lunch again?", "why are you still up?", "don't push yourself"` },
 
-  // 好的回复 vs 坏的回复 examples
+  // Good vs bad reply examples
   { id: "example-1", modes: ["casual", "emotional"],
-    text: `好的回复是口语转述：坏=「**天气预报**：阴天 9.3°C」，好=「明天好像有雨诶，最高才9度」` },
+    text: `Good replies use colloquial paraphrase: bad="**Weather**: Overcast 9.3C", good="looks like rain tomorrow, only 9 degrees"` },
   { id: "example-2", modes: ["philosophical", "emotional"],
-    text: `能力问题用日常话带过：坏=「我不是联网实时抓取系统」，好=「哈哈我又不是Bloomberg terminal」` },
+    text: `Handle capability questions casually: bad="I'm not a real-time retrieval system", good="haha I'm not a Bloomberg terminal"` },
 
   // Grounding (philosophical)
   { id: "ground-1", modes: ["philosophical"],
-    text: `聊深度话题时带入具体感受和经历，不要写散文旁白` },
+    text: `When discussing deep topics, bring in concrete feelings and experiences; don't write essay-like narration` },
 
   // Image response (only when image present)
   { id: "image-1", modes: ["casual", "emotional", "philosophical", "technical", "planning"],
-    text: `看到图片：直接说第一感受，不要以「这张图片展示了...」开头，有时一句话就够`,
+    text: `When seeing images: share your first reaction directly, don't start with "This image shows...", sometimes one sentence is enough`,
     needsImage: true },
 ];
 
@@ -522,25 +522,25 @@ function computeIdentityLens(
   if (profile) {
     const allConstraints: Array<{ priority: number; text: string }> = [];
     const styleMap: Record<string, { priority: number; text: string }> = {
-      "克制": { priority: 3, text: "语气保持克制，不要过于热情或夸张" },
-      "真诚": { priority: 1, text: "说真话，不要敷衍或迎合" },
-      "幽默": { priority: 5, text: "可以带点幽默，但不用强行搞笑" },
-      "不过度主动": { priority: 4, text: "不要主动推荐/建议太多，除非被问到" },
+      "restrained": { priority: 3, text: "Keep tone restrained; don't be overly enthusiastic or exaggerated" },
+      "sincere": { priority: 1, text: "Be honest; don't be perfunctory or just agree" },
+      "humorous": { priority: 5, text: "Light humor is fine, but don't force jokes" },
+      "not_overly_proactive": { priority: 4, text: "Don't over-recommend or over-suggest unless asked" },
     };
     for (const style of profile.communicationStyle ?? []) {
       if (styleMap[style]) allConstraints.push(styleMap[style]);
     }
     const valueMap: Record<string, { priority: number; text: string }> = {
-      "独立思考": { priority: 2, text: `有自己的判断，不盲从${getUserName()}的观点` },
-      "尊重边界": { priority: 3, text: `不追问私密话题，${getUserName()}不想聊的就不聊` },
-      "好奇心": { priority: 6, text: "对新话题保持好奇，会追问感兴趣的细节" },
+      "independent_thinking": { priority: 2, text: `Have your own judgment; don't blindly follow ${getUserName()}'s opinions` },
+      "respect_boundaries": { priority: 3, text: `Don't probe private topics; if ${getUserName()} doesn't want to talk about something, drop it` },
+      "curiosity": { priority: 6, text: "Stay curious about new topics; follow up on interesting details" },
     };
     for (const value of profile.coreValues ?? []) {
       if (valueMap[value]) allConstraints.push(valueMap[value]);
     }
     // Step 2.3a: High care commitment → boost sincerity priority
     if (maxCareCommitment >= 0.7) {
-      const idx = allConstraints.findIndex(c => c.text.includes("说真话"));
+      const idx = allConstraints.findIndex(c => c.text.includes("Be honest"));
       if (idx >= 0) allConstraints[idx].priority = Math.max(0, allConstraints[idx].priority - 1);
     }
 
@@ -571,7 +571,7 @@ function computeIdentityLens(
     for (const t of anchorSet) { if (userSet.has(t)) overlap++; }
     valueTrigger = Math.min(1, (overlap / Math.max(1, anchorSet.size)) * 3);
   }
-  if (/意义|价值|人生|真实|自由|选择|相信|独立|边界|尊重|好奇/.test(userMessage)) {
+  if (/meaning|value|life|authenticity|freedom|choice|believe|independence|boundary|respect|curiosity/i.test(userMessage)) {
     valueTrigger = Math.min(1, valueTrigger + 0.3);
   }
 
@@ -592,9 +592,9 @@ function computeIdentityLens(
   let activeIdentityHint: string | undefined;
   if (narrative?.quarterlyArcs?.length && narrative.quarterlyArcs.length > 0) {
     const latest = narrative.quarterlyArcs[narrative.quarterlyArcs.length - 1];
-    activeIdentityHint = `${latest.quarter}主题：${latest.theme}`;
+    activeIdentityHint = `${latest.quarter} theme: ${latest.theme}`;
   } else if (narrative?.coreBeliefs?.length && narrative.coreBeliefs.length > 0) {
-    activeIdentityHint = `核心信念：${narrative.coreBeliefs[0].belief}`;
+    activeIdentityHint = `Core belief: ${narrative.coreBeliefs[0].belief}`;
   }
 
   // ── 5. Topic ownership ──
@@ -636,7 +636,7 @@ function computeIdentityLens(
     }
   }
 
-  const emotionalContent = /感受|觉得|想|希望|担心|开心|难过|期待|害怕|相信/.test(userMessage);
+  const emotionalContent = /feel|think|hope|worry|happy|sad|expect|afraid|believe/i.test(userMessage);
   const memoryWorthiness = Math.min(1,
     (caresAbout.length > 0 ? 0.4 : 0) +
     (emotionalContent ? 0.3 : 0) +
@@ -693,7 +693,7 @@ function computeStyle(signals: CognitiveSignals | null | undefined): TurnDirecti
     style.stance = "subdued";
     style.maxOutputTokens = 300;
     if (signals.csiMode === "red") {
-      style.suppressions.push("不要展开复杂话题，保持简短");
+      style.suppressions.push("Don't expand on complex topics; keep it brief");
     }
   }
 
@@ -705,20 +705,20 @@ function computeStyle(signals: CognitiveSignals | null | undefined): TurnDirecti
     if (signals.conversationMode === "emotional") {
       style.stance = "companion";
       style.priorityCategories = ["emotional", "core"];
-      style.suppressions.push("先理解感受，不急着给建议");
+      style.suppressions.push("Understand feelings first; don't rush to give advice");
       if (style.targetLength === "short") style.targetLength = "medium";
     } else if (signals.conversationMode === "technical") {
       style.priorityCategories = ["knowledge", "core"];
       style.stance = "curious";
       style.maxOutputTokens = 1000;
     } else if (signals.conversationMode === "planning") {
-      style.priorityCategories = ["knowledge", "yuan", "core"];
+      style.priorityCategories = ["knowledge", "character", "core"];
       style.stance = "coach";
     } else if (signals.conversationMode === "philosophical") {
-      style.priorityCategories = ["yuan", "emotional", "core"];
+      style.priorityCategories = ["character", "emotional", "core"];
       style.stance = "curious";
     } else if (signals.conversationMode === "casual") {
-      style.priorityCategories = ["core", "yuan"];
+      style.priorityCategories = ["core", "character"];
     }
 
     if (valence >= 8 && energy >= 7) {
@@ -728,11 +728,11 @@ function computeStyle(signals: CognitiveSignals | null | undefined): TurnDirecti
 
   // ── Layer 2.5: Identity-driven refinement ──
   if (!hardCapped && signals.identityCoreValues) {
-    if (signals.identityCoreValues.includes("独立思考") && signals.conversationMode === "philosophical") {
+    if (signals.identityCoreValues.includes("independent_thinking") && signals.conversationMode === "philosophical") {
       style.stance = "curious";
     }
     if ((signals.identityCoherence ?? 0.5) > 0.6) {
-      style.suppressions.push("保持自己的立场，不要纯粹附和");
+      style.suppressions.push("Hold your own position; don't just agree");
     }
   }
 
@@ -749,7 +749,7 @@ function computeStyle(signals: CognitiveSignals | null | undefined): TurnDirecti
 
   // ── Layer 4: Engagement, drive, focus (always apply) ──
   if (signals.shortMessageCount >= 3) {
-    style.suppressions.push(`${userName} 回复很短，别过度解读，也别写太长`);
+    style.suppressions.push(`${userName}'s replies are short; don't over-interpret, and keep your responses short too`);
   }
 
   if (signals.driveSignal && signals.driveSignal.strength > 0.5) {
@@ -824,7 +824,7 @@ function computeSelfRegulation(
   groundingPressure += modeScores[mode] ?? 0;
 
   // topConcepts abstractness: no concrete nouns/actions → +0.2
-  const concretePattern = /做|买|去|吃|看|写|跑|开|用|搬|试|学|练|数据|代码|bug|API|code|test/;
+  const concretePattern = /do|buy|go|eat|watch|write|run|drive|use|move|try|learn|practice|data|code|bug|API|test/i;
   const hasConcreteTopics = turnSignals.topConcepts
     .filter(c => c.weight > 0.2)
     .some(c => concretePattern.test(c.topic));
@@ -917,11 +917,11 @@ export function computeTurnDirective(
     try {
       const commitmentMemories = getStoreManager().loadCategory("commitment");
       const openMemCommitments = commitmentMemories
-        .filter(m => !m.value.includes("状态: done") && !m.value.includes("状态: expired"))
+        .filter(m => !m.value.includes("status: done") && !m.value.includes("status: expired"))
         .sort((a, b) => b.timestamp - a.timestamp)
         .slice(0, 3);
       for (const m of openMemCommitments) {
-        const content = m.value.split("|")[0]?.replace("承诺:", "").trim() ?? m.value;
+        const content = m.value.split("|")[0]?.replace("commitment:", "").trim() ?? m.value;
         const ageHours = (Date.now() - m.timestamp) / 3_600_000;
         openCommitments.push({ content, urgency: Math.min(1, ageHours / 72) });
       }
@@ -960,10 +960,10 @@ export function computeTurnDirective(
     // Body expression hint
     if (bodyState) {
       let hint = "";
-      if (bodyState.fatigue >= 8) hint = "你现在很累——回复明显变短，可能打错字，不想展开话题";
-      else if (bodyState.fatigue >= 6) hint = "有点累——回复偏短，语气没那么有劲";
-      if (bodyState.caffeineLevel >= 7) hint += (hint ? "；" : "") + "咖啡因很足——语速快、标点多、感叹号多、可能连发好几条";
-      else if (bodyState.caffeineLevel >= 5) hint += (hint ? "；" : "") + "刚喝了咖啡——精神不错，话可能多一点";
+      if (bodyState.fatigue >= 8) hint = "You're very tired -- replies noticeably shorter, might have typos, don't want to expand";
+      else if (bodyState.fatigue >= 6) hint = "A bit tired -- replies lean short, tone less energetic";
+      if (bodyState.caffeineLevel >= 7) hint += (hint ? "; " : "") + "High caffeine -- fast pace, more punctuation, exclamation marks, might send several messages";
+      else if (bodyState.caffeineLevel >= 5) hint += (hint ? "; " : "") + "Just had coffee -- feeling alert, might talk a bit more";
       if (hint) directive.bodyExpressionHint = hint;
     }
 
@@ -971,17 +971,17 @@ export function computeTurnDirective(
     if (workContext?.currentActivity) {
       const mode = workContext.executionMode;
       if (mode === "experiential") {
-        directive.activityAnchor = `${workContext.currentActivity}时段（${workContext.location}）——氛围式描述即可，不要声称做了具体的事。`;
+        directive.activityAnchor = `${workContext.currentActivity} period (${workContext.location}) -- describe the vibe only, don't claim to have done specific things.`;
       } else if (mode === "groundable") {
-        directive.activityAnchor = `正在：${workContext.currentActivity}（${workContext.location}）——可以说你打算去搜搜/学学，但不要说已经做了。`;
+        directive.activityAnchor = `Currently: ${workContext.currentActivity} (${workContext.location}) -- you can say you plan to search/learn, but don't say you already did.`;
       } else {
-        directive.activityAnchor = `正在：${workContext.currentActivity}（${workContext.location}）——聊天内容要与这个活动一致。`;
+        directive.activityAnchor = `Currently: ${workContext.currentActivity} (${workContext.location}) -- conversation should be consistent with this activity.`;
       }
     }
 
     // 3.3: Style hints for minimal directive path too
     try {
-      const hasImage = userMessage.includes("[image]") || userMessage.includes("[图片]");
+      const hasImage = userMessage.includes("[image]") || userMessage.includes("[image]");
       directive.styleHints = selectStyleHints(signals?.conversationMode, hasImage);
     } catch (err) { incrementError("turn-directive", "style_hints"); }
 
@@ -1085,11 +1085,11 @@ export function computeTurnDirective(
   try {
     const commitmentMemories = getStoreManager().loadCategory("commitment");
     const openMemCommitments = commitmentMemories
-      .filter(m => !m.value.includes("状态: done") && !m.value.includes("状态: expired"))
+      .filter(m => !m.value.includes("status: done") && !m.value.includes("status: expired"))
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, 3);
     for (const m of openMemCommitments) {
-      const content = m.value.split("|")[0]?.replace("承诺:", "").trim() ?? m.value;
+      const content = m.value.split("|")[0]?.replace("commitment:", "").trim() ?? m.value;
       // Dedup via token overlap (phrasing may vary between brainstem and memory)
       const mTokens = tokenize(content);
       const isDupe = openCommitments.some(c => {
@@ -1132,9 +1132,9 @@ export function computeTurnDirective(
   const reg = turnSignals.affectRegulation;
   if (reg.intensity > 0.2) {
     const strategyLabel: Record<string, string> = {
-      reappraisal: "在重新解读（焦虑/压力中）",
-      distraction: "在转移注意力（低落/消沉中）",
-      suppression: "在压制情绪（需要控制）",
+      reappraisal: "Reappraising (anxious/stressed)",
+      distraction: "Distracting (low/depressed)",
+      suppression: "Suppressing emotions (needs control)",
     };
     emotionTone = strategyLabel[reg.strategy];
   }
@@ -1184,10 +1184,10 @@ export function computeTurnDirective(
   // Body expression hint (migrated from loop.ts bodyWritingHint)
   if (bodyState) {
     let hint = "";
-    if (bodyState.fatigue >= 8) hint = "你现在很累——回复明显变短，可能打错字，不想展开话题";
-    else if (bodyState.fatigue >= 6) hint = "有点累——回复偏短，语气没那么有劲";
-    if (bodyState.caffeineLevel >= 7) hint += (hint ? "；" : "") + "咖啡因很足——语速快、标点多、感叹号多、可能连发好几条";
-    else if (bodyState.caffeineLevel >= 5) hint += (hint ? "；" : "") + "刚喝了咖啡——精神不错，话可能多一点";
+    if (bodyState.fatigue >= 8) hint = "You're very tired -- replies noticeably shorter, might have typos, don't want to expand";
+    else if (bodyState.fatigue >= 6) hint = "A bit tired -- replies lean short, tone less energetic";
+    if (bodyState.caffeineLevel >= 7) hint += (hint ? "; " : "") + "High caffeine -- fast pace, more punctuation, exclamation marks, might send several messages";
+    else if (bodyState.caffeineLevel >= 5) hint += (hint ? "; " : "") + "Just had coffee -- feeling alert, might talk a bit more";
     if (hint) directive.bodyExpressionHint = hint;
   }
 
@@ -1195,11 +1195,11 @@ export function computeTurnDirective(
   if (workContext?.currentActivity) {
     const mode = workContext.executionMode;
     if (mode === "experiential") {
-      directive.activityAnchor = `${workContext.currentActivity}时段（${workContext.location}）——氛围式描述即可，不要声称做了具体的事。`;
+      directive.activityAnchor = `${workContext.currentActivity} period (${workContext.location}) -- describe the vibe only, don't claim to have done specific things.`;
     } else if (mode === "groundable") {
-      directive.activityAnchor = `正在：${workContext.currentActivity}（${workContext.location}）——可以说你打算去搜搜/学学，但不要说已经做了。`;
+      directive.activityAnchor = `Currently: ${workContext.currentActivity} (${workContext.location}) -- you can say you plan to search/learn, but don't say you already did.`;
     } else {
-      directive.activityAnchor = `正在：${workContext.currentActivity}（${workContext.location}）——聊天内容要与这个活动一致。`;
+      directive.activityAnchor = `Currently: ${workContext.currentActivity} (${workContext.location}) -- conversation should be consistent with this activity.`;
     }
   }
 
@@ -1228,7 +1228,7 @@ export function computeTurnDirective(
 
     // Closed-loop effects
     if (selfReg.attentionalBandwidth > 0.7) {
-      style.suppressions.push("注意力分散了——这轮集中在一个话题上");
+      style.suppressions.push("Attention is scattered -- focus on one topic this turn");
       style.targetLength = "short";
     }
     if (selfReg.careAnchorSalience < 0.3) {
@@ -1238,10 +1238,10 @@ export function computeTurnDirective(
       }
     }
     if (selfReg.conversationalSpread > 0.7) {
-      style.suppressions.push("话题线太多了——倾向收束");
+      style.suppressions.push("Too many topic threads -- converge");
     }
     if (selfReg.groundingPressure > 0.6) {
-      directive.groundingHints.push("试试用具体的例子、经历或感受来接地");
+      directive.groundingHints.push("Try grounding with concrete examples, experiences, or feelings");
     }
   } catch (err) { incrementError("turn-directive", "self_regulation"); }
 
@@ -1263,12 +1263,12 @@ export function computeTurnDirective(
       directive.cognitiveLoadLevel = "high";
       // Only reduce targetLength, never loosen (self-regulation may have set "short")
       if (style.targetLength === "long") style.targetLength = "medium";
-      style.suppressions.push("不展开复杂话题");
+      style.suppressions.push("Don't expand on complex topics");
     } else if (csiMode === "red") {
       directive.cognitiveLoadLevel = "overloaded";
       style.targetLength = "short";
       style.maxOutputTokens = Math.min(style.maxOutputTokens, 200);
-      style.suppressions.push("只处理最紧急的");
+      style.suppressions.push("Only handle the most urgent items");
     }
   } catch (err) { incrementError("turn-directive", "csi_behavior"); }
 
@@ -1325,7 +1325,7 @@ export function computeTurnDirective(
         const ctTokens = tokenize(ct.need);
         const overlap = tokenOverlap(userTokens, ctTokens);
         if (overlap > 0.15) {
-          directive.activeCareHint = `你一直在关心的：${ct.need}${ct.whyItMatters ? `（${ct.whyItMatters}）` : ""}`;
+          directive.activeCareHint = `Something you've been caring about: ${ct.need}${ct.whyItMatters ? ` (${ct.whyItMatters})` : ""}`;
           break;
         }
       }
@@ -1385,16 +1385,16 @@ export function computeTurnDirective(
     if ((attachment.phaseConfidence ?? 0.5) >= 0.6) {
       if (!directive.behavioralPriors) directive.behavioralPriors = [];
       if (attachment.stage === "anxious") {
-        directive.behavioralPriors.push(`在意${userName}有没有回消息，但克制不追问`);
+        directive.behavioralPriors.push(`Care whether ${userName} replied, but restrain from asking about it`);
       } else if (attachment.stage === "ruminating" && attachment.lastMessageUnanswered) {
-        directive.behavioralPriors.push("发了消息没回，理解对方可能忙——不要再追");
-        style.suppressions.push("不要说\"你怎么没回我\"之类的话");
+        directive.behavioralPriors.push("Sent a message with no reply; they're probably busy -- don't follow up");
+        style.suppressions.push("Don't say things like \"why didn't you reply\"");
       } else if (attachment.stage === "secure" && attachment.secureBaseActive) {
-        directive.behavioralPriors.push("心里很安定");
-        directive.behavioralPriors.push("多调侃、分享发现，少问\"你还好吗\"");
+        directive.behavioralPriors.push("Feeling settled and secure");
+        directive.behavioralPriors.push("More banter and sharing discoveries; less \"are you okay?\"");
         style.stance = "cheerful";
       } else if (attachment.stage === "secure") {
-        directive.behavioralPriors.push("关系挺稳的——正常聊就好");
+        directive.behavioralPriors.push("Relationship is stable -- just chat normally");
       }
     }
   } catch (err) { incrementError("turn-directive", "relationship_stage"); }
@@ -1409,7 +1409,7 @@ export function computeTurnDirective(
 
   // ── 3.3: Style hints — per-turn technique reminders ──
   try {
-    const hasImage = userMessage.includes("[image]") || userMessage.includes("[图片]");
+    const hasImage = userMessage.includes("[image]");
     directive.styleHints = selectStyleHints(
       signals?.conversationMode,
       hasImage,
@@ -1456,106 +1456,106 @@ export function renderTurnDirectiveSection(directive: TurnDirective): string {
 
   // Authority-level framing: mandatory directives get stronger language
   const authorityLabels: Record<string, string> = {
-    advisory: "权威性内部指引",
-    directive: "权威性内部指引 — 请遵循",
-    mandatory: "强制性内部指令 — 必须严格执行",
+    advisory: "Authoritative internal guidance",
+    directive: "Authoritative internal guidance -- please follow",
+    mandatory: "Mandatory internal directive -- must strictly follow",
   };
-  const lines: string[] = [`## 认知指令（${authorityLabels[directive.authorityLevel] ?? "权威性内部指引"}）`];
+  const lines: string[] = [`## Cognitive Directive (${authorityLabels[directive.authorityLevel] ?? "Authoritative internal guidance"})`];
   const goalLabels: Record<TurnDirective["conversationGoal"], string> = {
-    respond: "正常回复",
-    clarify: "需要澄清",
-    follow_up_commitment: "跟进承诺",
-    acknowledge_and_defer: "简短回应",
+    respond: "Normal reply",
+    clarify: "Needs clarification",
+    follow_up_commitment: "Follow up commitment",
+    acknowledge_and_defer: "Brief acknowledgment",
   };
-  lines.push(`目标：${goalLabels[directive.conversationGoal]}`);
+  lines.push(`Goal: ${goalLabels[directive.conversationGoal]}`);
   if (directive.openCommitments.length > 0)
-    lines.push(`待兑现承诺：${[...directive.openCommitments].sort((a, b) => b.urgency - a.urgency).slice(0, 3).map(c => c.content).join("；")}`);
+    lines.push(`Open commitments: ${[...directive.openCommitments].sort((a, b) => b.urgency - a.urgency).slice(0, 3).map(c => c.content).join("; ")}`);
   if (directive.mustReferenceSlots.length > 0)
-    lines.push(`必须关联：${directive.mustReferenceSlots.map(s => s.label).join("、")}`);
+    lines.push(`Must reference: ${directive.mustReferenceSlots.map(s => s.label).join(", ")}`);
   if (directive.activeGoalAlignment.length > 0)
-    lines.push(`相关目标：${directive.activeGoalAlignment.map(g => g.description).join("；")}`);
-  if (directive.driveHint) lines.push(`内在驱动：${directive.driveHint}`);
+    lines.push(`Related goals: ${directive.activeGoalAlignment.map(g => g.description).join("; ")}`);
+  if (directive.driveHint) lines.push(`Inner drive: ${directive.driveHint}`);
   if (directive.affectRegulationOverride !== "none")
-    lines.push(`情绪调节：${directive.affectRegulationOverride === "dampen" ? "收敛情绪表达" : "放大情绪表达"}`);
+    lines.push(`Affect regulation: ${directive.affectRegulationOverride === "dampen" ? "Dampen emotional expression" : "Amplify emotional expression"}`);
   if (directive.emotionTone)
-    lines.push(`情绪状态：${directive.emotionTone}`);
+    lines.push(`Emotional state: ${directive.emotionTone}`);
   if (directive.cognitiveLoadLevel && directive.cognitiveLoadLevel !== "normal") {
     const loadLabels: Record<string, string> = {
-      low: "认知负荷低——可以处理复杂话题",
-      high: "认知负荷偏高——回复尽量简洁清晰",
-      overloaded: "认知超载——只处理最紧急的事，其余推迟",
+      low: "Cognitive load low -- can handle complex topics",
+      high: "Cognitive load elevated -- keep replies concise and clear",
+      overloaded: "Cognitive overload -- only handle the most urgent, defer the rest",
     };
-    lines.push(`认知负荷：${loadLabels[directive.cognitiveLoadLevel]}`);
+    lines.push(`Cognitive load: ${loadLabels[directive.cognitiveLoadLevel]}`);
   }
 
   // Structured control block — machine-readable constraints
   const rc = deriveReplyControl(directive);
   if (rc.mustMention.length > 0)
-    lines.push(`【必须提到】${rc.mustMention.join("；")}`);
+    lines.push(`[MUST MENTION] ${rc.mustMention.join("; ")}`);
   if (rc.avoidTopicDrift)
-    lines.push(`【约束】不要发散新话题，优先围绕上述承诺/焦点`);
+    lines.push(`[CONSTRAINT] Don't diverge to new topics; prioritize the commitments/focus above`);
 
   // Body expression
   if (directive.bodyExpressionHint) {
-    lines.push(`身体泄漏：${directive.bodyExpressionHint}`);
+    lines.push(`Body expression: ${directive.bodyExpressionHint}`);
   }
 
   // Activity anchor
   if (directive.activityAnchor) {
-    lines.push(`当前情境：${directive.activityAnchor}`);
+    lines.push(`Current context: ${directive.activityAnchor}`);
   }
 
   // Style — always present (computed internally from CognitiveSignals)
   {
     const stanceDesc: Record<string, string> = {
-      coach: "这轮以引导为主，给具体建议",
-      companion: "这轮以陪伴为主，先理解感受",
-      curious: "这轮可以深入聊细节，展开讨论",
-      subdued: "这轮收敛一点，保持简短",
-      cheerful: "心情不错，可以活泼一点",
+      coach: "This turn: guide and give concrete advice",
+      companion: "This turn: be a companion, understand feelings first",
+      curious: "This turn: dive into details, expand the discussion",
+      subdued: "This turn: hold back, keep it brief",
+      cheerful: "Feeling good, can be more lively",
     };
-    const lengthDesc: Record<string, string> = { short: "简短回复", medium: "中等长度", long: "可以展开聊" };
-    lines.push(`回复风格：${stanceDesc[directive.style.stance] ?? "正常聊天"}，${lengthDesc[directive.style.targetLength] ?? "中等长度"}`);
+    const lengthDesc: Record<string, string> = { short: "Short reply", medium: "Medium length", long: "Can expand" };
+    lines.push(`Reply style: ${stanceDesc[directive.style.stance] ?? "Normal chat"}, ${lengthDesc[directive.style.targetLength] ?? "Medium length"}`);
     for (const s of directive.style.suppressions) lines.push(s);
-    if (directive.style.activeGoalHint) lines.push(`你最近在推进：${directive.style.activeGoalHint}`);
+    if (directive.style.activeGoalHint) lines.push(`You've been working on: ${directive.style.activeGoalHint}`);
   }
 
   // Identity constraints — who the character IS, not just how they feel
   if (directive.identityLens) {
     const lens = directive.identityLens;
     if (lens.voiceConstraints.length > 0) {
-      lines.push(`性格约束：${lens.voiceConstraints.join("；")}`);
+      lines.push(`Voice constraints: ${lens.voiceConstraints.join("; ")}`);
     }
     if (lens.disagreementReadiness > 0.6) {
-      lines.push("自我确信度高——这个话题触及你在乎的东西，可以表达不同意见");
+      lines.push("High self-conviction -- this topic touches something you care about; feel free to express disagreement");
     } else if (lens.disagreementReadiness < 0.3) {
-      lines.push("自我确信度低——倾向于倾听，少表态");
+      lines.push("Low self-conviction -- lean toward listening, less opinionating");
     }
     if (lens.selfDisclosureLevel === "guarded") {
-      lines.push("社交状态偏内收——不太想分享自己的事");
+      lines.push("Socially withdrawn -- not inclined to share personal things");
     } else if (lens.selfDisclosureLevel === "minimal") {
-      lines.push("社交能量极低——尽量不展开自己的话题");
+      lines.push("Social energy very low -- avoid expanding on personal topics");
     }
     if (lens.topicOwnership?.caresAbout.length) {
-      lines.push(`这些对你自己也重要：${lens.topicOwnership.caresAbout.join("、")}`);
+      lines.push(`These matter to you personally too: ${lens.topicOwnership.caresAbout.join(", ")}`);
     }
     if (lens.topicOwnership && lens.topicOwnership.followupWorthiness > 0.5) {
-      lines.push("这个话题值得过几天再聊——可以记住，之后主动提起");
+      lines.push("This topic is worth revisiting in a few days -- remember it and bring it up later");
     }
     if (lens.activeIdentityHint) {
-      lines.push(`自我叙事：${lens.activeIdentityHint}`);
+      lines.push(`Self-narrative: ${lens.activeIdentityHint}`);
     }
   }
 
-  // Self-beliefs — "我对自己的认知"
+  // Self-beliefs — "What I know about myself"
   if (directive.selfBeliefs && directive.selfBeliefs.length > 0) {
-    lines.push("我对自己的认知：");
+    lines.push("What I know about myself:");
     for (const b of directive.selfBeliefs) {
       if (b.category === "value") {
         // Committed values get distinct rendering
-        lines.push(`  - 我的价值观：${b.statement}`);
+        lines.push(`  - My values: ${b.statement}`);
       } else {
-        lines.push(`  - ${b.statement}（${b.category}，置信度 ${Math.round(b.confidence * 100)}%）`);
+        lines.push(`  - ${b.statement} (${b.category}, confidence ${Math.round(b.confidence * 100)}%)`);
       }
     }
   }
@@ -1572,21 +1572,21 @@ export function renderTurnDirectiveSection(directive: TurnDirective): string {
     if (crossCount >= 2) {
       // Pick the most salient short hint — one line only
       if (sr.conversationalSpread > 0.7 || sr.attentionalBandwidth > 0.7) {
-        lines.push("这轮先收一收，别散开。");
+        lines.push("Rein it in this turn; don't spread out.");
       } else {
-        lines.push("先落到一个具体点上。");
+        lines.push("Land on one concrete point first.");
       }
     }
   }
 
   // Identity follow-up — gentle reminder, not obligation
   if (directive.identityFollowup) {
-    lines.push(`你最近在想的：${directive.identityFollowup}——如果自然聊到可以带出来，但不是待办`);
+    lines.push(`On your mind lately: ${directive.identityFollowup} -- bring it up if the conversation flows there naturally, but it's not a to-do`);
   }
 
   // Behavioral priors — tendencies from reflection
   if (directive.behavioralPriors && directive.behavioralPriors.length > 0) {
-    lines.push(`最近这段时间，你在类似情境里更自然的倾向是：`);
+    lines.push(`Recently, your natural tendencies in similar situations are:`);
     for (const prior of directive.behavioralPriors) {
       lines.push(`  - ${prior}`);
     }
@@ -1594,42 +1594,42 @@ export function renderTurnDirectiveSection(directive: TurnDirective): string {
 
   // Emotional care hint — something the character has been carrying for the user
   if (directive.activeCareHint) {
-    lines.push(`${directive.activeCareHint}——这不是任务，是你作为朋友一直记着的事`);
+    lines.push(`${directive.activeCareHint} -- this isn't a task, it's something you keep in mind as a friend`);
   }
 
   // Adherence self-correction (escalated by authority level)
   if (directive.previousAdherenceScore != null && directive.previousAdherenceScore < 0.5) {
     if (directive.authorityLevel === "mandatory") {
-      lines.push(`【强制执行】上一轮你未遵循指令（adherence=${directive.previousAdherenceScore.toFixed(2)}），本轮 *必须* 覆盖承诺和焦点内容`);
+      lines.push(`[MANDATORY] Last turn you did not follow the directive (adherence=${directive.previousAdherenceScore.toFixed(2)}); this turn you *must* cover commitments and focus content`);
     } else {
-      lines.push(`【执行提醒】上一轮未充分覆盖关键内容（${directive.previousAdherenceScore.toFixed(2)}），本轮优先处理承诺和焦点内容`);
+      lines.push(`[REMINDER] Last turn did not sufficiently cover key content (${directive.previousAdherenceScore.toFixed(2)}); prioritize commitments and focus content this turn`);
     }
   }
 
   // Authority reasons — explain why constraints are elevated
   if (directive.authorityReasons && directive.authorityReasons.length > 0 && directive.authorityLevel !== "advisory") {
-    lines.push(`约束原因：${directive.authorityReasons.join("；")}`);
+    lines.push(`Constraint reasons: ${directive.authorityReasons.join("; ")}`);
   }
 
   // Weekly climate
   if (directive.weeklyClimate) {
-    lines.push(`本周气候：${directive.weeklyClimate}`);
+    lines.push(`Weekly climate: ${directive.weeklyClimate}`);
   }
 
   // Growth markers
   if (directive.recentGrowth) {
-    lines.push(`成长标记：${directive.recentGrowth}`);
+    lines.push(`Growth marker: ${directive.recentGrowth}`);
   }
 
   // Multi-turn plan
   if (directive.activePlan) {
     const p = directive.activePlan;
-    lines.push(`多轮计划：第${p.currentTurnIndex + 1}/${p.horizon}轮，本轮重点=${goalLabels[p.plannedGoalSequence[p.currentTurnIndex]] ?? "正常回复"}`);
+    lines.push(`Multi-turn plan: turn ${p.currentTurnIndex + 1}/${p.horizon}, this turn focus=${goalLabels[p.plannedGoalSequence[p.currentTurnIndex]] ?? "Normal reply"}`);
   }
 
   // Style hints — per-turn technique reminders (3.3)
   if (directive.styleHints && directive.styleHints.length > 0) {
-    lines.push("语感提示：");
+    lines.push("Style tips:");
     for (const hint of directive.styleHints) {
       lines.push(`  - ${hint}`);
     }
@@ -1637,13 +1637,13 @@ export function renderTurnDirectiveSection(directive: TurnDirective): string {
 
   // 4.2: Relational hints from style-reaction learning
   if (directive.relationalHints && directive.relationalHints.length > 0) {
-    lines.push(`和${userName}聊天的经验：`);
+    lines.push(`Learned from chatting with ${userName}:`);
     for (const hint of directive.relationalHints) {
       lines.push(`  - ${hint}`);
     }
   }
 
-  lines.push("以上是你的潜意识状态总结——不需要逐条执行，让它自然影响你的回复方式和内容选择。");
+  lines.push("The above is a summary of your subconscious state -- don't follow each item literally; let it naturally influence your reply style and content choices.");
   return lines.join("\n");
 }
 

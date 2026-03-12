@@ -27,7 +27,7 @@ export function setupTestEnvironment(): TestEnv {
   fs.writeFileSync(
     path.join(statePath, "emotion-state.json"),
     JSON.stringify({
-      mood: "平静",
+      mood: "calm",
       cause: "test",
       energy: 5,
       valence: 5,

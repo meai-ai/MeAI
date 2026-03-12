@@ -649,26 +649,26 @@ async function generateMicroThought(
 
   // Epistemic language constraint by anchor
   let toneHint = "";
-  if (anchor === "inferred") toneHint = "用推测的语气（可能、感觉、好像）。";
-  if (anchor === "speculative") toneHint = "用假设的语气（如果、会不会、说不定）。";
+  if (anchor === "inferred") toneHint = "Use speculative tone (maybe, seems like, might).";
+  if (anchor === "speculative") toneHint = "Use hypothetical tone (if, could it be, perhaps).";
 
   const perspectiveHint = hasSelf
-    ? `你是${charName}。用「我」的视角，用一句话说说你现在在想什么。`
-    : "用一句话描述这个想法。";
+    ? `You are ${charName}. From "I" perspective, say in one sentence what you're thinking right now.`
+    : "Describe this thought in one sentence.";
 
-  const prompt = `当前脑中活跃的概念：${cluster.labels.join("、")}
-${cluster.grounding.length > 0 ? `相关记忆/目标：${cluster.grounding[0].type}:${cluster.grounding[0].id}` : ""}
+  const prompt = `Currently active concepts in mind: ${cluster.labels.join(", ")}
+${cluster.grounding.length > 0 ? `Related memory/goal: ${cluster.grounding[0].type}:${cluster.grounding[0].id}` : ""}
 ${perspectiveHint}${toneHint}
-要求：15-30字，一句话。不要解释，直接说。`;
+Requirements: 15-30 characters, one sentence. No explanation, just say it.`;
 
   let content: string;
   // Cortex unified budget: check verbalize slot before LLM call
   if (cortexBudgetCheck && !cortexBudgetCheck("verbalize", 110)) {
-    content = `[${cluster.labels.slice(0, 3).join("、")}]的事`;
+    content = `[${cluster.labels.slice(0, 3).join(", ")}]`;
   } else {
     try {
       content = await claudeText({
-        system: `你是${charName}的内心独白生成器。输出一句简短的内心想法。`,
+        system: `You are ${charName}'s inner monologue generator. Output one brief inner thought.`,
         prompt,
         model: "fast",
         timeoutMs: 15_000,
@@ -678,7 +678,7 @@ ${perspectiveHint}${toneHint}
       if (content.length === 0) return null;
     } catch {
       // Fallback: use labels
-      content = `[${cluster.labels.slice(0, 3).join("、")}]的事`;
+      content = `[${cluster.labels.slice(0, 3).join(", ")}]`;
     }
   }
 
@@ -688,7 +688,7 @@ ${perspectiveHint}${toneHint}
   const overlap = contentTokens.filter(t => labelTokens.includes(t)).length / Math.max(1, contentTokens.length);
   if (overlap < 0.15 && content.length > 10) {
     // LLM hallucinated a different topic — use fallback
-    content = `[${cluster.labels.slice(0, 3).join("、")}]的事`;
+    content = `[${cluster.labels.slice(0, 3).join(", ")}]`;
   }
 
   const trigger = detectTrigger(cluster, state);
@@ -918,9 +918,9 @@ async function evaluateActGate(
     }
     try {
       const hour = new Date().getHours();
-      const sanityPrompt = `想法：${thought.content}\n目标：${target.id}（${target.type}）\n触发：${thought.trigger}\n依据：${thought.grounding[0]?.type ?? "无"}\n当前时间：${hour}时\n对话中：${ctx.isConversationActive() ? "是" : "否"}`;
+      const sanityPrompt = `Thought: ${thought.content}\nTarget: ${target.id} (${target.type})\nTrigger: ${thought.trigger}\nBasis: ${thought.grounding[0]?.type ?? "none"}\nCurrent time: ${hour}:00\nIn conversation: ${ctx.isConversationActive() ? "yes" : "no"}`;
       const sanityResult = await claudeText({
-        system: "判断现在主动联系或执行某个行为是否合适。只回答 YES 或 NO。",
+        system: "Judge whether it's appropriate to proactively reach out or perform an action right now. Only answer YES or NO.",
         prompt: sanityPrompt,
         model: "fast",
         timeoutMs: 10_000,
@@ -1043,33 +1043,33 @@ async function createHypotheticalNode(
 
   if (personConcept) {
     strategy = "plan";
-    templateLabel = `${graph.nodes[personConcept]?.label ?? personConcept}的计划`;
+    templateLabel = `Plan for ${graph.nodes[personConcept]?.label ?? personConcept}`;
     hypotheticalId = normalizeId(`${personConcept}-plan`);
   } else if (goalGrounding) {
     strategy = "next_step";
-    templateLabel = `${goalGrounding.id}的下一步`;
+    templateLabel = `Next step for ${goalGrounding.id}`;
     hypotheticalId = normalizeId(`${goalGrounding.id}-next`);
     initialActivation = 0.1; // seed from goal drive
   } else if (winner.avgU > 0.5) {
     strategy = "resolution";
-    templateLabel = `解决${mainLabel}`;
+    templateLabel = `Resolve ${mainLabel}`;
     hypotheticalId = normalizeId(`${winner.nodes[0]}-resolution`);
   } else if (winner.avgV > 0.3 && winner.grounding.length > 0) {
     // Consequence: what happens if this positive trend continues
     strategy = "consequence";
-    templateLabel = `${mainLabel}之后会怎样`;
+    templateLabel = `What happens after ${mainLabel}`;
     hypotheticalId = normalizeId(`${winner.nodes[0]}-consequence`);
   } else if (winner.avgV < -0.3) {
     // What-if: what if the negative state were resolved
     strategy = "what_if";
-    templateLabel = `如果${mainLabel}解决了`;
+    templateLabel = `What if ${mainLabel} were resolved`;
     hypotheticalId = normalizeId(`${winner.nodes[0]}-whatif`);
   } else if (winner.nodes.length >= 3) {
     // Combination: merge two cluster concepts into a new idea
     const l1 = graph.nodes[winner.nodes[0]]?.label ?? "";
     const l2 = graph.nodes[winner.nodes[1]]?.label ?? "";
     strategy = "combination";
-    templateLabel = `${l1}和${l2}的交集`;
+    templateLabel = `Intersection of ${l1} and ${l2}`;
     // Prevent combo-of-combo chains: strip existing -combo suffixes before joining
     const n0 = winner.nodes[0].replace(/-combo.*$/, "");
     const n1 = winner.nodes[1].replace(/-combo.*$/, "");
@@ -1083,13 +1083,13 @@ async function createHypotheticalNode(
   // LLM-generated label (fall back to template on error/timeout)
   let label = templateLabel;
   try {
-    const prompt = `当前概念簇：${winner.labels.join("、")}
-策略：${strategy}
-模板：${templateLabel}
+    const prompt = `Current concept cluster: ${winner.labels.join(", ")}
+Strategy: ${strategy}
+Template: ${templateLabel}
 
-用一个简短的名词短语（3-8字）描述这个假设性想法。直接输出短语，不要解释。`;
+Describe this hypothetical thought as a short noun phrase (3-8 words). Output the phrase directly, no explanation.`;
     const llmLabel = await claudeText({
-      system: "你是概念命名器。只输出一个简短名词短语。",
+      system: "You are a concept namer. Output only one short noun phrase.",
       prompt,
       model: "fast",
       timeoutMs: 8_000,
@@ -1279,14 +1279,11 @@ function computeThoughtBudgetLimit(
 
 const HIGH_RISK_KEYWORDS = [
   // Financial
-  "投资", "股票", "基金", "理财", "交易", "加密", "比特币", "期货",
-  "invest", "stock", "crypto", "trading", "finance",
+  "invest", "stock", "crypto", "trading", "finance", "fund", "portfolio", "futures",
   // Medical
-  "诊断", "处方", "药物", "治疗", "症状", "疾病", "手术",
-  "diagnos", "prescri", "medic", "treatment", "symptom",
+  "diagnos", "prescri", "medic", "treatment", "symptom", "disease", "surgery",
   // Legal
-  "法律", "诉讼", "合同", "法规", "版权", "侵权",
-  "legal", "lawsuit", "contract", "copyright",
+  "legal", "lawsuit", "contract", "copyright", "litigation", "infringement",
 ];
 
 function isHighRiskContent(labels: string[], content: string): boolean {

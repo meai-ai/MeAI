@@ -39,9 +39,9 @@ export function runValueFormationTests(): TestSuite {
     {
       // Write 3+ exemplars of the same type with quality >= 0.8
       const exemplars = [
-        { id: "ex_1", topic: "工作压力", behaviorType: "cared", behaviorPattern: "先追问具体处境，回应了情绪", evidence: { situationSnippet: "...", responseSnippet: "..." }, quality: 0.85, createdAt: Date.now() - 10 * 86400000 },
-        { id: "ex_2", topic: "家庭矛盾", behaviorType: "cared", behaviorPattern: "先追问具体处境", evidence: { situationSnippet: "...", responseSnippet: "..." }, quality: 0.9, createdAt: Date.now() - 7 * 86400000 },
-        { id: "ex_3", topic: "考试焦虑", behaviorType: "cared", behaviorPattern: "先追问具体处境，提起了之前的相关细节", evidence: { situationSnippet: "...", responseSnippet: "..." }, quality: 0.82, createdAt: Date.now() - 3 * 86400000 },
+        { id: "ex_1", topic: "work pressure", behaviorType: "cared", behaviorPattern: "asked about specific situation first, acknowledged the emotion", evidence: { situationSnippet: "...", responseSnippet: "..." }, quality: 0.85, createdAt: Date.now() - 10 * 86400000 },
+        { id: "ex_2", topic: "family conflict", behaviorType: "cared", behaviorPattern: "asked about specific situation first", evidence: { situationSnippet: "...", responseSnippet: "..." }, quality: 0.9, createdAt: Date.now() - 7 * 86400000 },
+        { id: "ex_3", topic: "exam anxiety", behaviorType: "cared", behaviorPattern: "asked about specific situation first, brought up related past details", evidence: { situationSnippet: "...", responseSnippet: "..." }, quality: 0.82, createdAt: Date.now() - 3 * 86400000 },
       ];
       fs.writeFileSync(
         path.join(env.statePath, "exemplars.json"),
@@ -67,8 +67,8 @@ export function runValueFormationTests(): TestSuite {
         path.join(env.statePath, "opinions.json"),
         JSON.stringify({
           opinions: [{
-            topic: "关心朋友",
-            position: "关心要从具体处境出发",
+            topic: "caring about friends",
+            position: "care should start from specific situations",
             confidence: 0.8,
             status: "held",
             evolvedAt: Date.now() - 45 * 86400000,
@@ -257,7 +257,7 @@ export function runValueFormationTests(): TestSuite {
             lastReinforced: Date.now(),
             stabilityScore: 0.8,
             promotionReadiness: 0.9,
-            displayLabel: "在关系中倾向真实暴露自己",
+            displayLabel: "tends toward authentic self-disclosure in relationships",
             status: "active",
           }],
           lastScanAt: Date.now(),
@@ -265,7 +265,7 @@ export function runValueFormationTests(): TestSuite {
           promotedValueIds: [],
           emergingValues: [{
             candidateId: "vc_30d",
-            displayLabel: "在关系中倾向真实暴露自己",
+            displayLabel: "tends toward authentic self-disclosure in relationships",
             domain: "honesty",
             promotedAt: Date.now() - 15 * 86400000,
             lastReinforcedAt: Date.now(),
@@ -369,7 +369,7 @@ export function runValueFormationTests(): TestSuite {
             lastReinforced: Date.now() - 5 * 86400000, // recent reinforcement so it doesn't get archived
             stabilityScore: 0.5,
             promotionReadiness: 0.8,
-            displayLabel: "沟通倾向从具体处境出发",
+            displayLabel: "communication tends to start from specific situations",
             status: "active",
           }],
           lastScanAt: Date.now(),
@@ -420,7 +420,7 @@ export function runValueFormationTests(): TestSuite {
             lastReinforced: Date.now() - 35 * 86400000, // 35d ago = stale
             stabilityScore: 0.3,
             promotionReadiness: 0.3,
-            displayLabel: "轻松感来自用幽默化解",
+            displayLabel: "lightness comes from using humor to defuse",
             status: "active",
           }],
           lastScanAt: Date.now(),
@@ -428,7 +428,7 @@ export function runValueFormationTests(): TestSuite {
           promotedValueIds: [],
           emergingValues: [{
             candidateId: "vc_stale",
-            displayLabel: "轻松感来自用幽默化解",
+            displayLabel: "lightness comes from using humor to defuse",
             domain: "playfulness",
             promotedAt: Date.now() - 35 * 86400000,
             lastReinforcedAt: Date.now() - 35 * 86400000,
@@ -564,7 +564,7 @@ export function runValueFormationTests(): TestSuite {
             lastReinforced: now - 5 * 86400000,
             stabilityScore: 0.75,
             promotionReadiness: 0.85,
-            displayLabel: "在关系中倾向真实暴露自己",
+            displayLabel: "tends toward authentic self-disclosure in relationships",
             status: "active",
           }],
           lastScanAt: now,
@@ -572,7 +572,7 @@ export function runValueFormationTests(): TestSuite {
           promotedValueIds: [],
           emergingValues: [{
             candidateId: "vc_e2e",
-            displayLabel: "在关系中倾向真实暴露自己",
+            displayLabel: "tends toward authentic self-disclosure in relationships",
             domain: "honesty",
             promotedAt: now - 50 * 86400000, // already promoted to emerging 50d ago
             lastReinforcedAt: now - 5 * 86400000,
@@ -594,7 +594,7 @@ export function runValueFormationTests(): TestSuite {
 
         tests.push(assert(
           "end_to_end_60d_committed",
-          birthState.called === true && birthState.label.includes("真实暴露自己"),
+          birthState.called === true && birthState.label.includes("authentic self-disclosure"),
           `committed=${birthState.called}, label=${birthState.label.slice(0, 30)}`,
         ));
       } finally {
@@ -618,7 +618,7 @@ export function runValueFormationTests(): TestSuite {
             lastReinforced: now - 5 * 86400000,
             stabilityScore: 0.5,
             promotionReadiness: 0.5,
-            displayLabel: "关心人要从具体处境出发",
+            displayLabel: "caring for people should start from specific situations",
             status: "active",
           }],
           lastScanAt: now,
@@ -631,7 +631,7 @@ export function runValueFormationTests(): TestSuite {
         };
         fs.writeFileSync(path.join(env8.statePath, "value-formation.json"), JSON.stringify(ceState));
 
-        addStrongCounterEvidence(env8.statePath, "你刚才说的太笼统了，能不能具体一点");
+        addStrongCounterEvidence(env8.statePath, "What you just said was too vague, can you be more specific?");
 
         const after = readJsonSafe<ValueFormationState>(
           path.join(env8.statePath, "value-formation.json"),

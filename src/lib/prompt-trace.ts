@@ -106,7 +106,7 @@ export function getCodeVersion(): string {
 export function hashTemplate(label: string, system: string): string {
   const skeleton = system
     .replace(/\d{4}-\d{2}-\d{2}/g, "DATE")
-    .replace(/\d{1,2}[点时:]\d{0,2}/g, "TIME")
+    .replace(/\d{1,2}[:]\d{0,2}/g, "TIME")
     .replace(/\d+(\.\d+)?%/g, "PCT")
     .slice(0, 500);
   return createHash("sha1").update(label + "\n" + skeleton).digest("hex").slice(0, 12);

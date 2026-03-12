@@ -175,7 +175,7 @@ export function runProvenanceAuditTests(): TestSuite {
         { timestamp: Date.now() - 1 * 86400000, category: "memory:knowledge", distribution: { observed: 5, inferred: 0, narrative: 2, untagged: 0, total: 7, narrativeRatio: 0.29 } },
       ];
       const warnings1 = checkDriftTrend(history1);
-      const hasTrendWarning1 = warnings1.some(w => w.includes("连续3次上升"));
+      const hasTrendWarning1 = warnings1.some(w => w.includes("rising 3 consecutive"));
 
       // 3 consecutive rises SHOULD warn
       const history2: ProvenanceDriftEntry[] = [
@@ -184,7 +184,7 @@ export function runProvenanceAuditTests(): TestSuite {
         { timestamp: Date.now() - 1 * 86400000, category: "memory:knowledge", distribution: { observed: 5, inferred: 0, narrative: 3, untagged: 0, total: 8, narrativeRatio: 0.38 } },
       ];
       const warnings2 = checkDriftTrend(history2);
-      const hasTrendWarning2 = warnings2.some(w => w.includes("连续3次上升"));
+      const hasTrendWarning2 = warnings2.some(w => w.includes("rising 3 consecutive"));
 
       tests.push(assert(
         "drift_trend_requires_3_consecutive_rises",

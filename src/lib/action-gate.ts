@@ -75,9 +75,9 @@ const MAX_DAILY_SOCIAL_POSTS = 5;
 /** Sensitive content patterns — self-harm, credentials, personal info */
 const SENSITIVE_PATTERNS = [
   // Self-harm
-  /(?:自杀|自残|割腕|跳楼|不想活|想死|suicide|self.?harm)/i,
+  /(?:suicide|self.?harm|kill myself|end my life)/i,
   // Credentials
-  /(?:password|密码|api.?key|secret|token|credential)[:\s=]/i,
+  /(?:password|api.?key|secret|token|credential)[:\s=]/i,
   // Personal info (SSN, credit card patterns)
   /\b\d{3}-?\d{2}-?\d{4}\b/,             // SSN
   /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/, // credit card

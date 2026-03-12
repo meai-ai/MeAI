@@ -20,7 +20,7 @@ export function runTurnReplayTests(): TestSuite {
     initTurnDirective(env.statePath);
 
     // Test with null turnSignals (brainstem unavailable) — minimal directive
-    const directive = computeTurnDirective("你好", null);
+    const directive = computeTurnDirective("hello", null);
 
     // 1. directive_has_conversation_goal
     tests.push(assert(
@@ -30,11 +30,11 @@ export function runTurnReplayTests(): TestSuite {
     ));
 
     // 2. short_message_gets_short_target
-    const shortDirective = computeTurnDirective("嗯", null);
+    const shortDirective = computeTurnDirective("ok", null);
     tests.push(assert(
       "short_message_gets_short_target",
       shortDirective.style.targetLength === "short" || shortDirective.style.targetLength === "medium",
-      `targetLength for "嗯": "${shortDirective.style.targetLength}"`,
+      `targetLength for "ok": "${shortDirective.style.targetLength}"`,
     ));
 
     // 3. self_regulation_within_bounds (when present)
@@ -99,7 +99,7 @@ export function runTurnReplayTests(): TestSuite {
       };
       // Use a long message to try to trigger "long" targetLength
       const yellowDirective = computeTurnDirective(
-        "我最近在想一个很复杂的问题，关于人生的意义和我们存在的本质，你觉得我们每个人都有固定的命运吗，还是说一切都是随机的，我们能通过自己的努力改变命运呢？",
+        "I've been thinking about a really complex question lately, about the meaning of life and the nature of our existence. Do you think each of us has a fixed destiny, or is everything random and we can change our fate through our own efforts?",
         mockTurnSignals,
       );
       tests.push(assert(

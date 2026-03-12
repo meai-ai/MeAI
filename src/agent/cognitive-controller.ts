@@ -48,7 +48,7 @@ export interface RetrievalPolicy {
   buckets: {
     emotional: number;
     knowledge: number;
-    yuan: number;
+    character: number;
     insights: number;
     commitment: number;
   };
@@ -67,10 +67,10 @@ export interface RetrievalPolicy {
 export function classifyConversationMode(text: string): string {
   const lower = text.toLowerCase();
 
-  if (/code|bug|api|deploy|git|server|模型|算法|架构|代码|技术|python|react|agent/.test(lower)) return "technical";
-  if (/难过|伤心|压力|焦虑|开心|兴奋|烦|累|害怕|生气|感动|心情|哭|孤独|想家|委屈/.test(lower)) return "emotional";
-  if (/意义|人生|自由意志|存在|价值观|信仰|哲学|思考|本质/.test(lower)) return "philosophical";
-  if (/计划|打算|准备|要不要|周末|旅行|行程|安排|怎么办/.test(lower)) return "planning";
+  if (/code|bug|api|deploy|git|server|model|algorithm|architecture|technical|python|react|agent/.test(lower)) return "technical";
+  if (/sad|upset|stress|anxiety|happy|excited|annoyed|tired|afraid|angry|moved|mood|cry|lonely|homesick/.test(lower)) return "emotional";
+  if (/meaning|life|free.?will|existence|values|belief|philosophy|thinking|essence/.test(lower)) return "philosophical";
+  if (/plan|intend|prepare|should.?i|weekend|travel|itinerary|arrange|what.?to.?do/.test(lower)) return "planning";
   return "casual";
 }
 
@@ -135,43 +135,43 @@ export function gatherSignals(
 
 const RETRIEVAL_POLICIES: Record<string, RetrievalPolicy> = {
   subdued: {
-    buckets: { emotional: 4, knowledge: 2, yuan: 1, insights: 2, commitment: 1 },
+    buckets: { emotional: 4, knowledge: 2, character: 1, insights: 2, commitment: 1 },
     categoryBonus: {},
     scoreWeights: { semantic: 1, bm25: 1, recency: 1.2 },
     softPenalty: { knowledge: 0.3 },
     crossCategoryAnchors: 1,
   },
   emotional: {
-    buckets: { emotional: 10, knowledge: 2, yuan: 3, insights: 2, commitment: 2 },
-    categoryBonus: { emotional: 0.3, yuan: 0.15 },
+    buckets: { emotional: 10, knowledge: 2, character: 3, insights: 2, commitment: 2 },
+    categoryBonus: { emotional: 0.3, character: 0.15 },
     scoreWeights: { semantic: 0.8, bm25: 0.8, recency: 1.5 },
     softPenalty: { knowledge: 0.4 },
     crossCategoryAnchors: 1,
   },
   technical: {
-    buckets: { emotional: 2, knowledge: 8, yuan: 2, insights: 3, commitment: 1 },
+    buckets: { emotional: 2, knowledge: 8, character: 2, insights: 3, commitment: 1 },
     categoryBonus: { knowledge: 0.3 },
     scoreWeights: { semantic: 1.3, bm25: 1.2, recency: 0.7 },
     softPenalty: { emotional: 0.5 },
     crossCategoryAnchors: 1,
   },
   planning: {
-    buckets: { emotional: 3, knowledge: 5, yuan: 3, insights: 4, commitment: 5 },
-    categoryBonus: { knowledge: 0.2, yuan: 0.15, commitment: 0.3 },
+    buckets: { emotional: 3, knowledge: 5, character: 3, insights: 4, commitment: 5 },
+    categoryBonus: { knowledge: 0.2, character: 0.15, commitment: 0.3 },
     scoreWeights: { semantic: 1.0, bm25: 1.2, recency: 1.3 },
     softPenalty: { emotional: 0.5 },
     crossCategoryAnchors: 1,
   },
   philosophical: {
-    buckets: { emotional: 4, knowledge: 3, yuan: 5, insights: 3, commitment: 2 },
-    categoryBonus: { yuan: 0.3, emotional: 0.1 },
+    buckets: { emotional: 4, knowledge: 3, character: 5, insights: 3, commitment: 2 },
+    categoryBonus: { character: 0.3, emotional: 0.1 },
     scoreWeights: { semantic: 0.9, bm25: 0.9, recency: 1.0 },
     softPenalty: {},
     crossCategoryAnchors: 2,
   },
   casual: {
-    buckets: { emotional: 5, knowledge: 3, yuan: 4, insights: 3, commitment: 3 },
-    categoryBonus: { yuan: 0.2 },
+    buckets: { emotional: 5, knowledge: 3, character: 4, insights: 3, commitment: 3 },
+    categoryBonus: { character: 0.2 },
     scoreWeights: { semantic: 1.0, bm25: 1.0, recency: 1.2 },
     softPenalty: {},
     crossCategoryAnchors: 1,
@@ -186,10 +186,10 @@ export function computeRetrievalPolicy(style: { stance: string; priorityCategori
   const primary = style.priorityCategories[0];
   if (primary === "emotional") return RETRIEVAL_POLICIES.emotional;
   if (primary === "knowledge") {
-    // Distinguish technical vs planning by checking if yuan is also prioritized
-    if (style.priorityCategories.includes("yuan")) return RETRIEVAL_POLICIES.planning;
+    // Distinguish technical vs planning by checking if character is also prioritized
+    if (style.priorityCategories.includes("character")) return RETRIEVAL_POLICIES.planning;
     return RETRIEVAL_POLICIES.technical;
   }
-  if (primary === "yuan") return RETRIEVAL_POLICIES.philosophical;
+  if (primary === "character") return RETRIEVAL_POLICIES.philosophical;
   return RETRIEVAL_POLICIES.casual;
 }

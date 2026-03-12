@@ -370,21 +370,21 @@ export class CortexManager {
     }
 
     const charName = getCharacter().name;
-    const system = `你是${charName}的语义压缩器。从碎片中提取概念、关系和显著性线索。
-输出严格JSON：{ "concepts": [...], "relations": [...], "salienceHints": [...] }
-concepts: { label, definition, parentCandidate?, confidence(0-1), evidenceSpans(碎片索引数组) }
+    const system = `You are ${charName}'s semantic compressor. Extract concepts, relations, and salience cues from fragments.
+Output strict JSON: { "concepts": [...], "relations": [...], "salienceHints": [...] }
+concepts: { label, definition, parentCandidate?, confidence(0-1), evidenceSpans(fragment index array) }
 relations: { source, target, type("semantic"|"causal"|"co_occurrence"), weight(0-1), confidence(0-1) }
 salienceHints: { concept, salience(0-1), reason }
-只输出JSON，不要其他文字。`;
+Output only JSON, no other text.`;
 
     const abstraction = input.targetAbstractionLevel ?? "mixed";
-    const prompt = `已有概念: ${input.existingConcepts.join(", ") || "（无）"}
-抽象层级: ${abstraction}
+    const prompt = `Existing concepts: ${input.existingConcepts.join(", ") || "(none)"}
+Abstraction level: ${abstraction}
 
-碎片:
+Fragments:
 ${input.fragments.map((f, i) => `[${i}] (${f.source}) ${f.text}`).join("\n")}
 
-提取新概念和关系：`;
+Extract new concepts and relations:`;
 
     const startMs = this.clock.nowMs();
     try {
@@ -441,30 +441,30 @@ ${input.fragments.map((f, i) => `[${i}] (${f.source}) ${f.text}`).join("\n")}
     const charName = getCharacter().name;
     const policySuffix = this.getC2PromptSuffix();
     const validTargetIds = DEFAULT_ACT_TARGETS.map(t => t.id);
-    const system = `你是${charName}的行动提案生成器。根据目标、信念和约束，提出候选行动。
-允许的行动类型: ${input.constraints.actionWhitelist.join(", ")}
-允许的target值: ${validTargetIds.join(", ")}（target字段必须是这些值之一，或省略）
-禁止的行动: ${input.constraints.blockedActions.join(", ") || "无"}
-最多${input.constraints.maxSteps}个候选。
+    const system = `You are ${charName}'s action proposal generator. Propose candidate actions based on goals, beliefs, and constraints.
+Allowed action types: ${input.constraints.actionWhitelist.join(", ")}
+Allowed target values: ${validTargetIds.join(", ")} (target field must be one of these, or omitted)
+Blocked actions: ${input.constraints.blockedActions.join(", ") || "none"}
+Max ${input.constraints.maxSteps} candidates.
 
-输出严格JSON：{ "candidates": [...], "reasoningPaths": [...] }
-candidates: { action(必须在白名单内), target(必须在允许列表内或省略)?, description, rationale, expectedBenefit(定性描述), risk(定性风险描述) }
+Output strict JSON: { "candidates": [...], "reasoningPaths": [...] }
+candidates: { action(must be in whitelist), target(must be in allowed list or omitted)?, description, rationale, expectedBenefit(qualitative), risk(qualitative risk) }
 reasoningPaths: { steps: string[], conclusion: string }
-只输出JSON，不要其他文字。${policySuffix}`;
+Output only JSON, no other text.${policySuffix}`;
 
-    const prompt = `目标: ${input.goal.description} (进度: ${(input.goal.progress * 100).toFixed(0)}%)
-里程碑: ${input.goal.milestones.join("; ") || "无"}
+    const prompt = `Goal: ${input.goal.description} (progress: ${(input.goal.progress * 100).toFixed(0)}%)
+Milestones: ${input.goal.milestones.join("; ") || "none"}
 
-信念状态:
-- 社交接受度: ${input.beliefSnapshot.worldState.socialReceptivity.toFixed(2)}
-- 话题活力: ${input.beliefSnapshot.worldState.topicViability.toFixed(2)}
-- 时间段: ${input.beliefSnapshot.worldState.timeOfDay}
-- 能量: ${input.beliefSnapshot.selfState.energy.toFixed(2)}, 社交能量: ${input.beliefSnapshot.selfState.social_energy.toFixed(2)}
+Belief state:
+- Social receptivity: ${input.beliefSnapshot.worldState.socialReceptivity.toFixed(2)}
+- Topic viability: ${input.beliefSnapshot.worldState.topicViability.toFixed(2)}
+- Time of day: ${input.beliefSnapshot.worldState.timeOfDay}
+- Energy: ${input.beliefSnapshot.selfState.energy.toFixed(2)}, Social energy: ${input.beliefSnapshot.selfState.social_energy.toFixed(2)}
 
-近期结果:
-${input.beliefSnapshot.recentOutcomes.map(o => `- ${o.action}: ${o.outcome}`).join("\n") || "无"}
+Recent outcomes:
+${input.beliefSnapshot.recentOutcomes.map(o => `- ${o.action}: ${o.outcome}`).join("\n") || "none"}
 
-生成候选行动：`;
+Generate candidate actions:`;
 
     const startMs = this.clock.nowMs();
     try {
@@ -544,27 +544,27 @@ ${input.beliefSnapshot.recentOutcomes.map(o => `- ${o.action}: ${o.outcome}`).jo
     }
 
     const charName = getCharacter().name;
-    const system = `你是${charName}的结果提取器。从原始体验中提取结构化结果。
-输出严格JSON：{ "outcome", "fields", "confidence", "anomalyTags", "surpriseScore" }
+    const system = `You are ${charName}'s outcome extractor. Extract structured outcomes from raw experiences.
+Output strict JSON: { "outcome", "fields", "confidence", "anomalyTags", "surpriseScore" }
 outcome: "positive" | "negative" | "neutral"
 fields: { replyReceived(bool), replyLatencyMinutes(number), sentiment(-1|0|1), newInfoDiscovered(bool), goalProgressDelta(number 0-1) }
 confidence: 0-1
-anomalyTags: 异常标签字符串数组
-surpriseScore: 0-1 (预期偏差程度)
-只输出JSON，不要其他文字。`;
+anomalyTags: anomaly tag string array
+surpriseScore: 0-1 (degree of deviation from expectation)
+Output only JSON, no other text.`;
 
-    const prompt = `行动: ${input.action.type}${input.action.target ? ` → ${input.action.target}` : ""}: ${input.action.description}
+    const prompt = `Action: ${input.action.type}${input.action.target ? ` -> ${input.action.target}` : ""}: ${input.action.description}
 
-原始体验:
-${input.rawExperience.transcript ?? input.rawExperience.toolOutput ?? "(无)"}
-${input.rawExperience.timingMs ? `耗时: ${input.rawExperience.timingMs}ms` : ""}
+Raw experience:
+${input.rawExperience.transcript ?? input.rawExperience.toolOutput ?? "(none)"}
+${input.rawExperience.timingMs ? `Duration: ${input.rawExperience.timingMs}ms` : ""}
 
-预期结果:
-- 回复概率: ${input.expectedOutcome.replyReceived?.toFixed(2) ?? "未知"}
-- 情感分布: ${input.expectedOutcome.sentiment?.map(s => s.toFixed(2)).join(",") ?? "未知"}
-- 目标进展: ${input.expectedOutcome.goalProgressDelta?.toFixed(2) ?? "未知"}
+Expected outcome:
+- Reply probability: ${input.expectedOutcome.replyReceived?.toFixed(2) ?? "unknown"}
+- Sentiment distribution: ${input.expectedOutcome.sentiment?.map(s => s.toFixed(2)).join(",") ?? "unknown"}
+- Goal progress: ${input.expectedOutcome.goalProgressDelta?.toFixed(2) ?? "unknown"}
 
-提取结构化结果：`;
+Extract structured outcome:`;
 
     const startMs = this.clock.nowMs();
     try {
@@ -632,29 +632,29 @@ ${input.rawExperience.timingMs ? `耗时: ${input.rawExperience.timingMs}ms` : "
     }
 
     const charName = getCharacter().name;
-    const system = `你是${charName}的不确定性模拟器。在低信心情况下想象可能的结果。
-输出严格JSON：{ "outcomes", "confidence", "reasoning", "caveats" }
-outcomes: 数组，每项 { description, probability(0-1，概率之和=1), latentEffects: { socialReceptivity, topicViability, goalMomentum }, selfEffects: { energyDelta, socialEnergyDelta, safetyMarginDelta } }
+    const system = `You are ${charName}'s uncertainty simulator. Imagine possible outcomes in low-confidence situations.
+Output strict JSON: { "outcomes", "confidence", "reasoning", "caveats" }
+outcomes: array, each { description, probability(0-1, probabilities must sum to 1), latentEffects: { socialReceptivity, topicViability, goalMomentum }, selfEffects: { energyDelta, socialEnergyDelta, safetyMarginDelta } }
 confidence: 0-1
-reasoning: 模拟推理过程的简要说明
-caveats: 注意事项字符串数组
-只输出JSON，不要其他文字。`;
+reasoning: brief explanation of the simulation reasoning
+caveats: string array of caveats
+Output only JSON, no other text.`;
 
-    const prompt = `当前信念:
-- CSI模式: ${input.belief.internal.csiMode}
-- 社交接受度: ${input.belief.latent.socialReceptivity.toFixed(2)}
-- 话题活力: ${input.belief.latent.topicViability.toFixed(2)}
-- 目标动量: ${input.belief.latent.goalMomentum.toFixed(2)}
+    const prompt = `Current beliefs:
+- CSI mode: ${input.belief.internal.csiMode}
+- Social receptivity: ${input.belief.latent.socialReceptivity.toFixed(2)}
+- Topic viability: ${input.belief.latent.topicViability.toFixed(2)}
+- Goal momentum: ${input.belief.latent.goalMomentum.toFixed(2)}
 
-自我状态:
-- 能量: ${input.selfState.energy.toFixed(2)}, 疲劳: ${input.selfState.fatigue.toFixed(2)}
-- 社交能量: ${input.selfState.social_energy.toFixed(2)}
-- 安全边际: ${input.selfState.safety_margin.toFixed(2)}
+Self state:
+- Energy: ${input.selfState.energy.toFixed(2)}, Fatigue: ${input.selfState.fatigue.toFixed(2)}
+- Social energy: ${input.selfState.social_energy.toFixed(2)}
+- Safety margin: ${input.selfState.safety_margin.toFixed(2)}
 
-计划行动: ${input.action}${input.target ? ` → ${input.target}` : ""}
-背景: ${input.context}
+Planned action: ${input.action}${input.target ? ` -> ${input.target}` : ""}
+Context: ${input.context}
 
-模拟2-4种可能结果：`;
+Simulate 2-4 possible outcomes:`;
 
     const startMs = this.clock.nowMs();
     try {
@@ -734,19 +734,19 @@ caveats: 注意事项字符串数组
     const dist = this.policy.preferredActionDistribution;
     const distEntries = Object.entries(dist).filter(([, v]) => Math.abs(v - 0.5) > 0.05);
     if (distEntries.length > 0) {
-      parts.push("\n\n偏好的行动分布:");
+      parts.push("\n\nPreferred action distribution:");
       for (const [action, rate] of distEntries.sort((a, b) => b[1] - a[1])) {
-        parts.push(`- ${action}: 接受率${(rate * 100).toFixed(0)}%`);
+        parts.push(`- ${action}: acceptance rate ${(rate * 100).toFixed(0)}%`);
       }
     }
     if (this.policy.goodExamples.length > 0) {
-      parts.push("\n\n好的例子:");
+      parts.push("\n\nGood examples:");
       for (const ex of this.policy.goodExamples) {
-        parts.push(`- 目标「${ex.goal}」→ ${ex.action} → ${ex.outcome}`);
+        parts.push(`- Goal "${ex.goal}" -> ${ex.action} -> ${ex.outcome}`);
       }
     }
     if (this.policy.avoidPatterns.length > 0) {
-      parts.push("\n避免:");
+      parts.push("\nAvoid:");
       for (const p of this.policy.avoidPatterns) {
         parts.push(`- ${p}`);
       }

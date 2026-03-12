@@ -143,19 +143,16 @@ function sanitizeAITone(text: string): string | null {
   cleaned = cleaned.replace(/^\d+\.\s+/gm, "");
   cleaned = cleaned.replace(/```[\s\S]*?```/g, "");
 
-  cleaned = cleaned.replace(/[，。！]?\s*(有什么需要|需要帮忙|随时找我|随时联系|可以帮你|告诉我哦|找我就好)[^。！？\n]*[。！]?\s*$/g, "");
+  // Remove trailing service-oriented phrases
+  cleaned = cleaned.replace(/[.!]?\s*(let me know if you need|feel free to reach out|I'm here to help|don't hesitate to ask|happy to help)[^.!\?\n]*[.!]?\s*$/gi, "");
 
   const aiPatterns = [
-    /作为(一个?)AI/i,
-    /我(是|不是)(一个?)(系统|工具|助手|机器人|语言模型|AI)/,
-    /我的(功能|能力|系统|架构|训练|知识库|模型)/,
-    /我的信息(获取|来源|更新)/,
-    /能力(边界|范围|限制)/,
-    /没有(实时|联网|上网|浏览|刷新闻|搜索).{0,6}(能力|功能)/,
-    /(拿不出|给不了|提供不了|没办法给你).{0,8}(出处|链接|来源|原文)/,
-    /这个问题问得(好|很好|不错)/,
-    /综上所述|总结一下|首先.*其次.*最后/,
-    /先(踩个刹车|说明一下|澄清一下).{0,20}(不是.*系统|不是.*AI|我的信息|实时)/,
+    // AI-tone patterns
+    /as an? AI/i,
+    /I('m| am) (not )?(a |an )?(system|tool|assistant|chatbot|language model|AI)/i,
+    /my (capabilities|abilities|training|knowledge base|model)/i,
+    /in summary|to summarize|firstly.*secondly.*finally/i,
+    /that's a (great|good|excellent) question/i,
   ];
 
   const aiPatternCount = aiPatterns.filter((p) => p.test(cleaned)).length;

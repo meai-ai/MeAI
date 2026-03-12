@@ -681,13 +681,11 @@ export class OutcomeTracker {
 
   static extractCommitments(text: string): string[] {
     const patterns = [
-      /我会(.{2,30})/g,
       /I'll (.{2,40})/gi,
-      /明天(.{2,20})/g,
-      /稍后(.{2,20})/g,
-      /下次(.{2,20})/g,
-      /等一下(.{2,20})/g,
-      /回头(.{2,20})/g,
+      /I will (.{2,40})/gi,
+      /I'm going to (.{2,40})/gi,
+      /let me (.{2,40})/gi,
+      /I can (.{2,40})/gi,
     ];
     const results: string[] = [];
     for (const pattern of patterns) {

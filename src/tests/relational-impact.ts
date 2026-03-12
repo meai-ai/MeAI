@@ -38,8 +38,8 @@ export function runRelationalImpactTests(): TestSuite {
     {
       recordObservation({
         type: "emotional_opening",
-        description: "对方似乎开始表达更多的脆弱面",
-        possibleTrigger: "可能和最近的安全感积累有关",
+        description: "The other person seems to be expressing more vulnerability",
+        possibleTrigger: "Possibly related to accumulated sense of safety recently",
         causalConfidence: 0.35,
         significance: 0.5,
         timestamp: Date.now(),
@@ -58,15 +58,15 @@ export function runRelationalImpactTests(): TestSuite {
       const ctx = formatReciprocityContext();
       tests.push(assert(
         "reciprocity_context_rendered",
-        ctx != null && ctx.includes("我们关系中的变化"),
-        `ctx includes header: ${ctx?.includes("我们关系中的变化")}`,
+        ctx != null && ctx.includes("Changes observed in our relationship"),
+        `ctx includes header: ${ctx?.includes("Changes observed in our relationship")}`,
       ));
     }
 
     // 4. soft_signal_no_directive_words
     {
       const ctx = formatReciprocityContext();
-      const directiveWords = /可以|建议|试试|应该|必须|需要/;
+      const directiveWords = /can|suggest|try|should|must|need/i;
       tests.push(assert(
         "soft_signal_no_directive_words",
         ctx == null || !directiveWords.test(ctx),
@@ -79,8 +79,8 @@ export function runRelationalImpactTests(): TestSuite {
       // Record same observation again — should be deduped
       recordObservation({
         type: "emotional_opening",
-        description: "对方似乎开始表达更多的脆弱面",
-        possibleTrigger: "可能和最近的安全感积累有关",
+        description: "The other person seems to be expressing more vulnerability",
+        possibleTrigger: "Possibly related to accumulated sense of safety recently",
         causalConfidence: 0.35,
         significance: 0.5,
         timestamp: Date.now(),
@@ -120,8 +120,8 @@ export function runRelationalImpactTests(): TestSuite {
         path.join(env.statePath, "opinions.json"),
         JSON.stringify({
           opinions: [{
-            topic: "AI与创造力",
-            position: "AI能增强而不是替代人的创造力",
+            topic: "AI and creativity",
+            position: "AI can enhance rather than replace human creativity",
             confidence: 0.8,
             status: "held",
             evolvedAt: Date.now() - 45 * 24 * 60 * 60 * 1000,
@@ -132,7 +132,7 @@ export function runRelationalImpactTests(): TestSuite {
       const stanceCtx = formatPersonalStanceContext();
       tests.push(assert(
         "personal_stance_with_mature_opinion",
-        stanceCtx != null && stanceCtx.includes("AI与创造力"),
+        stanceCtx != null && stanceCtx.includes("AI and creativity"),
         `stance=${stanceCtx?.slice(0, 60) ?? "null"}`,
       ));
     }
@@ -159,8 +159,8 @@ export function runRelationalImpactTests(): TestSuite {
           path.join(env3.statePath, "opinions.json"),
           JSON.stringify({
             opinions: [{
-              topic: "教育方式",
-              position: "自由探索对成长很重要",
+              topic: "education approach",
+              position: "free exploration is important for growth",
               confidence: 0.85,
               status: "held",
               evolvedAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
@@ -169,7 +169,7 @@ export function runRelationalImpactTests(): TestSuite {
         );
 
         const stanceCtx = formatPersonalStanceContext();
-        const directiveWords = /可以|建议|试试|应该|必须|需要/;
+        const directiveWords = /can|suggest|try|should|must|need/i;
         tests.push(assert(
           "stance_no_directive_words",
           stanceCtx == null || !directiveWords.test(stanceCtx),

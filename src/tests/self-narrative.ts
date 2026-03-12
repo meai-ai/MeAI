@@ -36,12 +36,12 @@ export function runSelfNarrativeTests(): TestSuite {
       const staleNarrative = {
         current: {
           generatedAt: Date.now() - 8 * 24 * 60 * 60 * 1000, // 8 days ago
-          currentSelfSense: "最近的我似乎在探索什么",
-          emergingDirections: ["方向A"],
-          openQuestions: ["问题1"],
-          recurringThemes: [{ theme: "工作", trajectory: "rising" }],
-          unresolvedTensions: ["张力1"],
-          fragileHypotheses: ["假设1"],
+          currentSelfSense: "Recently I seem to be exploring something",
+          emergingDirections: ["direction A"],
+          openQuestions: ["question 1"],
+          recurringThemes: [{ theme: "work", trajectory: "rising" }],
+          unresolvedTensions: ["tension 1"],
+          fragileHypotheses: ["hypothesis 1"],
         },
         lastAttemptAt: Date.now() - 8 * 24 * 60 * 60 * 1000,
         version: 1,
@@ -66,12 +66,12 @@ export function runSelfNarrativeTests(): TestSuite {
       const freshNarrative = {
         current: {
           generatedAt: Date.now() - 2 * 24 * 60 * 60 * 1000, // 2 days ago
-          currentSelfSense: "最近的我似乎在寻找某种平衡",
-          emergingDirections: ["更多关注内心", "尝试放慢节奏"],
-          openQuestions: ["什么才是真正重要的？"],
-          recurringThemes: [{ theme: "平衡", trajectory: "rising" }],
-          unresolvedTensions: ["效率 vs 从容"],
-          fragileHypotheses: ["也许慢下来反而更好"],
+          currentSelfSense: "Recently I seem to be seeking some kind of balance",
+          emergingDirections: ["pay more attention to inner life", "try slowing down"],
+          openQuestions: ["What is truly important?"],
+          recurringThemes: [{ theme: "balance", trajectory: "rising" }],
+          unresolvedTensions: ["efficiency vs ease"],
+          fragileHypotheses: ["maybe slowing down is actually better"],
         },
         lastAttemptAt: Date.now() - 2 * 24 * 60 * 60 * 1000,
         version: 1,
@@ -85,21 +85,21 @@ export function runSelfNarrativeTests(): TestSuite {
       const ctx = formatSelfNarrativeContext();
       tests.push(assert(
         "fresh_narrative_renders_context",
-        ctx != null && ctx.includes("最近对自己的感觉"),
-        `ctx starts with header: ${ctx?.includes("最近对自己的感觉")}`,
+        ctx != null && ctx.includes("Recent self-sense"),
+        `ctx starts with header: ${ctx?.includes("Recent self-sense")}`,
       ));
 
       tests.push(assert(
         "narrative_includes_open_questions",
-        ctx != null && ctx.includes("还没想清楚的"),
+        ctx != null && ctx.includes("Not yet figured out"),
         "context includes open questions section",
       ));
     }
 
     // 4. empty_openQuestions_not_rendered
-    // Plan: "Mock output 无 openQuestions → reject"
+    // Plan: "Mock output with no openQuestions -> reject"
     // The rejection happens at write-time in maybeUpdateSelfNarrative (requires LLM mock).
-    // Here we verify the render-side: empty openQuestions → "还没想清楚的" section absent.
+    // Here we verify the render-side: empty openQuestions -> "Not yet figured out" section absent.
     {
       const env4 = setupTestEnvironment();
       try {
@@ -107,8 +107,8 @@ export function runSelfNarrativeTests(): TestSuite {
         const noQuestionsNarrative = {
           current: {
             generatedAt: Date.now() - 1 * 24 * 60 * 60 * 1000, // 1 day ago (fresh)
-            currentSelfSense: "最近的我在思考一些事情",
-            emergingDirections: ["某个方向"],
+            currentSelfSense: "Recently I've been thinking about some things",
+            emergingDirections: ["some direction"],
             openQuestions: [], // empty — this should have been rejected at write-time
             recurringThemes: [],
             unresolvedTensions: [],
@@ -125,7 +125,7 @@ export function runSelfNarrativeTests(): TestSuite {
         const ctx = formatSelfNarrativeContext();
         tests.push(assert(
           "empty_openQuestions_not_rendered",
-          ctx != null && !ctx.includes("还没想清楚的"),
+          ctx != null && !ctx.includes("Not yet figured out"),
           "empty openQuestions → section not rendered",
         ));
       } finally {

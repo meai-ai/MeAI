@@ -45,9 +45,9 @@ export function runSimulationTests(): TestSuite {
       // Write exemplars from ~20 days ago (>14d for promotion)
       const exemplars = Array.from({ length: 5 }, (_, i) => ({
         id: `ex_${i}`,
-        topic: "关心朋友",
+        topic: "caring about friends",
         behaviorType: "cared",
-        behaviorPattern: "先追问具体处境",
+        behaviorPattern: "asked about specific situation first",
         evidence: { situationSnippet: "...", responseSnippet: "..." },
         quality: 0.85 + i * 0.02,
         createdAt: now - (20 + i * 2) * DAY_MS,
@@ -57,7 +57,7 @@ export function runSimulationTests(): TestSuite {
       // Stable opinion from 50 days ago
       fs.writeFileSync(path.join(env.statePath, "opinions.json"), JSON.stringify({
         opinions: [{
-          topic: "关心朋友", position: "关心要从具体处境出发", confidence: 0.85,
+          topic: "caring about friends", position: "care should start from specific situations", confidence: 0.85,
           status: "held", evolvedAt: now - 50 * DAY_MS, lastChallenged: now - 20 * DAY_MS, evidence: [],
         }],
       }));
@@ -120,14 +120,14 @@ export function runSimulationTests(): TestSuite {
           vector: { domain: "care", pattern: "empathy", polarity: "prefer", strength: 0.8 },
           source: "exemplar_convergence",
           evidence: [
-            { timestamp: now - 90 * DAY_MS, type: "exemplar", description: "关心", sourceLayer: "relational", weight: 0.8 },
+            { timestamp: now - 90 * DAY_MS, type: "exemplar", description: "caring", sourceLayer: "relational", weight: 0.8 },
           ],
           counterevidence: [],
           firstObserved: now - 120 * DAY_MS,
           lastReinforced: now - 10 * DAY_MS,
           stabilityScore: 0.9,
           promotionReadiness: 0.9,
-          displayLabel: "共情关怀",
+          displayLabel: "empathetic care",
           status: "active",
         }],
         emergingValues: [],
@@ -142,7 +142,7 @@ export function runSimulationTests(): TestSuite {
       fs.writeFileSync(path.join(env.statePath, "value-formation.json"), JSON.stringify(state));
 
       // Add strong counter-evidence with text matching empathy antonym
-      addStrongCounterEvidence(env.statePath, "我发现我其实有时候很冷漠，没有真正共情");
+      addStrongCounterEvidence(env.statePath, "I realized I'm actually quite cold sometimes, not truly empathizing");
 
       const updated = readJsonSafe<any>(path.join(env.statePath, "value-formation.json"), state);
       const ceCount = updated.candidates?.[0]?.counterevidence?.length ?? 0;
@@ -177,12 +177,12 @@ export function runSimulationTests(): TestSuite {
           lastReinforced: now - 35 * DAY_MS, // >30d without reinforcement
           stabilityScore: 0.4,
           promotionReadiness: 0.3,
-          displayLabel: "追问后续",
+          displayLabel: "follow-up inquiry",
           status: "active",
         }],
         emergingValues: [{
           candidateId: "cand_stale",
-          displayLabel: "追问后续",
+          displayLabel: "follow-up inquiry",
           domain: "care",
           promotedAt: now - 40 * DAY_MS,
           lastReinforcedAt: now - 35 * DAY_MS,
@@ -228,10 +228,10 @@ export function runSimulationTests(): TestSuite {
         JSON.stringify({
           current: {
             generatedAt: now - 8 * DAY_MS,
-            currentSelfSense: "测试自我感知",
-            emergingDirections: ["方向A"],
-            openQuestions: ["问题1"],
-            recurringThemes: [{ theme: "测试", trajectory: "stable" }],
+            currentSelfSense: "test self-awareness",
+            emergingDirections: ["direction A"],
+            openQuestions: ["question 1"],
+            recurringThemes: [{ theme: "testing", trajectory: "stable" }],
             unresolvedTensions: [],
             fragileHypotheses: [],
           },
@@ -255,9 +255,9 @@ export function runSimulationTests(): TestSuite {
         JSON.stringify({
           current: {
             generatedAt: now - DAY_MS,
-            currentSelfSense: "新鲜的自我感知",
-            emergingDirections: ["方向B"],
-            openQuestions: ["问题2"],
+            currentSelfSense: "fresh self-awareness",
+            emergingDirections: ["direction B"],
+            openQuestions: ["question 2"],
             recurringThemes: [],
             unresolvedTensions: [],
             fragileHypotheses: [],

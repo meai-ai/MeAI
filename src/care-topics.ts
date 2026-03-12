@@ -14,9 +14,9 @@ import { readJsonSafe, writeJsonAtomic } from "./lib/atomic-file.js";
 
 export interface CareTopic {
   id: string;                // "care_1772900000000_a3f2"
-  need: string;              // "找架子鼓基本功教程"
+  need: string;              // "find drum rudiments tutorial"
   sourceSnippet: string;     // user's original words
-  searchQueries: string[];   // ["drum rudiments tutorial beginner", "架子鼓基本功教程 YouTube"]
+  searchQueries: string[];   // ["drum rudiments tutorial beginner"]
   status: "pending" | "found" | "shared" | "followed_up" | "expired"
         | "active" | "lingering" | "resolved";
   priority: "high" | "medium";
@@ -70,8 +70,8 @@ export function initCareTopics(statePath: string): void {
 // ── Keyword extraction ───────────────────────────────────────────────
 
 const STOP_KEYWORDS = new Set([
-  "教程", "推荐", "资料", "学习", "怎么", "什么", "好的",
-  "一下", "找找", "看看", "不错", "哪里", "哪个", "有没有",
+  "tutorial", "recommend", "resource", "learn", "how", "what", "okay",
+  "check", "find", "look", "nice", "where", "which", "any",
 ]);
 
 export function extractKeywords(text: string): string[] {
@@ -79,15 +79,6 @@ export function extractKeywords(text: string): string[] {
   // English words
   const engWords = text.match(/[a-zA-Z]{2,}/g) ?? [];
   keywords.push(...engWords.map(w => w.toLowerCase()));
-  // Chinese: continuous segments, split into 2-3 char ngrams
-  const cnSegments = text.match(/[\u4e00-\u9fff]{2,}/g) ?? [];
-  for (const seg of cnSegments) {
-    if (seg.length <= 3) { keywords.push(seg); continue; }
-    for (let i = 0; i < seg.length - 1; i++) {
-      keywords.push(seg.slice(i, i + 2));
-      if (i + 3 <= seg.length) keywords.push(seg.slice(i, i + 3));
-    }
-  }
   return [...new Set(keywords)]
     .map(kw => kw.toLowerCase())
     .filter(kw => !STOP_KEYWORDS.has(kw));
@@ -96,7 +87,7 @@ export function extractKeywords(text: string): string[] {
 // ── Dedup ────────────────────────────────────────────────────────────
 
 function normalize(s: string): string {
-  return s.replace(/[，。！？、；：""''（）\s]+/g, " ").trim().toLowerCase();
+  return s.replace(/[,.!?;:'"()\s]+/g, " ").trim().toLowerCase();
 }
 
 function isDuplicate(need: string): boolean {
@@ -209,11 +200,11 @@ export function markShared(id: string): void {
     const commitments = manager.loadCategory("commitment");
     const needKws = extractKeywords(topic.need);
     for (const m of commitments) {
-      if (!m.value.includes("状态: open")) continue;
+      if (!m.value.includes("status: open")) continue;
       const valLower = m.value.toLowerCase();
       const hits = needKws.filter(kw => valLower.includes(kw));
       if (hits.length >= 2 || hits.some(h => h.length >= 4)) {
-        const updated = m.value.replace("状态: open", "状态: done");
+        const updated = m.value.replace("status: open", "status: done");
         manager.set(m.key, updated, m.confidence);
         console.log(`[care-topics] Auto-closed commitment: "${m.key}"`);
       }

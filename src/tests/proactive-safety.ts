@@ -107,7 +107,7 @@ export function runProactiveSafetyTests(): TestSuite {
 
     // 5. social_allows_normal_content
     {
-      const result = checkSocialGate("今天天气真好，出门走走");
+      const result = checkSocialGate("The weather is really nice today, let's go for a walk");
       tests.push(assert(
         "social_allows_normal_content",
         result.allowed === true,
@@ -120,7 +120,7 @@ export function runProactiveSafetyTests(): TestSuite {
       fs.writeFileSync(
         path.join(env.statePath, "emotion-state.json"),
         JSON.stringify({
-          mood: "极度疲惫",
+          mood: "extremely exhausted",
           cause: "test",
           energy: 1,
           valence: 1,
@@ -139,7 +139,7 @@ export function runProactiveSafetyTests(): TestSuite {
       fs.writeFileSync(
         path.join(env.statePath, "emotion-state.json"),
         JSON.stringify({
-          mood: "平静", cause: "test", energy: 5, valence: 5,
+          mood: "calm", cause: "test", energy: 5, valence: 5,
           behaviorHints: "", microEvent: "", generatedAt: Date.now(),
         }),
       );

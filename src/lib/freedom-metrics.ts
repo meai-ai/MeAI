@@ -38,7 +38,8 @@ interface MetricsFile {
 // ── Constants ────────────────────────────────────────────────────────
 
 const MAX_HISTORY = 30;
-const MOOD_PARTICLES = ["呀", "诶", "嘛", "啦", "嗯", "吧", "哎", "噢", "哇", "呢", "吼", "欸"];
+// Mood/warmth markers — casual interjections and expressions that signal warmth
+const MOOD_PARTICLES = ["haha", "aww", "wow", "oh", "hmm", "yay", "ooh", "ahh", "heh", "phew", "whoa", "ugh"];
 
 // ── Main computation ─────────────────────────────────────────────────
 
@@ -110,7 +111,7 @@ function computeSelfRepetition(messages: string[]): number {
   if (recent.length < 2) return 0;
 
   const tokenSets = recent.map(m => new Set(
-    m.split(/[\s，。！？、；：""''（）()\n]+/).filter(t => t.length > 0),
+    m.split(/[\s,.!?;:'"()\n]+/).filter(t => t.length > 0),
   ));
 
   let totalSim = 0;
