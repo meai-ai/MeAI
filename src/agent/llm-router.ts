@@ -31,7 +31,7 @@ export type SendPhotoFn = (photo: Buffer, caption?: string) => Promise<void>;
 export type SendVoiceFn = (audio: Buffer, caption?: string) => Promise<void>;
 export type SendVideoFn = (video: Buffer, caption?: string) => Promise<void>;
 export type SendAudioFn = (audio: Buffer, title?: string, performer?: string) => Promise<void>;
-export type DeleteMessageFn = (messageId: number) => Promise<void>;
+export type DeleteMessageFn = (messageId: number | string) => Promise<void>;
 
 export interface MediaCallbacks {
   sendPhoto: SendPhotoFn | null;
@@ -327,13 +327,11 @@ export async function callClaudeCode(
     const prompt = serializeMessages(messages) + extraContext;
 
     const result = await claudeRun({
-      label: "loop.feedActivity",
       system: fullSystem,
       prompt,
       model: modelChoice,
       timeoutMs: 90_000,
       maxOutputChars: 2_000,
-      warm: true,
     });
 
     if (!result.ok) {

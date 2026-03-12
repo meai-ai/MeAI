@@ -209,7 +209,6 @@ async function extractAndSaveMemories(recentHistory: TranscriptEntry[], tools: T
     .join("\n\n");
 
   const result = await claudeText({
-    label: "post-turn.extractMemories",
     system:
       `You are a memory extractor for ${charName}, a personal AI companion.\n\n` +
       `IMPORTANT CONTEXT: ${charName} is a character with their own simulated life. ` +
@@ -292,7 +291,6 @@ async function postTurnUnderstanding(
 
   try {
     const text = await claudeText({
-      label: "post-turn.understanding",
       system: `You are the post-conversation understanding engine. Analyze a turn of conversation between ${userName} and ${charName}, and extract all signals worth recording.
 
 Conversation:
@@ -636,7 +634,6 @@ export async function preCompactionFlush(sessionLoader: () => TranscriptEntry[],
     } catch (err) { log.warn("failed to load memories for pre-compaction flush", err); }
 
     const result = await claudeText({
-      label: "post-turn.preCompactionFlush",
       system:
         `You are a memory flush agent for ${charName}, a personal AI companion. ` +
         "The conversation below is about to be compacted (summarized and discarded). " +
