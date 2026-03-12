@@ -1315,6 +1315,22 @@ export class AgentLoop {
       content: entry.content,
     }));
 
+    // Annotate the latest user message with current time — prevents time confusion
+    // in long conversations where the system prompt time can feel distant.
+    if (msgs.length > 0) {
+      const lastIdx = msgs.length - 1;
+      const last = msgs[lastIdx];
+      if (last.role === "user" && typeof last.content === "string") {
+        const now = new Date();
+        const localTime = new Date(now.toLocaleString("en-US", { timeZone: getUserTZ() }));
+        const timeStr = `${localTime.getHours()}:${String(localTime.getMinutes()).padStart(2, "0")}`;
+        msgs[lastIdx] = {
+          ...last,
+          content: `[${timeStr}] ${last.content}`,
+        };
+      }
+    }
+
     // Cache the end of the stable history prefix (everything before the current user message).
     // On each turn, the last message is the new user message — everything before it is unchanged
     // from the previous turn, so Anthropic can serve it from cache at 0.1× the normal price.

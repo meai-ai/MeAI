@@ -16,7 +16,7 @@
  * Reading notes saved to ~/Documents/MeAI/reading/
  */
 
-import fs from "node:fs";
+import fs, { appendFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
@@ -29,6 +29,7 @@ import { pstDateStr, getUserTZ } from "./lib/pst-date.js";
 import { generateMusic, isMusicEnabled, mapEmotionToStyle } from "./music.js";
 import { getStoreManager } from "./memory/store-manager.js";
 import { getCharacter, s, renderTemplate } from "./character.js";
+import { fetchYouTubeVideos, fetchPodcastEpisodes, fetchYouTubeTranscript, fetchPodcastTranscript } from "./interests.js";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -58,16 +59,27 @@ function randMs(minMin: number, maxMin: number): number {
 let dataDir = "";
 let projectsDir = "";
 let readingDir = "";
+let watchingDir = "";
+let listeningDir = "";
 let stateFile = "";
+const MEDIA_TRANSCRIPT_MAX_CHARS = 5000;
 
 // ── Types ─────────────────────────────────────────────────────────────
 
-type ActivityType = "vibe_coding" | "deep_read" | "learn" | "compose";
+export type ActivityType = "vibe_coding" | "deep_read" | "learn" | "compose" | "watch" | "listen";
 
 interface ReflectResult {
   summary?: string;
   reaction?: string;
   shareWorthy?: boolean;
+}
+
+/** Artifact produced by a real action */
+export interface ActionArtifact {
+  type: "file" | "url" | "note" | "audio" | "code";
+  path?: string;
+  url?: string;
+  description: string;
 }
 
 interface ActivityResult {
@@ -78,6 +90,62 @@ interface ActivityResult {
   shareWorthy: boolean;    // May naturally come up in conversation about related topics, not force-shared
   outputPath?: string;
   timestamp: number;
+  artifacts?: ActionArtifact[];
+  mediaMeta?: {
+    title: string;
+    sourceName?: string;   // channel / podcast show name
+    url: string;
+    publishedAt?: string;
+    transcriptChars?: number;
+  };
+}
+
+// ── Action Ledger ─────────────────────────────────────────────────────
+// Pure append-only JSONL. Each lifecycle phase is a separate append with the same actionId.
+
+export interface ActionLedgerEntry {
+  actionId: string;
+  timestamp: number;
+  type: ActivityType | "explore" | "reach_out" | "post";
+  title: string;
+  phase: "intent" | "in_progress" | "finished";
+  outcome?: "success" | "failed" | "aborted";
+  source: "interest" | "schedule_grounded" | "schedule_fallback";
+  sourceKey?: string;       // stable grounding key, e.g. "2026-03-06:14-16:pottery"
+  artifacts: ActionArtifact[];
+  durationMs?: number;
+  failureReason?: string;
+}
+
+export function generateActionId(type: string, topic?: string): string {
+  const slug = topic ? "-" + topic.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8) : "";
+  return `${new Date().toISOString().slice(0, 19)}-${type}${slug}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function appendActionLedger(entry: ActionLedgerEntry): void {
+  const ledgerPath = path.join(dataDir, "action-ledger.jsonl");
+  appendFileSync(ledgerPath, JSON.stringify(entry) + "\n");
+}
+
+/** Raw: returns all appended events within the time window. */
+export function loadRecentLedgerRaw(hours = 24): ActionLedgerEntry[] {
+  const ledgerPath = path.join(dataDir, "action-ledger.jsonl");
+  if (!fs.existsSync(ledgerPath)) return [];
+  try {
+    const cutoff = Date.now() - hours * 3600_000;
+    return fs.readFileSync(ledgerPath, "utf-8")
+      .trim().split("\n").filter(Boolean)
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .filter((e): e is ActionLedgerEntry => e !== null && e.timestamp >= cutoff);
+  } catch { return []; }
+}
+
+/** Folded: returns latest phase per actionId (for prompt/display). */
+export function loadRecentLedger(hours = 24): ActionLedgerEntry[] {
+  const raw = loadRecentLedgerRaw(hours);
+  const byId = new Map<string, ActionLedgerEntry>();
+  for (const e of raw) byId.set(e.actionId, e);  // last write wins
+  return [...byId.values()];
 }
 
 interface ActivitiesState {
@@ -90,6 +158,7 @@ interface ActivityChoice {
   topic: string;           // what specifically to do
   reason: string;          // why (for logging + memory)
   fromSchedule: boolean;   // true = fell back to schedule suggestion
+  sourceKey?: string;      // stable grounding key for backoff
 }
 
 // ── State helpers ──────────────────────────────────────────────────────
@@ -336,6 +405,8 @@ export class ActivityScheduler {
     dataDir = config.statePath;
     projectsDir = path.join(config.statePath, "projects");
     readingDir = path.join(config.statePath, "reading");
+    watchingDir = path.join(config.statePath, "watching");
+    listeningDir = path.join(config.statePath, "listening");
     stateFile = path.join(config.statePath, "activities.json");
   }
 
@@ -405,16 +476,40 @@ export class ActivityScheduler {
     console.log(`[activities] Starting: ${choice.type} — "${choice.topic || "(no topic)"}" (${source})`);
     let result: ActivityResult | null = null;
 
+    // Ledger: intent
+    const actionId = generateActionId(choice.type, choice.topic);
+    const ledgerSource: ActionLedgerEntry["source"] = choice.fromSchedule ? "schedule_grounded" : "interest";
+    const ledgerBase = {
+      actionId, type: choice.type as ActionLedgerEntry["type"], title: choice.topic || choice.type,
+      source: ledgerSource, sourceKey: choice.sourceKey, artifacts: [] as ActionArtifact[],
+    };
+    appendActionLedger({ ...ledgerBase, phase: "intent", timestamp: Date.now() });
+
+    const startTime = Date.now();
     try {
+      // Ledger: in_progress
+      appendActionLedger({ ...ledgerBase, phase: "in_progress", timestamp: Date.now() });
       if (choice.type === "vibe_coding") result = await this.doVibeCoding(choice.topic);
       else if (choice.type === "deep_read") result = await this.doDeepRead(choice.topic);
       else if (choice.type === "learn") result = await this.doLearn(choice.topic);
       else if (choice.type === "compose") result = await this.doCompose(choice.topic);
+      else if (choice.type === "watch") result = await this.doWatch(choice.topic);
+      else if (choice.type === "listen") result = await this.doListen(choice.topic);
     } catch (err) {
       console.error(`[activities] ${choice.type} failed:`, err);
+      appendActionLedger({
+        ...ledgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+        failureReason: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startTime,
+      });
     }
 
     if (result) {
+      // Ledger: finished success
+      appendActionLedger({
+        ...ledgerBase, phase: "finished", outcome: "success", timestamp: Date.now(),
+        artifacts: result.artifacts ?? [], durationMs: Date.now() - startTime,
+      });
       state.lastActivityAt = Date.now();
       state.recent = [...state.recent, result].slice(-20);
       saveState(state);
@@ -426,7 +521,7 @@ export class ActivityScheduler {
       );
       saveToMemory(`inner.recent.${Date.now()}`, result.reaction, 0.75);
       // Digest rich learning notes into structured knowledge.* entries
-      if (result.type === "learn" || result.type === "deep_read") {
+      if (["learn", "deep_read", "watch", "listen"].includes(result.type)) {
         digestActivityToMemory(result).catch(err =>
           console.error("[activities] digestActivityToMemory error:", err),
         );
@@ -434,6 +529,11 @@ export class ActivityScheduler {
       console.log(`[activities] Done: ${result.title}`);
       return true;
     }
+    // result is null but no exception -> activity returned nothing
+    appendActionLedger({
+      ...ledgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+      failureReason: "activity returned null", durationMs: Date.now() - startTime,
+    });
     return false;
   }
 
@@ -575,10 +675,12 @@ If yes, tell me what you want to do (be specific).
 If nothing really appeals to you, say NOTHING.
 
 JSON format:
-Have an idea: {"type": "deep_read|learn|vibe_coding|compose", "topic": "what specifically", "reason": "why"}
+Have an idea: {"type": "deep_read|learn|vibe_coding|compose|watch|listen", "topic": "what specifically", "reason": "why"}
 No idea: {"type": "NOTHING"}
 
-compose = write a song or instrumental piece (when you're feeling something strongly and want to express it through music)`;
+compose = write a song or instrumental piece (when you're feeling something strongly and want to express it through music)
+watch = watch a video, find an interesting YouTube video to watch (one with subtitles)
+listen = listen to a podcast, find an episode on a topic that interests you`;
 
     const choice = await runClaudeCode(prompt, os.homedir(), {
       model: "claude-sonnet-4-6",
@@ -593,6 +695,8 @@ compose = write a song or instrumental piece (when you're feeling something stro
       const type = parsed.type.toLowerCase() as string;
       const actType: ActivityType =
         type.includes("compose") ? "compose" :
+        type.includes("watch") ? "watch" :
+        type.includes("listen") ? "listen" :
         type.includes("vibe_coding") ? "vibe_coding" :
         type.includes("learn") ? "learn" : "deep_read";
       console.log(`[activities] Interest-driven: ${actType} — "${parsed.topic}"`);
@@ -616,12 +720,16 @@ compose = write a song or instrumental piece (when you're feeling something stro
         const codingPattern = new RegExp(s().patterns.coding_keywords.join("|"), "i");
         const learningPattern = new RegExp(s().patterns.learning_keywords.join("|"), "i");
         const musicPattern = new RegExp(s().patterns.music_keywords.join("|"), "i");
+        const watchingPattern = /watch|video|youtube|netflix|movie|film|show/i;
+        const listeningPattern = /podcast|listen|audio/i;
+        const isWatching = watchingPattern.test(scheduleActivity);
+        const isListening = listeningPattern.test(scheduleActivity);
         const isReading = readingPattern.test(scheduleActivity);
         const isCoding = codingPattern.test(scheduleActivity);
         const isLearning = learningPattern.test(scheduleActivity);
         const isMusic = musicPattern.test(scheduleActivity);
 
-        const actType: ActivityType = isMusic ? "compose" : isCoding ? "vibe_coding" : isLearning ? "learn" : "deep_read";
+        const actType: ActivityType = isWatching ? "watch" : isListening ? "listen" : isMusic ? "compose" : isCoding ? "vibe_coding" : isLearning ? "learn" : "deep_read";
 
         return {
           type: actType,
@@ -635,7 +743,7 @@ compose = write a song or instrumental piece (when you're feeling something stro
     }
 
     // Final fallback: pick a random type (old behavior)
-    const fallbackTypes: ActivityType[] = ["deep_read", "learn", "vibe_coding", ...(isMusicEnabled() ? ["compose" as ActivityType] : [])];
+    const fallbackTypes: ActivityType[] = ["deep_read", "learn", "vibe_coding", "watch", "listen", ...(isMusicEnabled() ? ["compose" as ActivityType] : [])];
     const avoidType = recentTypes[recentTypes.length - 1];
     const candidates = fallbackTypes.filter(t => t !== avoidType);
     const type = candidates[Math.floor(Math.random() * candidates.length)];
@@ -1090,6 +1198,292 @@ JSON format: {"summary": "...", "reaction": "...", "shareWorthy": true/false}`;
       shareWorthy: reflect.shareWorthy ?? true,
       outputPath: noteFile,
       timestamp: Date.now(),
+    };
+  }
+
+  // ── Activity: Watch (YouTube) ─────────────────────────────────────
+
+  private async doWatch(topic?: string): Promise<ActivityResult | null> {
+    const videos = await fetchYouTubeVideos();
+    if (videos.length === 0) {
+      return {
+        type: "watch", title: "(no videos available)",
+        summary: "No new videos from subscribed channels", reaction: "Waiting for new uploads",
+        shareWorthy: false, timestamp: Date.now(),
+        artifacts: [{ type: "note", description: "empty_feed" }],
+      };
+    }
+
+    // Exclude recently watched URLs (48h, success only)
+    const recentWatched = new Set(
+      loadRecentLedgerRaw(48)
+        .filter(e => e.type === "watch" && e.phase === "finished" && e.outcome === "success")
+        .flatMap(e => e.artifacts.filter(a => a.url).map(a => a.url!)),
+    );
+    const candidates = videos.filter(v => !recentWatched.has(v.url));
+    if (candidates.length === 0) {
+      return {
+        type: "watch", title: "(all recently watched)",
+        summary: "Already watched all subscribed videos", reaction: "Waiting for new videos",
+        shareWorthy: false, timestamp: Date.now(),
+      };
+    }
+
+    // Pick video: topic-matched or random from recent 10
+    let selected = candidates[0];
+    if (topic) {
+      const topicLower = topic.toLowerCase();
+      const scored = candidates.map(v => {
+        const titleText = v.title.toLowerCase();
+        const descText = (v.description ?? "").toLowerCase();
+        const titleHits = topicLower.split(/\s+/).filter(w => w.length > 1 && titleText.includes(w)).length;
+        const descHits = topicLower.split(/\s+/).filter(w => w.length > 1 && descText.includes(w)).length;
+        return { video: v, score: titleHits * 3 + descHits };
+      });
+      const best = scored.sort((a, b) => b.score - a.score)[0];
+      if (best.score > 0) {
+        selected = best.video;
+      } else {
+        selected = candidates.slice(0, 10)[Math.floor(Math.random() * Math.min(10, candidates.length))];
+      }
+    } else {
+      selected = candidates.slice(0, 10)[Math.floor(Math.random() * Math.min(10, candidates.length))];
+    }
+
+    console.log(`[activities] Watching: "${selected.title}" (${selected.channel})`);
+
+    // Fetch transcript
+    let transcript: string;
+    try {
+      transcript = await fetchYouTubeTranscript(selected.url);
+    } catch (err) {
+      console.error(`[activities] Watch transcript fetch error:`, err);
+      return {
+        type: "watch", title: selected.title,
+        summary: "Failed to fetch subtitles", reaction: "Technical issue, will try again later",
+        shareWorthy: false, timestamp: Date.now(),
+        artifacts: [{ type: "url", url: selected.url, description: "fetch_error" }],
+      };
+    }
+
+    if (transcript.length < 50) {
+      return {
+        type: "watch", title: selected.title,
+        summary: "No subtitles available", reaction: "This video has no subtitles",
+        shareWorthy: false, timestamp: Date.now(),
+        artifacts: [{ type: "url", url: selected.url, description: "no_transcript" }],
+      };
+    }
+
+    // LLM summarize + react
+    const char = getCharacter();
+    const truncatedTranscript = transcript.slice(0, MEDIA_TRANSCRIPT_MAX_CHARS);
+    const reflectText = await runClaudeCode(
+      `You are ${char.name}, you just watched a YouTube video.
+
+Title: ${selected.title}
+Channel: ${selected.channel}
+Subtitles (excerpt):
+${truncatedTranscript}
+
+In your own words:
+- What was this video about?
+- What did you think? Any personal reflections?
+- Worth mentioning to ${char.user.name}?
+
+JSON format: {"summary": "...", "reaction": "...", "shareWorthy": true/false}`,
+      os.homedir(),
+      { model: "claude-sonnet-4-6", timeoutMs: 90_000, singleTurn: true },
+    );
+    const reflect = extractJson<ReflectResult>(reflectText, {});
+    const summary = typeof reflect.summary === "string" ? reflect.summary : "Watched a video";
+    const reaction = typeof reflect.reaction === "string" ? reflect.reaction : "Interesting";
+    const shareWorthy = typeof reflect.shareWorthy === "boolean" ? reflect.shareWorthy : false;
+
+    // Save note
+    fs.mkdirSync(watchingDir, { recursive: true });
+    const sanitizedTitle = selected.title.replace(/[^a-zA-Z0-9\s-]/g, "").slice(0, 40).trim().replace(/\s+/g, "-");
+    const noteFile = path.join(watchingDir, `${Date.now()}-${sanitizedTitle}.md`);
+    fs.writeFileSync(noteFile, [
+      `# ${selected.title}`,
+      ``,
+      `**Channel:** ${selected.channel}`,
+      `**URL:** ${selected.url}`,
+      selected.published ? `**Published:** ${selected.published}` : "",
+      `**Transcript length:** ${transcript.length} chars`,
+      ``,
+      `## Summary`,
+      summary,
+      ``,
+      `## My Thoughts`,
+      reaction,
+      ``,
+      `**Worth sharing:** ${shareWorthy ? "yes" : "no"}`,
+    ].filter(Boolean).join("\n"), "utf-8");
+
+    return {
+      type: "watch",
+      title: selected.title,
+      summary,
+      reaction,
+      shareWorthy,
+      outputPath: noteFile,
+      timestamp: Date.now(),
+      artifacts: [
+        { type: "file", path: noteFile, description: selected.title },
+        { type: "url", url: selected.url, description: selected.title },
+      ],
+      mediaMeta: {
+        title: selected.title,
+        sourceName: selected.channel,
+        url: selected.url,
+        publishedAt: selected.published,
+        transcriptChars: transcript.length,
+      },
+    };
+  }
+
+  // ── Activity: Listen (Podcast) ─────────────────────────────────────
+
+  private async doListen(topic?: string): Promise<ActivityResult | null> {
+    const episodes = await fetchPodcastEpisodes();
+    if (episodes.length === 0) {
+      return {
+        type: "listen", title: "(no podcasts available)",
+        summary: "No new episodes from subscribed podcasts", reaction: "Waiting for new episodes",
+        shareWorthy: false, timestamp: Date.now(),
+        artifacts: [{ type: "note", description: "empty_feed" }],
+      };
+    }
+
+    // Exclude recently listened URLs (48h, success only)
+    const recentListened = new Set(
+      loadRecentLedgerRaw(48)
+        .filter(e => e.type === "listen" && e.phase === "finished" && e.outcome === "success")
+        .flatMap(e => e.artifacts.filter(a => a.url).map(a => a.url!)),
+    );
+    const candidates = episodes.filter(ep => !recentListened.has(ep.url));
+    if (candidates.length === 0) {
+      return {
+        type: "listen", title: "(all recently listened)",
+        summary: "Already listened to all subscribed episodes", reaction: "Waiting for new episodes",
+        shareWorthy: false, timestamp: Date.now(),
+      };
+    }
+
+    // Pick episode: topic-matched or random from recent 10
+    let selected = candidates[0];
+    if (topic) {
+      const topicLower = topic.toLowerCase();
+      const scored = candidates.map(ep => {
+        const titleText = ep.title.toLowerCase();
+        const descText = (ep.description ?? "").toLowerCase();
+        const titleHits = topicLower.split(/\s+/).filter(w => w.length > 1 && titleText.includes(w)).length;
+        const descHits = topicLower.split(/\s+/).filter(w => w.length > 1 && descText.includes(w)).length;
+        return { episode: ep, score: titleHits * 3 + descHits };
+      });
+      const best = scored.sort((a, b) => b.score - a.score)[0];
+      if (best.score > 0) {
+        selected = best.episode;
+      } else {
+        selected = candidates.slice(0, 10)[Math.floor(Math.random() * Math.min(10, candidates.length))];
+      }
+    } else {
+      selected = candidates.slice(0, 10)[Math.floor(Math.random() * Math.min(10, candidates.length))];
+    }
+
+    console.log(`[activities] Listening: "${selected.title}" (${selected.show})`);
+
+    // Fetch transcript / show notes
+    let transcript: string;
+    try {
+      transcript = await fetchPodcastTranscript(selected.url);
+    } catch (err) {
+      console.error(`[activities] Listen transcript fetch error:`, err);
+      return {
+        type: "listen", title: selected.title,
+        summary: "Failed to fetch transcript", reaction: "Technical issue, will try again later",
+        shareWorthy: false, timestamp: Date.now(),
+        artifacts: [{ type: "url", url: selected.url, description: "fetch_error" }],
+      };
+    }
+
+    if (transcript.length < 50) {
+      return {
+        type: "listen", title: selected.title,
+        summary: "No transcript available", reaction: "This episode has no readable content",
+        shareWorthy: false, timestamp: Date.now(),
+        artifacts: [{ type: "url", url: selected.url, description: "no_transcript" }],
+      };
+    }
+
+    // LLM summarize + react
+    const char = getCharacter();
+    const truncatedTranscript = transcript.slice(0, MEDIA_TRANSCRIPT_MAX_CHARS);
+    const reflectText = await runClaudeCode(
+      `You are ${char.name}, you just listened to a podcast episode.
+
+Title: ${selected.title}
+Show: ${selected.show}
+${selected.duration ? `Duration: ${selected.duration}` : ""}
+Content (excerpt):
+${truncatedTranscript}
+
+In your own words:
+- What was this episode about?
+- What did you think? Any personal reflections?
+- Worth mentioning to ${char.user.name}?
+
+JSON format: {"summary": "...", "reaction": "...", "shareWorthy": true/false}`,
+      os.homedir(),
+      { model: "claude-sonnet-4-6", timeoutMs: 90_000, singleTurn: true },
+    );
+    const reflect = extractJson<ReflectResult>(reflectText, {});
+    const summary = typeof reflect.summary === "string" ? reflect.summary : "Listened to a podcast";
+    const reaction = typeof reflect.reaction === "string" ? reflect.reaction : "Interesting";
+    const shareWorthy = typeof reflect.shareWorthy === "boolean" ? reflect.shareWorthy : false;
+
+    // Save note
+    fs.mkdirSync(listeningDir, { recursive: true });
+    const sanitizedTitle = selected.title.replace(/[^a-zA-Z0-9\s-]/g, "").slice(0, 40).trim().replace(/\s+/g, "-");
+    const noteFile = path.join(listeningDir, `${Date.now()}-${sanitizedTitle}.md`);
+    fs.writeFileSync(noteFile, [
+      `# ${selected.title}`,
+      ``,
+      `**Show:** ${selected.show}`,
+      `**URL:** ${selected.url}`,
+      selected.duration ? `**Duration:** ${selected.duration}` : "",
+      selected.published ? `**Published:** ${selected.published}` : "",
+      `**Transcript length:** ${transcript.length} chars`,
+      ``,
+      `## Summary`,
+      summary,
+      ``,
+      `## My Thoughts`,
+      reaction,
+      ``,
+      `**Worth sharing:** ${shareWorthy ? "yes" : "no"}`,
+    ].filter(Boolean).join("\n"), "utf-8");
+
+    return {
+      type: "listen",
+      title: selected.title,
+      summary,
+      reaction,
+      shareWorthy,
+      outputPath: noteFile,
+      timestamp: Date.now(),
+      artifacts: [
+        { type: "file", path: noteFile, description: selected.title },
+        { type: "url", url: selected.url, description: selected.title },
+      ],
+      mediaMeta: {
+        title: selected.title,
+        sourceName: selected.show,
+        url: selected.url,
+        publishedAt: selected.published,
+        transcriptChars: transcript.length,
+      },
     };
   }
 }
