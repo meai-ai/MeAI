@@ -568,6 +568,18 @@ Generate the current emotional state and update narrative threads.`,
           });
         }
 
+        // Hard cap: if ongoing threads exceed 15, demote oldest to resolved
+        const MAX_ONGOING_THREADS = 15;
+        const ongoingForCap = threads.filter(t => t.status === "ongoing");
+        if (ongoingForCap.length > MAX_ONGOING_THREADS) {
+          ongoingForCap.sort((a, b) => a.startedAt - b.startedAt);
+          const toDemote = ongoingForCap.slice(0, ongoingForCap.length - MAX_ONGOING_THREADS);
+          for (const t of toDemote) {
+            t.status = "resolved";
+          }
+          log.warn(`ongoing threads capped: ${ongoingForCap.length} → ${MAX_ONGOING_THREADS} (demoted ${toDemote.length} oldest to resolved)`);
+        }
+
         return { state, threads };
       }
     } catch (err) {

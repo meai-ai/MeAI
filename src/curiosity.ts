@@ -355,6 +355,32 @@ export class CuriosityEngine {
     // Step 9: Digest key knowledge into long-term memory
     await this.digestToMemory(discovery);
 
+    // Step 9b: Care topic quality + relevance gate
+    if (topic.careTopicId && topic.careNeed && discovery) {
+      discovery.careTopicId = topic.careTopicId;
+
+      const hasEnoughSources = discovery.sources.length >= 2;
+      const hasSubstance = discovery.summary.length >= 80;
+      let isRelevant = false;
+      try {
+        const { extractKeywords } = await import("./care-topics.js");
+        const kws = extractKeywords(topic.careNeed);
+        isRelevant = kws.some(kw => discovery.summary.toLowerCase().includes(kw));
+      } catch { isRelevant = true; /* fail-open */ }
+
+      if ((hasEnoughSources || hasSubstance) && isRelevant) {
+        try {
+          const { markFound } = await import("./care-topics.js");
+          markFound(topic.careTopicId, `${discovery.timestamp}`);
+        } catch { /* non-fatal */ }
+      } else {
+        try {
+          const { markSearched } = await import("./care-topics.js");
+          markSearched(topic.careTopicId);
+        } catch { /* non-fatal */ }
+      }
+    }
+
     // Step 10: Save
     state.discoveries.push(discovery);
     state.lastExploredAt = Date.now();

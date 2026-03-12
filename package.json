@@ -14,7 +14,8 @@
     "check": "node --disable-warning=DEP0040 --import tsx/esm scripts/check.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:maip": "node --disable-warning=DEP0040 --import tsx/esm scripts/test-maip.ts"
+    "test:maip": "node --disable-warning=DEP0040 --import tsx/esm scripts/test-maip.ts",
+    "health": "node --import tsx/esm scripts/health-check.ts"
   },
   "dependencies": {
     "@maip/agent": "file:../MAIP/packages/maip-agent",

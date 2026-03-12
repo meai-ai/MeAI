@@ -226,9 +226,19 @@ export async function slowLoopTick(ctx: SlowLoopContext): Promise<void> {
     const memTimestamps = new Map<string, number>();
     for (const m of memories) memTimestamps.set(m.key, m.timestamp);
 
+    // Build recentGroundedMemories map from recent thought history
+    const recentGroundedMemories = new Map<string, number>();
+    for (const t of state.thoughtHistory.slice(-10)) {
+      for (const g of t.grounding) {
+        if (g.type === "memory") {
+          recentGroundedMemories.set(g.id, (recentGroundedMemories.get(g.id) ?? 0) + 1);
+        }
+      }
+    }
+
     for (const cluster of scored.slice(0, 5)) {
       const gr = computeGroundingForCluster(
-        cluster, snapshot, memories, goals, discoveries, clock,
+        cluster, snapshot, memories, goals, discoveries, clock, recentGroundedMemories,
       );
       cluster.grounding = gr.grounding;
       cluster.groundingStrength = gr.groundingStrength;

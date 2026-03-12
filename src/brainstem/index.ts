@@ -1746,7 +1746,56 @@ class BrainstemEngine {
         if (outcome.actionType === "reach_out" && resolvedOutcome === "positive") {
           this.selfModel.applyConversationRecovery(1.0);
         }
+
+        // Update world model (was missing from resolve path)
+        const external = this.buildExternalState();
+        this.worldModel.updateOnOutcome(outcome.actionType as ActionType, {
+          replyReceived: resolvedOutcome === "positive",
+          sentiment: resolvedOutcome === "positive" ? 1 : -1,
+        }, external);
+
+        // C3 enrichment for positive outcomes (fire-and-forget)
+        if (resolvedOutcome === "positive") {
+          this.processResolvedOutcomeC3(outcome, external).catch(() => {});
+        }
+
+        this.cortexManager.recordOutcomeProcessed(false);
       }
+    }
+  }
+
+  /** Run C3 extraction on a resolved positive outcome (best-effort). */
+  private async processResolvedOutcomeC3(
+    outcome: OutcomeRecord,
+    external: ReturnType<typeof this.buildExternalState>,
+  ): Promise<void> {
+    try {
+      const signal = `user replied to ${outcome.actionType}`;
+      const tr = this.worldModel.transition(
+        this.worldModel.assembleBelief(this.buildInternalState(), external),
+        outcome.actionType as ActionType,
+      );
+      const c3Result = await this.cortexManager.extractOutcome({
+        action: { type: outcome.actionType as ActionType, description: signal },
+        rawExperience: { transcript: signal },
+        expectedOutcome: {
+          replyReceived: tr.outcomeDistribution.replyReceived,
+          sentiment: tr.outcomeDistribution.sentiment,
+          goalProgressDelta: tr.outcomeDistribution.goalProgressDelta,
+        },
+      });
+      if (c3Result && c3Result.confidence >= 0.5) {
+        this.worldModel.updateOnOutcome(outcome.actionType as ActionType, {
+          replyReceived: c3Result.fields.replyReceived,
+          replyLatencyMinutes: c3Result.fields.replyLatencyMinutes,
+          sentiment: c3Result.fields.sentiment,
+          goalProgressDelta: c3Result.fields.goalProgressDelta,
+          newInfoDelta: c3Result.fields.newInfoDiscovered ? 1 : 0,
+        }, external);
+        this.cortexManager.recordOutcomeProcessed(true);
+      }
+    } catch {
+      // C3 failure is non-fatal
     }
   }
 

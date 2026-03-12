@@ -34,7 +34,7 @@ import { isVideoEnabled, generateVideoFromImage } from "./video.js";
 import { generateVoice, isTTSEnabled, getVoiceDailyCount } from "./tts.js";
 import { addTimelineEvent, enqueueTimelineJob, getTodayTimeline } from "./timeline.js";
 import { getCharacter, s, renderTemplate } from "./character.js";
-import { recordCharacterOutreach, markAwaitingReply, isGoodTimeToReachOut } from "./lib/relationship-model.js";
+import { recordCharacterOutreach, markAwaitingReply, isGoodTimeToReachOut, getAttachmentState } from "./lib/relationship-model.js";
 
 const MIN_DAILY_SELFIES = 5;
 const MIN_DAILY_VOICES = 5;
@@ -237,7 +237,54 @@ export class ProactiveScheduler {
       if (shareWorthy.length > 0) {
         worldLines.push(`Things you discovered online today (worth sharing):\n${formatDiscoveries(shareWorthy)}`);
       }
+
+      // Care-related discoveries — things found specifically for the user
+      const careDiscoveries = shareWorthy.filter(d => d.careTopicId);
+      if (careDiscoveries.length > 0) {
+        try {
+          const { getFoundCareTopics } = await import("./care-topics.js");
+          const found = getFoundCareTopics();
+          for (const cd of careDiscoveries) {
+            const ct = found.find(f => f.id === cd.careTopicId);
+            if (ct) {
+              worldLines.push(
+                `You remember ${getCharacter().user.name} mentioned needing ${ct.need} recently, and you searched for it and found some relevant info (see discoveries above).\n` +
+                `You can bring it up naturally, no need to quote them verbatim — just casually mention it like a friend would.\n` +
+                `For example: "Oh by the way, about that thing you mentioned... I looked into it" or "I happened to come across something related..."`,
+              );
+            }
+          }
+        } catch { /* non-fatal */ }
+      }
     }
+
+    // Follow-up: 2-3 days after sharing, casually ask if they checked it out
+    try {
+      const { getShareFollowUps } = await import("./care-topics.js");
+      const followUps = getShareFollowUps();
+      for (const ct of followUps) {
+        worldLines.push(
+          `A few days ago you found info about "${ct.need}" for ${getCharacter().user.name} and shared it. ` +
+          `You could casually ask if they checked it out or if it was helpful. ` +
+          `Don't be formal about it — just naturally bring it up, like "Oh hey, did you end up looking at that thing?"`,
+        );
+      }
+    } catch { /* non-fatal */ }
+
+    // Emotional care resurfacing — candidates shortlisted by rules, then LLM naturalness check
+    const injectedCareIds: string[] = [];
+    try {
+      const { getResurfacingCandidates } = await import("./care-topics.js");
+      const candidates = getResurfacingCandidates();
+      for (const ct of candidates.slice(0, 2)) {
+        const daysAgo = Math.round((Date.now() - ct.createdAt) / 86400000);
+        worldLines.push(
+          `${daysAgo} days ago you noticed ${getCharacter().user.name} ${ct.need}. This has been on your mind.` +
+          (ct.whyItMatters ? `\nWhy you care: ${ct.whyItMatters}` : ""),
+        );
+        injectedCareIds.push(ct.id);
+      }
+    } catch { /* non-fatal */ }
 
     // Activities — things she learned or read recently (share-worthy ones)
     if (this.activities) {
@@ -267,9 +314,21 @@ export class ProactiveScheduler {
     }
 
     // Ask her: do you want to reach out?
-    const message = await this.askXiaomei(context);
+    let message = await this.askXiaomei(context);
 
     if (!message) return false;
+
+    // Dedup: if too similar to a recent message, retry once with explicit hint
+    if (this.isDuplicate(message)) {
+      console.log(`[proactive] Duplicate detected: "${message.slice(0, 60)}..." — retrying with hint`);
+      const retryCtx = context + `\n\n⚠️ You almost sent this again: "${message.slice(0, 80)}" — but you've already said something similar. Pick a completely different topic, or ${SKIP_TOKEN} if you have nothing else to say.`;
+      const retry = await this.askXiaomei(retryCtx);
+      if (!retry || this.isDuplicate(retry)) {
+        console.log("[proactive] Retry still duplicate or empty — skipping");
+        return false;
+      }
+      message = retry;
+    }
 
     // 9.5: Suspense timing — delay based on emotional weight of recent conversation
     const recentMsgs = this.session.loadRecent(500).slice(-3);
@@ -350,6 +409,17 @@ export class ProactiveScheduler {
     // Extract timeline events from proactive message (fire-and-forget)
     this.extractProactiveTimeline(message).catch(() => {});
 
+    // Care topics: mark shared / followed-up based on message content (fire-and-forget)
+    this.maybeMarkCareTopics(message).catch(() => {});
+
+    // Mark injected emotional care topics as mentioned
+    try {
+      const { logCareAction } = await import("./care-topics.js");
+      for (const id of injectedCareIds) {
+        logCareAction(id, "mentioned", Date.now());
+      }
+    } catch { /* non-fatal */ }
+
     return true;
   }
 
@@ -402,6 +472,55 @@ export class ProactiveScheduler {
         }
       } catch { /* JSON parse failure */ }
     });
+  }
+
+  /**
+   * After sending a proactive message, check if it relates to any care topics.
+   * Mark found topics as shared, and shared topics as followed-up.
+   */
+  private async maybeMarkCareTopics(finalMessage: string): Promise<void> {
+    try {
+      const { getFoundCareTopics, markShared, getShareFollowUps, markFollowedUp, extractKeywords } = await import("./care-topics.js");
+
+      // markShared: primary path via discovery careTopicId, fallback via keyword matching
+      const found = getFoundCareTopics();
+      if (found.length > 0 && this.curiosity) {
+        const markedIds = new Set<string>();
+
+        // Primary: match via shareWorthy discoveries that have careTopicId
+        const shareWorthy = this.curiosity.getShareWorthy();
+        for (const d of shareWorthy) {
+          if (d.careTopicId && found.some(f => f.id === d.careTopicId)) {
+            markShared(d.careTopicId);
+            markedIds.add(d.careTopicId);
+          }
+        }
+
+        // Fallback: keyword matching for remaining found topics
+        for (const ct of found) {
+          if (markedIds.has(ct.id)) continue;
+          const keywords = extractKeywords(ct.need);
+          const msgLower = finalMessage.toLowerCase();
+          const hits = keywords.filter(kw => msgLower.includes(kw));
+          const hasLongHit = hits.some(h => h.length >= 3);
+          if (hits.length >= 2 || hasLongHit) {
+            markShared(ct.id);
+          }
+        }
+      }
+
+      // markFollowedUp: keyword matching on shared topics due for follow-up
+      const followUps = getShareFollowUps();
+      for (const ct of followUps) {
+        const keywords = extractKeywords(ct.need);
+        const msgLower = finalMessage.toLowerCase();
+        const hits = keywords.filter(kw => msgLower.includes(kw));
+        const hasLongHit = hits.some(h => h.length >= 3);
+        if (hits.length >= 2 || hasLongHit) {
+          markFollowedUp(ct.id);
+        }
+      }
+    } catch { /* non-fatal */ }
   }
 
   /**
@@ -483,6 +602,14 @@ export class ProactiveScheduler {
     ];
 
     if (initiationNote) parts.push(initiationNote);
+
+    // Pending proactive — warn if character already sent a message with no reply
+    try {
+      const attachment = getAttachmentState();
+      if (attachment.lastMessageUnanswered) {
+        parts.push(`⚠️ You recently sent a message that ${_char.user.name} hasn't replied to yet. Don't repeat similar topics or press further — either pick a completely different angle, or ${SKIP_TOKEN}.`);
+      }
+    } catch { /* non-fatal */ }
 
     if (birthdayNote) {
       parts.push(`Special reminder: ${birthdayNote}`);
@@ -675,6 +802,56 @@ export class ProactiveScheduler {
     }
 
     return Math.random() < prob;
+  }
+
+  /**
+   * Check if a candidate message is too similar to recent assistant messages.
+   * Uses bigram overlap to catch near-duplicates (same topic, slightly reworded).
+   * Stricter when there's a pending unanswered proactive message.
+   */
+  private isDuplicate(candidate: string): boolean {
+    // Stricter dedup when a previous proactive is still unanswered
+    let hasUnanswered = false;
+    try {
+      hasUnanswered = getAttachmentState().lastMessageUnanswered;
+    } catch { /* non-fatal */ }
+    const threshold = hasUnanswered ? 0.25 : 0.4;
+    const lookback = hasUnanswered ? 10 : 6;
+
+    const recent = this.session.loadRecent(5000)
+      .filter(m => m.role === "assistant" && typeof m.content === "string")
+      .slice(-lookback);
+    if (recent.length === 0) return false;
+
+    const candidateBigrams = this.bigrams(candidate);
+    if (candidateBigrams.size === 0) return false;
+
+    for (const msg of recent) {
+      const text = msg.content as string;
+      const msgBigrams = this.bigrams(text);
+      if (msgBigrams.size === 0) continue;
+
+      // Jaccard similarity on bigrams
+      let intersection = 0;
+      for (const b of candidateBigrams) {
+        if (msgBigrams.has(b)) intersection++;
+      }
+      const union = candidateBigrams.size + msgBigrams.size - intersection;
+      const similarity = union > 0 ? intersection / union : 0;
+
+      if (similarity > threshold) return true;
+    }
+    return false;
+  }
+
+  /** Extract character bigrams from text (ignoring whitespace/punctuation). */
+  private bigrams(text: string): Set<string> {
+    const clean = text.replace(/[\s\p{P}]/gu, "");
+    const set = new Set<string>();
+    for (let i = 0; i < clean.length - 1; i++) {
+      set.add(clean.slice(i, i + 2));
+    }
+    return set;
   }
 
   /** Split a long message into chat-style chunks. */

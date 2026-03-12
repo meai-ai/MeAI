@@ -1117,7 +1117,7 @@ export function computeGroundingForCluster(
       const mem = memoryByKey.get(key);
       if (!mem) continue;
       const recency = Math.exp(-(now - mem.timestamp) / (14 * 86_400_000));
-      const linkage = 1.0;
+      const linkage = node.salience ?? 0.3;
       const w = 0.6 * recency + 0.4 * linkage;
       candidates.push({
         type: "memory", id: key, weight: w, sourceNodeIds: [nodeId],

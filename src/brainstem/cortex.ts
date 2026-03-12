@@ -545,7 +545,7 @@ Generate candidate actions:`;
 
     const charName = getCharacter().name;
     const system = `You are ${charName}'s outcome extractor. Extract structured outcomes from raw experiences.
-Output strict JSON: { "outcome", "fields", "confidence", "anomalyTags", "surpriseScore" }
+Output strict JSON: { "outcome": "...", "fields": {...}, "confidence": 0-1, "anomalyTags": [...], "surpriseScore": 0-1 }
 outcome: "positive" | "negative" | "neutral"
 fields: { replyReceived(bool), replyLatencyMinutes(number), sentiment(-1|0|1), newInfoDiscovered(bool), goalProgressDelta(number 0-1) }
 confidence: 0-1
@@ -633,7 +633,7 @@ Extract structured outcome:`;
 
     const charName = getCharacter().name;
     const system = `You are ${charName}'s uncertainty simulator. Imagine possible outcomes in low-confidence situations.
-Output strict JSON: { "outcomes", "confidence", "reasoning", "caveats" }
+Output strict JSON: { "outcomes": [...], "confidence": 0-1, "reasoning": "...", "caveats": [...] }
 outcomes: array, each { description, probability(0-1, probabilities must sum to 1), latentEffects: { socialReceptivity, topicViability, goalMomentum }, selfEffects: { energyDelta, socialEnergyDelta, safetyMarginDelta } }
 confidence: 0-1
 reasoning: brief explanation of the simulation reasoning

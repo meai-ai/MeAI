@@ -63,7 +63,9 @@ export function getMemoryTools(config: AppConfig): ToolDefinition[] {
       "Store or update a memory. Keys are namespaced (e.g., user.name, preferences.theme, context.project). " +
       "Use this to remember important facts about the user, your context, or learned patterns. " +
       "Confidence ranges from 0.0 to 1.0 (default 0.8). " +
-      "Warns if a similar memory already exists (deduplication).",
+      "Warns if a similar memory already exists (deduplication). " +
+      "IMPORTANT: Always write the subject explicitly in the value — 'the user likes X' not just 'likes X'. " +
+      "User facts use user.*/family.*/emotional.* prefixes; the character's own facts use inner.*/activity.* prefixes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -80,6 +82,11 @@ export function getMemoryTools(config: AppConfig): ToolDefinition[] {
           type: "number",
           description: "Confidence level 0.0-1.0 (default 0.8)",
         },
+        sourceType: {
+          type: "string",
+          enum: ["observed", "inferred", "narrative"],
+          description: "Provenance: observed (user said it), inferred (LLM deduced), narrative (diary/reflection)",
+        },
       },
       required: ["key", "value"],
     },
@@ -87,6 +94,7 @@ export function getMemoryTools(config: AppConfig): ToolDefinition[] {
       const key = input.key as string;
       const value = input.value as string;
       const confidence = typeof input.confidence === "number" ? input.confidence : 0.8;
+      const sourceType = input.sourceType as "observed" | "inferred" | "narrative" | undefined;
 
       const manager = getStoreManager();
       const existing = manager.get(key);
@@ -104,7 +112,7 @@ export function getMemoryTools(config: AppConfig): ToolDefinition[] {
         }
       }
 
-      await manager.set(key, value, confidence);
+      await manager.set(key, value, confidence, sourceType);
 
       logEvent(config, {
         tier: 1,
