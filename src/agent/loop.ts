@@ -56,6 +56,8 @@ import { formatTimelineContext, addTimelineEvent, enqueueTimelineJob } from "../
 import { generateVoice, isTTSEnabled, getVoiceDailyCount } from "../tts.js";
 import { getUserTZ } from "../lib/pst-date.js";
 import { getCharacter, s, renderTemplate } from "../character.js";
+import { brainstemFeedConversation, brainstemSetEmotion } from "../brainstem/index.js";
+import { incrementError } from "../lib/error-metrics.js";
 
 const log = createLogger("loop");
 
@@ -734,6 +736,13 @@ export class AgentLoop {
     const transition = getEmotionTransition();
     const emotionContext = formatEmotionContext(emotionalState, transition);
 
+    // ── Feed user message into brainstem WM slots ──
+    try {
+      const prevAssistant = history.filter(e => e.role === "assistant").slice(-1)[0];
+      const prevText = prevAssistant && typeof prevAssistant.content === "string" ? prevAssistant.content : undefined;
+      brainstemFeedConversation(actualText, prevText);
+    } catch { /* brainstem may not be initialized */ }
+
     // ── Engagement quality hint ──
     // Analyze recent user messages for effort level and inject a subtle behavioral hint
     const recentUserEntries = history.filter(e => e.role === "user").slice(-5);
@@ -1031,6 +1040,38 @@ export class AgentLoop {
     // Invalidate emotion cache so next turn generates fresh emotion
     // that accounts for what just happened in the conversation
     invalidateEmotionCache();
+
+    // Store pending style features for interaction learning (style-reaction pairing)
+    try {
+      const { extractResponseStyleFeatures, storePendingStyleFeatures } = await import("../interaction-learning.js");
+      const sessionId = "main";
+      const styleFeatures = extractResponseStyleFeatures(accumulated);
+      storePendingStyleFeatures(sessionId, styleFeatures, accumulated);
+    } catch { /* non-fatal */ }
+
+    // Episode recording — capture significant conversation moments
+    try {
+      const { addEpisode } = await import("../memory/episodes.js");
+      // Only record episodes for substantive exchanges
+      if (actualText.length > 20 && accumulated.length > 30) {
+        const valence = emotionalState
+          ? ((emotionalState.valence ?? 5) - 5) / 5  // normalize 1-10 → -1 to 1
+          : 0;
+        const now = Date.now();
+        const dateStr = new Date(now).toISOString().slice(0, 10);
+        addEpisode({
+          when: now,
+          date: dateStr,
+          who: [getCharacter().user.name, getCharacter().name],
+          what: `${actualText.slice(0, 100)} → ${accumulated.slice(0, 100)}`,
+          emotionalValence: valence,
+          emotionalNote: emotionalState?.mood ?? "neutral",
+          topics: actualText.split(/[\s,;.!?]+/).filter(w => w.length >= 3).slice(0, 5),
+          significance: Math.min(1, actualText.length / 200),
+          sourceType: "observed",
+        });
+      }
+    } catch (err) { incrementError("loop", "episode_recording"); }
 
     // Background memory extraction — only fires when the user message likely
     // contains personal facts. Skipping trivial messages (greetings, commands,

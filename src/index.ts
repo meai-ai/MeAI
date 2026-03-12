@@ -82,6 +82,19 @@ import { moduleRegistry } from "./modules/registry.js";
 import { llmRegistry } from "./llm/registry.js";
 import { expressionRegistry } from "./expressions/registry.js";
 import { senseRegistry } from "./senses/registry.js";
+import { initPromptTrace } from "./lib/prompt-trace.js";
+import { initTurnTrace } from "./lib/turn-trace.js";
+import { initActionGate } from "./lib/action-gate.js";
+import { initErrorMetrics } from "./lib/error-metrics.js";
+import { initBrainstem, startBrainstem, stopBrainstem } from "./brainstem/index.js";
+import { initEpisodes } from "./memory/episodes.js";
+import { initCareTopics } from "./care-topics.js";
+import { initIntents } from "./intents.js";
+import { initUserState } from "./user-state.js";
+import { initInteractionLearning, recordUserReply, getPendingProactive } from "./interaction-learning.js";
+import { initResearch, ResearchEngine } from "./research.js";
+import { initSelfNarrative } from "./self-narrative.js";
+import { initRelationalImpact } from "./relational-impact.js";
 
 async function safeInit(name: string, fn: () => unknown | Promise<unknown>, critical = false): Promise<boolean> {
   try {
@@ -112,6 +125,18 @@ async function main(): Promise<void> {
 
   // Critical modules — crash on failure
   await track("character", () => initCharacter(config.statePath), true);
+
+  // Initialize prompt trace (JSONL recording of all LLM calls)
+  await track("prompt-trace", () => initPromptTrace(config.statePath));
+
+  // Initialize turn trace (unified per-turn observability)
+  await track("turn-trace", () => initTurnTrace(config.statePath));
+
+  // Initialize action gate (perimeter checks for proactive + social)
+  await track("action-gate", () => initActionGate(config.statePath));
+
+  // Initialize error metrics (lightweight error counter)
+  await track("error-metrics", () => initErrorMetrics(config.statePath));
 
   // Initialize shared search module (Tavily + DuckDuckGo fallback)
   await track("search", () => initSearch(config));
@@ -157,6 +182,14 @@ async function main(): Promise<void> {
   await track("narrative", () => initNarrative(config.statePath));
   await track("documents", () => initDocuments(config.statePath));
   await track("timeline", () => initTimeline(config.statePath));
+  await track("intents", () => initIntents(config.statePath));
+  await track("care-topics", () => initCareTopics(config.statePath));
+  await track("user-state", () => initUserState(config.statePath));
+  await track("episodes", () => initEpisodes(config.statePath));
+  await track("interaction-learning", () => initInteractionLearning(config.statePath));
+  await track("self-narrative", () => initSelfNarrative(config.statePath));
+  await track("relational-impact", () => initRelationalImpact(config.statePath));
+  await track("research", () => initResearch(config.statePath));
 
   // Discover and initialize extensible registries (all 5 axes)
   await Promise.all([
@@ -177,6 +210,13 @@ async function main(): Promise<void> {
     safeInit("expressions", () => expressionRegistry.initAll(config)),
     safeInit("senses", () => senseRegistry.initAll(config)),
   ]);
+
+  // Initialize brainstem — continuous neural thinking layer (optional)
+  await track("brainstem", () => {
+    initBrainstem(config);
+    startBrainstem();
+    console.log("[brainstem] Continuous neural thinking initialized");
+  });
 
   const session = new SessionManager(config);
   const tools = new ToolRegistry();
@@ -266,6 +306,14 @@ async function main(): Promise<void> {
 
   channel.onMessage(async (text, chatId, sendReply, editReply, sendTyping, imageData) => {
     proactive.recordUserActivity();
+
+    // Interaction learning: detect reply to proactive message
+    const pending = getPendingProactive();
+    if (pending.pending && pending.sentAt) {
+      const delayMs = Date.now() - pending.sentAt;
+      recordUserReply(text.length, delayMs);
+    }
+
     await agent.handleMessage(text, chatId, sendReply, editReply, sendTyping, imageData);
   });
 
@@ -297,6 +345,13 @@ async function main(): Promise<void> {
     social,
     activities,
   });
+  // Research engine — autonomous research system
+  try {
+    const research = new ResearchEngine(config);
+    heartbeat.setResearch(research);
+    console.log("[research] Autonomous research engine initialized");
+  } catch { /* research is optional */ }
+
   heartbeat.setWatchdog(watchdog);
   watchdog.setHeartbeat(heartbeat);
   heartbeat.start();
@@ -341,6 +396,7 @@ async function main(): Promise<void> {
     social?.stop();
     activities.stop();
     optimizer.stop();
+    try { stopBrainstem(); } catch { /* brainstem may not be initialized */ }
     if (config.maip?.enabled) {
       try {
         const { stopMAIP } = await import("./maip/bridge.js");

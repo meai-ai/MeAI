@@ -58,12 +58,26 @@ import { maybeMoment, isMomentsEnabled } from "./moments.js";
 import { maybeProactiveSelfie } from "./selfie.js";
 import { getBlockEvent, addTimelineEvent, getTodayTimeline, enqueueTimelineJob, type TimelineEvent } from "./timeline.js";
 import { pstDateStr, getUserTZ } from "./lib/pst-date.js";
+import type { ResearchEngine } from "./research.js";
+import {
+  brainstemGetActionPreferences,
+  brainstemWantsToAct,
+  brainstemGetTurnSignals,
+  brainstemGetSkillIntent,
+  brainstemResolvePendingOutcomes,
+  brainstemRecordPendingReachOut,
+  brainstemSetEmotion,
+  getBrainstemRecentThoughts,
+} from "./brainstem/index.js";
+import type { ActGateArm } from "./brainstem/thought-gate.js";
+import { computeVeto, type BrainstemVeto } from "./brainstem/governance.js";
+import { formatLearningContext } from "./interaction-learning.js";
+import { getAttachmentState, updateAttachmentState } from "./lib/relationship-model.js";
 import { repairAndParseJson } from "./lib/json-repair.js";
 import { s, renderTemplate, getCharacter } from "./character.js";
 import { moduleRegistry } from "./modules/registry.js";
 import { recordSatisfaction, getActivityBias, getBurnoutRisk } from "./lib/reinforcement.js";
 import { startActivity, isInFlowState, shouldSuggestBreak, getDecisionFatigue } from "./lib/attention.js";
-import { updateAttachmentState } from "./lib/relationship-model.js";
 
 const log = createLogger("heartbeat");
 
@@ -162,6 +176,8 @@ export class Heartbeat {
   private social: SocialEngine | null;
   private activities: ActivityScheduler;
   private watchdog: WatchdogEngine | null = null;
+  private research: ResearchEngine | null = null;
+  private lastBrainstemActArm: ActGateArm | null = null;
 
   // Track when each action last ran (timestamp)
   private lastActionAt: Record<string, number> = {
@@ -210,6 +226,11 @@ export class Heartbeat {
   /** Connect watchdog for health checks + budget enforcement */
   setWatchdog(watchdog: WatchdogEngine): void {
     this.watchdog = watchdog;
+  }
+
+  /** Connect research engine for autonomous research during night hours */
+  setResearch(research: ResearchEngine): void {
+    this.research = research;
   }
 
   /** Register a callback invoked after each heartbeat pulse (e.g. for MAIP reporting). */
@@ -326,8 +347,35 @@ export class Heartbeat {
         }
       }
 
+      // 1.7. Fetch brainstem signals (shared across commitment check + veto)
+      let turnSignals: ReturnType<typeof brainstemGetTurnSignals> = null;
+      try { turnSignals = brainstemGetTurnSignals(); } catch { /* brainstem may not be initialized */ }
+
       // 2. Check cooldowns + schedule constraints — which actions are even available?
-      const availableActions = this.getAvailableActions(vitals);
+      let availableActions = this.getAvailableActions(vitals);
+
+      // 2.5. Apply brainstem veto — filter blocked actions for personality consistency
+      let backgroundVeto: BrainstemVeto | null = null;
+      if (turnSignals) {
+        try {
+          backgroundVeto = computeVeto(
+            turnSignals.csi,
+            turnSignals.selfState,
+            turnSignals.openCommitments.reduce((max: number, c: { urgency: number }) => Math.max(max, c.urgency), 0),
+            null, // no adherence score in background
+            0,    // no consecutive low adherence in background
+          );
+          if (backgroundVeto.blockActions && backgroundVeto.blockActions.length > 0) {
+            const before = availableActions.length;
+            availableActions = availableActions.filter(
+              a => a === "rest" || !backgroundVeto!.blockActions!.includes(a),
+            );
+            if (availableActions.length < before) {
+              log.info(`veto filtered actions: blocked [${backgroundVeto.blockActions.join(", ")}], ${before}→${availableActions.length} available (${backgroundVeto.authorityLevel}: ${backgroundVeto.reasons.join("; ")})`);
+            }
+          }
+        } catch { /* brainstem governance may not be available */ }
+      }
 
       // 3. If rest is the only option, skip the LLM call — use a deterministic decision
       let decision: HeartbeatDecision;
@@ -451,6 +499,11 @@ export class Heartbeat {
         }
       }
 
+      // 4b. Resolve pending brainstem outcomes (did user reply to reach_out?)
+      try {
+        brainstemResolvePendingOutcomes(this.getLastUserActivity());
+      } catch { /* brainstem may not be initialized */ }
+
       // 5. Save pulse timestamp (so watchdog knows heartbeat is alive even on rest)
       this.saveActionTimes();
 
@@ -462,6 +515,13 @@ export class Heartbeat {
         decision,
         executed,
         duration_ms: Date.now() - startMs,
+        ...(backgroundVeto && backgroundVeto.reasons.length > 0 ? {
+          governanceVeto: {
+            authorityLevel: backgroundVeto.authorityLevel,
+            reasons: backgroundVeto.reasons,
+            blockedActions: backgroundVeto.blockActions,
+          },
+        } : {}),
       });
 
       // Notify MAIP bridge
@@ -545,6 +605,12 @@ export class Heartbeat {
       mood = formatEmotionContext(emotion);
       energy = (emotion.energy ?? 6) / 10;  // emotion.energy is 1-10, vitals.energy is 0-1
       // Energy floor now handled by applyEnergyRecovery() in emotion.ts
+
+      // Sync emotion valence into brainstem graph (1-10 → -1 to +1)
+      try {
+        const brainstemValence = ((emotion.valence ?? 5) - 5) / 5;
+        brainstemSetEmotion(brainstemValence);
+      } catch { /* brainstem may not be initialized */ }
     } catch (err) { log.warn("failed to get emotional state, using defaults", err); }
 
     // Get discovery counts from curiosity
@@ -868,6 +934,10 @@ Pick the best action:`,
         }
         case "reach_out":
           success = await this.proactive.tick();
+          if (success && this.lastBrainstemActArm && this.lastBrainstemActArm.targetId !== "self") {
+            try { brainstemRecordPendingReachOut(this.lastBrainstemActArm); } catch { /* non-fatal */ }
+            this.lastBrainstemActArm = null;
+          }
           break;
         case "post":
           if (this.social) {
@@ -1286,6 +1356,64 @@ JSON format:
       if (shouldSuggestBreak()) boosts.push("[signal] ultradian cycle peak — consider a break");
       if (getDecisionFatigue() > 0.7) boosts.push("[signal] high decision fatigue — prefer lighter actions");
     } catch { /* non-fatal */ }
+
+    // Brainstem micro-thoughts (subconscious signals)
+    try {
+      const thoughts = getBrainstemRecentThoughts(2);
+      if (thoughts.length > 0) {
+        const latest = thoughts[thoughts.length - 1];
+        boosts.push(`[subconscious] ${latest.content}`);
+      }
+
+      // Brainstem action preferences
+      const prefs = brainstemGetActionPreferences();
+      const topPref = Object.entries(prefs)
+        .sort(([, a], [, b]) => b - a)
+        .filter(([, v]) => v > 0.2);
+      if (topPref.length > 0) {
+        boosts.push(`[inner tendency] ${topPref.map(([k, v]) => `${k}(${Math.round(v * 100)}%)`).join(", ")}`);
+      }
+
+      // Brainstem act gate
+      const actArm = brainstemWantsToAct();
+      if (actArm) {
+        this.lastBrainstemActArm = actArm;
+        if (actArm.targetId === "self") {
+          boosts.push(`[strong signal] been thinking about ${actArm.reason} → consider activity`);
+        } else {
+          boosts.push(`[strong signal] been thinking about ${actArm.reason} → consider reach_out`);
+        }
+      }
+
+      // Intent → Skill routing
+      const skillIntent = brainstemGetSkillIntent();
+      if (skillIntent && skillIntent.confidence > 0.5) {
+        boosts.push(`[intent routing] subconscious wants to ${skillIntent.reason} → recommend ${skillIntent.skillName} skill (${skillIntent.actionType})`);
+      }
+    } catch { /* brainstem may not be initialized */ }
+
+    // Interaction learning — reply rate patterns
+    try {
+      const learningCtx = formatLearningContext();
+      if (learningCtx) {
+        boosts.push(`[interaction learning] ${learningCtx}`);
+      }
+    } catch { /* non-fatal */ }
+
+    // Attachment-aware signal boosts (soft only, no hard gate)
+    try {
+      const attachment = getAttachmentState();
+      if (attachment.phaseConfidence >= 0.6) {
+        if (attachment.stage === "anxious") {
+          boosts.push("[relationship] haven't chatted in a while — reach_out weight +");
+        } else if (attachment.stage === "ruminating" && attachment.lastMessageUnanswered) {
+          boosts.push("[relationship] sent message, no reply yet — don't send more");
+        } else if (attachment.stage === "secure" && attachment.secureBaseActive) {
+          boosts.push("[relationship] things are good — can casually share");
+        }
+      }
+    } catch { /* non-fatal */ }
+
     return boosts.join("\n");
   }
 

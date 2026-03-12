@@ -320,14 +320,18 @@ function getPersonaCompact(): string {
 
 // ── Compact Emotion ──────────────────────────────────────────────────
 
-/** One-line emotion summary format, used when plan.emotion === "summary". */
+/** One-line emotion summary format, used when plan.emotion === "summary".
+ *  Preserves behaviorHints (policyHint) so they don't get stripped. */
 export function formatEmotionSummary(emotionContext: string): string {
   // Extract valence and energy from the full emotion context using regex
   const valenceMatch = emotionContext.match(/情绪值[：:]\s*(\d+)/) ?? emotionContext.match(/valence[:\s]*(\d+)/i);
   const energyMatch = emotionContext.match(/精力[：:]\s*(\d+)/) ?? emotionContext.match(/energy[:\s]*(\d+)/i);
   const valence = valenceMatch ? valenceMatch[1] : "?";
   const energy = energyMatch ? energyMatch[1] : "?";
-  return `${s().headers.inner_state}: valence ${valence}/10, energy ${energy}/10`;
+  // Preserve behaviorHints / state effects so they aren't lost in summary mode
+  const hintsMatch = emotionContext.match(/State effects:\s*(.+)/i) ?? emotionContext.match(/状态影响[：:]\s*(.+)/);
+  const hints = hintsMatch ? `\n${hintsMatch[0]}` : "";
+  return `${s().headers.inner_state}: valence ${valence}/10, energy ${energy}/10${hints}`;
 }
 
 // ── Compact Capabilities ─────────────────────────────────────────────
@@ -369,106 +373,97 @@ export async function assembleSystemPrompt(
   const userProfile = loadUserProfile(config.statePath);
   const blankSlate = isBlankSlate(config.statePath);
 
-  const sections: string[] = [];
+  // ── Stable sections (always included, not subject to budget trimming) ──
+  const stableSections: string[] = [];
 
   // Blank-slate mode — character not yet created, guide user through setup
   if (blankSlate) {
-    sections.push(BLANK_SLATE_PERSONA);
+    stableSections.push(BLANK_SLATE_PERSONA);
   }
   // Header — persona rules (full or compact based on plan)
   else if (plan?.persona === "compact") {
-    sections.push(getPersonaCompact());
+    stableSections.push(getPersonaCompact());
   } else {
-  sections.push(getCharacter().persona.full ?? "");
+  stableSections.push(getCharacter().persona.full ?? "");
   } // end full persona else block
 
   // Identity — persona definition (skip when plan says false)
   if ((!plan || plan.identity) && identity) {
-    sections.push(`## ${s().headers.about_self}\n${identity}`);
+    stableSections.push(`## ${s().headers.about_self}\n${identity}`);
   }
 
   // User profile — who the user is (skip when plan says false)
   if ((!plan || plan.user_profile) && userProfile) {
-    sections.push(`## ${renderTemplate(s().headers.about_user)}\n${userProfile}`);
+    stableSections.push(`## ${renderTemplate(s().headers.about_user)}\n${userProfile}`);
   }
+
+  // Capabilities — full or minimal based on plan; simplified in blank-slate mode
+  if (blankSlate) {
+    stableSections.push(`## Available tools
+- update_character: Save character details as the user describes them (shows a preview first)
+- confirm_character_update: Commit a previewed character change
+- memory_set / memory_get / memory_search / memory_list: Remember important things about the user
+- get_current_time: Check the current time
+
+Use update_character to save each detail the user shares about who you should be.
+Use memory_set to remember things about the user themselves.`);
+  } else if (plan?.capabilities === "minimal") {
+    stableSections.push(getCapabilitiesMinimal());
+  } else {
+    const char = getCharacter();
+    const userName = char.user.name;
+    const petName = char.pet?.name;
+    const petSelfieHint = petName ? `, ${petName}` : "";
+    const vibeCoding = char.hobbies.vibe_coding as Record<string, unknown> | undefined;
+    const vibeProjects = (vibeCoding?.recent_completions as string[] | undefined) ?? [];
+    const vibeExamples = vibeProjects.length > 0 ? vibeProjects.join(", ") : "";
+
+    const capabilitiesPrompt = char.persona.capabilities;
+    if (capabilitiesPrompt) {
+      stableSections.push(renderTemplate(capabilitiesPrompt, undefined, {
+        petSelfieHint, vibeExamples,
+      }));
+    }
+  }
+
+  // Auto-generated rules from conversation analysis; skip in blank-slate mode
+  const autoRulesPath = path.join(config.statePath, "auto-rules.md");
+  if (!blankSlate && fs.existsSync(autoRulesPath)) {
+    const autoRules = fs.readFileSync(autoRulesPath, "utf-8").trim();
+    if (autoRules) {
+      stableSections.push(`## ${s().headers.auto_rules}\n${autoRules}`);
+    }
+  }
+
+  const stablePrompt = stableSections.join("\n\n");
+
+  // ── Dynamic sections (priority-sorted, subject to budget enforcement) ──
+  // Each section has a priority (higher = more important, kept first when over budget).
+  // When the combined dynamic content exceeds the remaining token budget,
+  // lowest-priority sections are dropped to fit.
+  const prioritizedSections: Array<{ content: string; priority: number; label: string }> = [];
 
   // Memories — category-aware loading (budget-limited, skip when plan says false)
   if (!plan || plan.memories) {
     const memorySection = await assembleMemoryContext(config, conversationContext);
     const { text: budgetedMemory, truncated: memTruncated } = truncateToTokenBudget(memorySection, memoryBudget);
     if (memTruncated) log.info(`memories truncated to ${memoryBudget} token budget`);
-    sections.push(budgetedMemory);
+    prioritizedSections.push({ content: budgetedMemory, priority: 90, label: "memories" });
   }
 
   // Emotion — controlled by plan (full / summary / false); skip in blank-slate mode
   if (!blankSlate && emotionContext && plan?.emotion !== false) {
     if (plan?.emotion === "summary") {
-      sections.push(`## ${s().headers.inner_state}\n${formatEmotionSummary(emotionContext)}`);
+      prioritizedSections.push({ content: `## ${s().headers.inner_state}\n${formatEmotionSummary(emotionContext)}`, priority: 85, label: "emotion" });
     } else {
       // Full emotion context with behavioral hints
       const emotionBehavior = getCharacter().persona.emotion_behavior;
       if (emotionBehavior) {
-        sections.push(`## ${s().headers.inner_state}\n${emotionContext}\n\n${renderTemplate(emotionBehavior)}`);
+        prioritizedSections.push({ content: `## ${s().headers.inner_state}\n${emotionContext}\n\n${renderTemplate(emotionBehavior)}`, priority: 85, label: "emotion" });
       } else {
-        sections.push(`## ${s().headers.inner_state}\n${emotionContext}`);
+        prioritizedSections.push({ content: `## ${s().headers.inner_state}\n${emotionContext}`, priority: 85, label: "emotion" });
       }
     }
-  }
-
-  // Recent Moments — skip in blank-slate mode
-  if (!blankSlate) try {
-    const moments = getRecentMoments(6);
-    if (moments.length > 0) {
-      const lines = moments.map((m) => {
-        const ago = Math.round((Date.now() - m.timestamp) / 60_000);
-        const timeLabel = ago < 60 ? s().time.minutes_ago.replace("{n}", String(ago)) : s().time.hours_ago.replace("{n}", String(Math.round(ago / 60)));
-        return `- ${timeLabel}: ${m.text}`;
-      });
-      sections.push(
-        `## ${s().headers.recent_moments}\n${lines.join("\n")}\n\n` +
-        renderTemplate(s().headers.moments_ownership),
-      );
-    }
-  } catch { /* non-fatal */ }
-
-  // 8.4: Opinions — evolving viewpoints for natural disagreement; skip in blank-slate mode
-  if (!blankSlate && (!plan || plan.opinions)) {
-    try {
-      const opinionCtx = formatOpinionContext();
-      if (opinionCtx) {
-        sections.push(`## ${s().headers.my_opinions}\n${opinionCtx}\n${renderTemplate(s().headers.opinions_hint)}`);
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  // 8.3: Diary — skip in blank-slate mode
-  if (!blankSlate && (!plan || plan.diary)) {
-    try {
-      const diaryCtx = formatDiaryContext();
-      if (diaryCtx) {
-        sections.push(`## ${diaryCtx}`);
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  // 8.2: Goals — skip in blank-slate mode
-  if (!blankSlate && (!plan || plan.goals)) {
-    try {
-      const goalCtx = formatGoalContext();
-      if (goalCtx) {
-        sections.push(`## ${s().headers.my_goals}\n${goalCtx}`);
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  // 10.1: Narrative arcs — skip in blank-slate mode
-  if (!blankSlate && (!plan || plan.narrative)) {
-    try {
-      const narrativeCtx = formatNarrativeContext();
-      if (narrativeCtx) {
-        sections.push(`## ${narrativeCtx}`);
-      }
-    } catch { /* non-fatal */ }
   }
 
   // Skills — progressive loading or legacy fallback (budget-limited, skip when plan says false)
@@ -481,7 +476,7 @@ export async function assembleSystemPrompt(
         const skillsText = fullSections.join("\n\n");
         const { text: budgetedSkills, truncated } = truncateToTokenBudget(skillsText, skillsBudget);
         if (truncated) log.info(`skills truncated to ${skillsBudget} token budget`);
-        sections.push(`## Active skills\n${budgetedSkills}`);
+        prioritizedSections.push({ content: `## Active skills\n${budgetedSkills}`, priority: 80, label: "skills" });
       }
     } else {
       const skills = loadSkills(config.statePath);
@@ -493,55 +488,10 @@ export async function assembleSystemPrompt(
         const skillsText = skillSections.join("\n\n");
         const { text: budgetedSkills, truncated } = truncateToTokenBudget(skillsText, skillsBudget);
         if (truncated) log.info(`legacy skills truncated to ${skillsBudget} token budget`);
-        sections.push(`## Your skills\n${budgetedSkills}`);
+        prioritizedSections.push({ content: `## Your skills\n${budgetedSkills}`, priority: 80, label: "skills" });
       }
     }
   }
-
-  // Past sessions index — gives the agent awareness of conversation history
-  if (!plan || plan.sessions) {
-    const sessionIndex = new SessionIndexManager(config);
-    const sessionSummary = sessionIndex.getIndexSummary(10);
-    if (sessionSummary) {
-      sections.push(
-        `## Past conversation sessions\n` +
-        `You have ${sessionIndex.listAll().length} archived conversation sessions. ` +
-        `The user can browse them with /sessions or search with /recall <query>.\n\n` +
-        `Recent sessions:\n${sessionSummary}`,
-      );
-    }
-  }
-
-  // Documents — things the character has written and saved
-  if (!plan || plan.documents) {
-    try {
-      const docCtx = formatDocumentContext();
-      if (docCtx) {
-        sections.push(`## ${docCtx}\n\n` +
-          renderTemplate(s().headers.documents_hint, undefined, { documents_dir: getDocumentsDir() }));
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  // SimModule context blocks — injected from extensible modules (src/modules/*/index.ts)
-  try {
-    const moduleBlocks = moduleRegistry.getAllContextBlocks();
-    for (const block of moduleBlocks) {
-      sections.push(`### ${block.header}\n${block.body}`);
-    }
-  } catch { /* non-fatal */ }
-
-  // Attention state — ultradian rhythm, focus, decision fatigue
-  try {
-    const attentionCtx = formatAttentionContext();
-    if (attentionCtx) sections.push(`### Attention state\n${attentionCtx}`);
-  } catch { /* non-fatal */ }
-
-  // Relationship context — attachment, communication rhythm
-  try {
-    const relCtx = formatRelationshipContext();
-    if (relCtx) sections.push(`### Relationship with ${getCharacter().user.name}\n${relCtx}`);
-  } catch { /* non-fatal */ }
 
   // Real-world context — grounds character in physical reality (budget-limited); skip in blank-slate mode
   if (!blankSlate && worldContext) {
@@ -557,52 +507,175 @@ export async function assembleSystemPrompt(
     const lifeSim = char.persona.life_simulation ?? "";
 
     const lifeRules = char.persona.life_rules;
-    sections.push(`## ${s().headers.real_state}\n${budgetedWorld}` +
+    prioritizedSections.push({ content: `## ${s().headers.real_state}\n${budgetedWorld}` +
       (lifeSim ? `\n\n${lifeSim}` : "") +
-      (lifeRules ? `\n\n${renderTemplate(lifeRules, undefined, { hobbyNames, friendNames, placeDescriptions, petLine })}` : ""));
+      (lifeRules ? `\n\n${renderTemplate(lifeRules, undefined, { hobbyNames, friendNames, placeDescriptions, petLine })}` : ""),
+      priority: 80, label: "world" });
   }
 
-  // Capabilities — full or minimal based on plan; simplified in blank-slate mode
-  if (blankSlate) {
-    sections.push(`## Available tools
-- update_character: Save character details as the user describes them (shows a preview first)
-- confirm_character_update: Commit a previewed character change
-- memory_set / memory_get / memory_search / memory_list: Remember important things about the user
-- get_current_time: Check the current time
+  // Relationship context — attachment, communication rhythm
+  try {
+    const relCtx = formatRelationshipContext();
+    if (relCtx) prioritizedSections.push({ content: `### Relationship with ${getCharacter().user.name}\n${relCtx}`, priority: 75, label: "relationship" });
+  } catch { /* non-fatal */ }
 
-Use update_character to save each detail the user shares about who you should be.
-Use memory_set to remember things about the user themselves.`);
-  } else if (plan?.capabilities === "minimal") {
-    sections.push(getCapabilitiesMinimal());
-  } else {
-    const char = getCharacter();
-    const userName = char.user.name;
-    const petName = char.pet?.name;
-    const petSelfieHint = petName ? `, ${petName}` : "";
-    const vibeCoding = char.hobbies.vibe_coding as Record<string, unknown> | undefined;
-    const vibeProjects = (vibeCoding?.recent_completions as string[] | undefined) ?? [];
-    const vibeExamples = vibeProjects.length > 0 ? vibeProjects.join(", ") : "";
+  // 8.2: Goals — skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.goals)) {
+    try {
+      const goalCtx = formatGoalContext();
+      if (goalCtx) {
+        prioritizedSections.push({ content: `## ${s().headers.my_goals}\n${goalCtx}`, priority: 55, label: "goals" });
+      }
+    } catch { /* non-fatal */ }
+  }
 
-    const capabilitiesPrompt = char.persona.capabilities;
-    if (capabilitiesPrompt) {
-      sections.push(renderTemplate(capabilitiesPrompt, undefined, {
-        petSelfieHint, vibeExamples,
-      }));
+  // 8.4: Opinions — evolving viewpoints for natural disagreement; skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.opinions)) {
+    try {
+      const opinionCtx = formatOpinionContext();
+      if (opinionCtx) {
+        prioritizedSections.push({ content: `## ${s().headers.my_opinions}\n${opinionCtx}\n${renderTemplate(s().headers.opinions_hint)}`, priority: 50, label: "opinions" });
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // 10.1: Narrative arcs — skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.narrative)) {
+    try {
+      const narrativeCtx = formatNarrativeContext();
+      if (narrativeCtx) {
+        prioritizedSections.push({ content: `## ${narrativeCtx}`, priority: 45, label: "narrative" });
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // Recent Moments — skip in blank-slate mode
+  if (!blankSlate) try {
+    const moments = getRecentMoments(6);
+    if (moments.length > 0) {
+      const lines = moments.map((m) => {
+        const ago = Math.round((Date.now() - m.timestamp) / 60_000);
+        const timeLabel = ago < 60 ? s().time.minutes_ago.replace("{n}", String(ago)) : s().time.hours_ago.replace("{n}", String(Math.round(ago / 60)));
+        return `- ${timeLabel}: ${m.text}`;
+      });
+      prioritizedSections.push({ content:
+        `## ${s().headers.recent_moments}\n${lines.join("\n")}\n\n` +
+        renderTemplate(s().headers.moments_ownership),
+        priority: 40, label: "moments" });
+    }
+  } catch { /* non-fatal */ }
+
+  // 8.3: Diary — skip in blank-slate mode
+  if (!blankSlate && (!plan || plan.diary)) {
+    try {
+      const diaryCtx = formatDiaryContext();
+      if (diaryCtx) {
+        prioritizedSections.push({ content: `## ${diaryCtx}`, priority: 35, label: "diary" });
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // SimModule context blocks — injected from extensible modules (src/modules/*/index.ts)
+  try {
+    const moduleBlocks = moduleRegistry.getAllContextBlocks();
+    for (const block of moduleBlocks) {
+      prioritizedSections.push({ content: `### ${block.header}\n${block.body}`, priority: 35, label: `module:${block.header}` });
+    }
+  } catch { /* non-fatal */ }
+
+  // Documents — things the character has written and saved
+  if (!plan || plan.documents) {
+    try {
+      const docCtx = formatDocumentContext();
+      if (docCtx) {
+        prioritizedSections.push({ content: `## ${docCtx}\n\n` +
+          renderTemplate(s().headers.documents_hint, undefined, { documents_dir: getDocumentsDir() }),
+          priority: 30, label: "documents" });
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // Attention state — ultradian rhythm, focus, decision fatigue
+  try {
+    const attentionCtx = formatAttentionContext();
+    if (attentionCtx) prioritizedSections.push({ content: `### Attention state\n${attentionCtx}`, priority: 30, label: "attention" });
+  } catch { /* non-fatal */ }
+
+  // Brainstem — subconscious thoughts (low priority, background reference)
+  if (!blankSlate) try {
+    const { formatBrainstemContext } = await import("../brainstem/index.js");
+    const brainstemCtx = formatBrainstemContext();
+    if (brainstemCtx) prioritizedSections.push({ content: brainstemCtx, priority: 25, label: "brainstem" });
+  } catch { /* brainstem may not be initialized */ }
+
+  // Self-narrative — tentative self-understanding
+  if (!blankSlate) try {
+    const { formatSelfNarrativeContext } = await import("../self-narrative.js");
+    const selfNarrCtx = formatSelfNarrativeContext();
+    if (selfNarrCtx) prioritizedSections.push({ content: selfNarrCtx, priority: 25, label: "self-narrative" });
+  } catch { /* non-fatal */ }
+
+  // User state — what the user is focused on, stressors, emotional trajectory
+  if (!blankSlate) try {
+    const { formatUserStateContext } = await import("../user-state.js");
+    const userStateCtx = formatUserStateContext();
+    if (userStateCtx) prioritizedSections.push({ content: `### ${getCharacter().user.name}'s recent state\n${userStateCtx}`, priority: 25, label: "user-state" });
+  } catch { /* non-fatal */ }
+
+  // Past sessions index — gives the agent awareness of conversation history
+  if (!plan || plan.sessions) {
+    const sessionIndex = new SessionIndexManager(config);
+    const sessionSummary = sessionIndex.getIndexSummary(10);
+    if (sessionSummary) {
+      prioritizedSections.push({ content:
+        `## Past conversation sessions\n` +
+        `You have ${sessionIndex.listAll().length} archived conversation sessions. ` +
+        `The user can browse them with /sessions or search with /recall <query>.\n\n` +
+        `Recent sessions:\n${sessionSummary}`,
+        priority: 20, label: "sessions" });
     }
   }
 
-  // Auto-generated rules from conversation analysis; skip in blank-slate mode
-  const autoRulesPath = path.join(config.statePath, "auto-rules.md");
-  if (!blankSlate && fs.existsSync(autoRulesPath)) {
-    const autoRules = fs.readFileSync(autoRulesPath, "utf-8").trim();
-    if (autoRules) {
-      sections.push(`## ${s().headers.auto_rules}\n${autoRules}`);
+  // Provenance warnings — narrative contamination alerts
+  if (!blankSlate) try {
+    const { formatProvenanceWarnings } = await import("../lib/provenance-audit.js");
+    const warnings = formatProvenanceWarnings(config.statePath);
+    if (warnings) prioritizedSections.push({ content: `### Data quality warnings\n${warnings}`, priority: 15, label: "provenance" });
+  } catch { /* non-fatal */ }
+
+  // Error metrics — lightweight system health
+  if (!blankSlate) try {
+    const { formatErrorMetricsContext } = await import("../lib/error-metrics.js");
+    const errCtx = formatErrorMetricsContext();
+    if (errCtx) prioritizedSections.push({ content: `### System health\n${errCtx}`, priority: 10, label: "error-metrics" });
+  } catch { /* non-fatal */ }
+
+  // ── Enforce dynamic section budget ──────────────────────────────────
+  // Sort by priority (highest first), then drop lowest-priority sections until within budget
+  const dynamicBudget = totalBudget - estimateTokens(stablePrompt);
+  const sorted = prioritizedSections.sort((a, b) => b.priority - a.priority);
+  const included: string[] = [];
+  let dynamicTokens = 0;
+  const dropped: string[] = [];
+
+  for (const section of sorted) {
+    const sectionTokens = estimateTokens(section.content);
+    if (dynamicTokens + sectionTokens <= dynamicBudget) {
+      included.push(section.content);
+      dynamicTokens += sectionTokens;
+    } else {
+      dropped.push(section.label);
     }
   }
 
-  const finalPrompt = sections.join("\n\n");
+  if (dropped.length > 0) {
+    log.warn(`context budget enforced: dropped [${dropped.join(", ")}] (budget: ${dynamicBudget}, used: ${dynamicTokens})`);
+  }
+
+  const finalPrompt = stablePrompt + "\n\n" + included.join("\n\n");
   const finalTokens = estimateTokens(finalPrompt);
-  log.info(`system prompt assembled: ~${finalTokens} tokens (budget: ${totalBudget})`);
+  const stableTokens = estimateTokens(stablePrompt);
+  log.info(`system prompt assembled: ~${finalTokens} tokens (stable: ~${stableTokens}, dynamic: ~${finalTokens - stableTokens}, sections: ${included.length}/${prioritizedSections.length}, budget: ${totalBudget})`);
   if (finalTokens > totalBudget) {
     log.warn(`system prompt exceeds budget: ${finalTokens} > ${totalBudget}`);
   }
