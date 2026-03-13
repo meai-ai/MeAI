@@ -97,6 +97,9 @@ import { initSelfNarrative } from "./self-narrative.js";
 import { initRelationalImpact } from "./relational-impact.js";
 import { initMaxOAuth, isMaxOAuthAvailable } from "./max-oauth.js";
 import { initClaudeRunnerApi } from "./claude-runner.js";
+import { initTurnDirective } from "./agent/turn-directive.js";
+import { initReconsolidationProposals } from "./memory/reconsolidation.js";
+import { initStateSchema, validateAllStates } from "./lib/state-schema.js";
 
 async function safeInit(name: string, fn: () => unknown | Promise<unknown>, critical = false): Promise<boolean> {
   try {
@@ -124,6 +127,9 @@ async function main(): Promise<void> {
     moduleTotal++;
     if (await safeInit(name, fn, critical)) moduleCount++;
   };
+
+  // Initialize state schema (versioned state files)
+  await track("state-schema", () => initStateSchema(config.statePath));
 
   // Critical modules — crash on failure
   await track("character", () => initCharacter(config.statePath), true);
@@ -206,6 +212,8 @@ async function main(): Promise<void> {
   await track("self-narrative", () => initSelfNarrative(config.statePath));
   await track("relational-impact", () => initRelationalImpact(config.statePath));
   await track("research", () => initResearch(config.statePath));
+  await track("turn-directive", () => initTurnDirective(config.statePath));
+  await track("reconsolidation", () => initReconsolidationProposals(config.statePath));
 
   // Discover and initialize extensible registries (all 5 axes)
   await Promise.all([
@@ -233,6 +241,9 @@ async function main(): Promise<void> {
     startBrainstem();
     console.log("[brainstem] Continuous neural thinking initialized");
   });
+
+  // Validate all registered state schemas (log warnings, no crash)
+  validateAllStates();
 
   const session = new SessionManager(config);
   const tools = new ToolRegistry();

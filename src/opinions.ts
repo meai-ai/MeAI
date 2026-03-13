@@ -15,12 +15,31 @@ import { getCharacter } from "./character.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
+export interface EvidenceItem {
+  text: string;
+  source: string;          // URL, discovery ID, or "conversation:YYYY-MM-DD"
+  quality: "firsthand" | "secondhand" | "hearsay" | "inference";
+  addedAt: number;
+}
+
+export interface OpinionRevision {
+  oldConfidence: number;
+  oldPosition: string;
+  trigger: string;
+  timestamp: number;
+}
+
 export interface Opinion {
   topic: string;
   position: string;
   confidence: number;       // 0-1
-  evidence: string[];
+  evidence: string[];       // legacy format, kept for backward compat
   evolvedAt: number;        // timestamp
+  status?: "held" | "undetermined";
+  evidenceFor?: EvidenceItem[];
+  evidenceAgainst?: EvidenceItem[];
+  revisionHistory?: OpinionRevision[];  // keep last 5
+  lastChallenged?: number;
 }
 
 interface OpinionState {
@@ -82,6 +101,32 @@ export class OpinionsEngine {
     this.saveOpinions(opinions);
   }
 
+  /** Challenge a belief with counter-evidence. */
+  challengeBelief(topic: string, counterEvidence: EvidenceItem): void {
+    const opinions = this.loadOpinions();
+    const existing = opinions.find(o => o.topic === topic);
+    if (!existing) return;
+
+    existing.evidenceAgainst = [...(existing.evidenceAgainst ?? []), counterEvidence].slice(-10);
+    existing.lastChallenged = Date.now();
+
+    // Auto-downgrade to undetermined if counter-evidence >= supporting evidence and confidence > 0.5
+    const forCount = (existing.evidenceFor ?? []).length;
+    const againstCount = existing.evidenceAgainst.length;
+    if (againstCount >= forCount && existing.confidence > 0.5) {
+      existing.status = "undetermined";
+    }
+
+    existing.evolvedAt = Date.now();
+    this.saveOpinions(opinions);
+  }
+
+  /** Get count of opinions that have revision history (for continuity value). */
+  getEvolvedOpinionCount(): number {
+    const opinions = this.loadOpinions();
+    return opinions.filter(o => (o.revisionHistory ?? []).length > 0).length;
+  }
+
   // ── Formatting ───────────────────────────────────────────────────────
 
   /** Format opinions for system prompt — helps the character push back naturally. */
@@ -116,3 +161,5 @@ export function loadOpinions(): Opinion[] { return _get().loadOpinions(); }
 export function saveOpinions(opinions: Opinion[]): void { _get().saveOpinions(opinions); }
 export function evolveOpinion(topic: string, updates: Partial<Pick<Opinion, "position" | "confidence" | "evidence">>): void { _get().evolveOpinion(topic, updates); }
 export function formatOpinionContext(): string { return _get().formatOpinionContext(); }
+export function challengeBelief(topic: string, counterEvidence: EvidenceItem): void { _get().challengeBelief(topic, counterEvidence); }
+export function getEvolvedOpinionCount(): number { return _get().getEvolvedOpinionCount(); }

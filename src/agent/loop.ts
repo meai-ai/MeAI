@@ -19,6 +19,7 @@ import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { claudeRun, claudeText } from "../claude-runner.js";
 import { runWithTrace } from "../lib/prompt-trace.js";
+import { generateTurnTraceId, TurnTraceBuilder } from "../lib/turn-trace.js";
 /** Generic reply result — decoupled from Telegraf's Message type. */
 type ReplyResult = { message_id: number } | { messageId: number | string };
 
@@ -59,6 +60,73 @@ import { getUserTZ } from "../lib/pst-date.js";
 import { getCharacter, s, renderTemplate } from "../character.js";
 import { brainstemFeedConversation, brainstemSetEmotion } from "../brainstem/index.js";
 import { incrementError } from "../lib/error-metrics.js";
+
+// ── New subsystem imports (graceful degradation via try/catch) ──────
+
+// Cognitive controller: signal gathering + retrieval policy
+import { gatherSignals, classifyConversationMode as ccClassifyMode, computeRetrievalPolicy } from "./cognitive-controller.js";
+import type { CognitiveSignals } from "./cognitive-controller.js";
+
+// Turn directive: per-turn style + adherence checking
+import { computeTurnDirective, deriveReplyControl, checkAdherence, type TurnDirective, type ReplyControl, type DirectiveAdherence } from "./turn-directive.js";
+
+// Post-turn pipeline: memory extraction, timeline, etc.
+import { runPostTurnPipeline, maybeExtractExemplar, preCompactionFlush } from "./post-turn.js";
+
+// LLM router: provider-specific calling (used alongside inline methods)
+import {
+  setTypingSpeedMultiplier as routerSetTypingSpeed,
+  type SendPhotoFn as RouterSendPhotoFn,
+  type SendVoiceFn as RouterSendVoiceFn,
+  type SendVideoFn as RouterSendVideoFn,
+  type SendAudioFn as RouterSendAudioFn,
+  type DeleteMessageFn as RouterDeleteMessageFn,
+  type MediaCallbacks,
+  type LLMCallResult,
+  type OnUsageFn,
+  callClaudeCode as routerCallClaudeCode,
+  callOpenAI as routerCallOpenAI,
+  callAnthropic as routerCallAnthropic,
+} from "./llm-router.js";
+
+// Slash commands (extracted)
+import { handleSlashCommand as externalHandleSlashCommand } from "./commands.js";
+
+// Deep brainstem signals (optional — graceful degradation)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let brainstemGetTurnSignals: (() => any) | undefined;
+let brainstemRestoreWM: ((data: Record<string, unknown>) => void) | undefined;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let brainstemBoostNode: ((topic: string, boost: number, source: any) => void) | undefined;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let brainstemLoadSlot: ((slotName: any, conceptId: string, label: string) => void) | undefined;
+let brainstemNudgeSelfEfficacy: ((delta: number) => void) | undefined;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let brainstemRecordIdentityEvent: ((event: any) => void) | undefined;
+try {
+  const bs = await import("../brainstem/index.js");
+  brainstemGetTurnSignals = bs.brainstemGetTurnSignals;
+  brainstemRestoreWM = bs.brainstemRestoreWM;
+  brainstemBoostNode = bs.brainstemBoostNode as typeof brainstemBoostNode;
+  brainstemLoadSlot = bs.brainstemLoadSlot as typeof brainstemLoadSlot;
+  brainstemNudgeSelfEfficacy = bs.brainstemNudgeSelfEfficacy;
+  brainstemRecordIdentityEvent = bs.brainstemRecordIdentityEvent;
+} catch { /* brainstem deep functions not available */ }
+
+// Blackboard (optional)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let blackboard: { write: (entry: any) => void; peek: (type: any) => any[] } | undefined;
+try {
+  const bb = await import("../blackboard.js");
+  blackboard = bb.blackboard as typeof blackboard;
+} catch { /* blackboard not available */ }
+
+// Memory search tokenizer (optional — used for carryover staleness gate)
+let tokenize: ((text: string) => string[]) | undefined;
+try {
+  const search = await import("../memory/search.js");
+  tokenize = search.tokenize;
+} catch { /* tokenize not available */ }
 
 const log = createLogger("loop");
 
@@ -129,8 +197,14 @@ function planResponse(
 /**
  * 7.4: Deterministic keyword classifier — no LLM call.
  * Detects conversation mode from user text.
+ * Falls back to cognitive-controller's classifier if available.
  */
 function classifyConversationMode(text: string): string {
+  // Prefer the cognitive-controller's classifier when available
+  try {
+    return ccClassifyMode(text);
+  } catch { /* fall through to inline classifier */ }
+
   const lower = text.toLowerCase();
 
   // Technical
@@ -474,6 +548,21 @@ export class AgentLoop {
   /** Temporary fallback model override (set when OpenAI quota is exhausted). */
   private _fallbackModel: string | undefined;
 
+  /** Last computed directive for carryover on compaction. */
+  private lastDirective: TurnDirective | null = null;
+
+  /** Last turn's adherence score for directive feedback loop. */
+  private lastAdherenceScore: number | null = null;
+
+  /** Consecutive turns with low adherence (< 0.5). */
+  private consecutiveLowAdherence = 0;
+
+  /** Last adherence result for carryover extraction. */
+  private lastAdherenceResult: { control: ReplyControl; adherence: DirectiveAdherence } | null = null;
+
+  /** Whether carryover has been restored this session. */
+  private carryoverRestored = false;
+
   /** Set the photo sending callback (wired from index.ts). */
   setSendPhoto(fn: SendPhotoFn): void {
     this.sendPhotoFn = fn;
@@ -579,12 +668,26 @@ export class AgentLoop {
     sendTyping: () => Promise<void>,
     imageData?: ImageData,
   ): Promise<void> {
-    // Handle slash commands
-    const slashResult = await this.handleSlashCommand(text);
+    // Handle slash commands — try extracted commands module first, fall back to inline
+    let slashResult: string | null = null;
+    try {
+      slashResult = await externalHandleSlashCommand(
+        text, this.session, this.config,
+        () => this.usage.getReport(),
+        this.lastSkillSelection,
+      );
+    } catch {
+      // Fall back to inline handler if commands.ts fails
+      slashResult = await this.handleSlashCommand(text);
+    }
     if (slashResult !== null) {
       await sendReply(slashResult);
       return;
     }
+
+    // Turn trace — unified observability record for this turn
+    const turnTraceId = generateTurnTraceId();
+    const traceBuilder = new TurnTraceBuilder(turnTraceId);
 
     // Provider routing: Claude CLI is default (free with Max subscription).
     // "gpt:" prefix forces OpenAI, "claude:" forces Claude CLI for a single message.
@@ -597,6 +700,12 @@ export class AgentLoop {
     } else if (text.toLowerCase().startsWith("claude:")) {
       actualText = text.slice(7).trimStart();
       useOpenAI = false;
+    }
+
+    // Restore cognitive carryover on first message of session
+    if (!this.carryoverRestored) {
+      this.carryoverRestored = true;
+      this.restoreSessionCarryover(actualText);
     }
 
     // 5.4: User messaging interrupts rumination → valence bonus
@@ -758,6 +867,41 @@ export class AgentLoop {
       brainstemFeedConversation(actualText, prevText);
     } catch { /* brainstem may not be initialized */ }
 
+    // ── Cognitive Controller: gather signals ──
+    let signals: CognitiveSignals | undefined;
+    try {
+      signals = gatherSignals(history, actualText, emotionalState, bodyState);
+      traceBuilder.recordSignals(signals as unknown as Record<string, unknown>);
+    } catch (err) {
+      log.warn("Cognitive controller signal gathering failed", err);
+    }
+
+    // ── TurnDirective: compute per-turn style directive ──
+    let directive: TurnDirective | undefined;
+    try {
+      const turnSignals = brainstemGetTurnSignals ? brainstemGetTurnSignals() : null;
+      directive = computeTurnDirective(actualText, turnSignals, bodyState, work, signals ?? { conversationMode: "casual", userTextLength: actualText.length, shortMessageCount: 0 }, this.lastAdherenceScore, this.consecutiveLowAdherence);
+      this.lastDirective = directive;
+      traceBuilder.recordDirective(directive);
+      log.info(
+        `turn-directive: goal=${directive.conversationGoal} ` +
+        `slots=${directive.mustReferenceSlots.length} ` +
+        `commitments=${directive.openCommitments.length} ` +
+        `stance=${directive.style.stance} length=${directive.style.targetLength}`
+      );
+    } catch (err) {
+      log.warn("TurnDirective computation failed, using inline planning", err);
+      incrementError("loop", "turn_directive");
+    }
+
+    // ── Retrieval policy from directive style ──
+    let retrievalPolicy: ReturnType<typeof computeRetrievalPolicy> | undefined;
+    try {
+      if (directive) {
+        retrievalPolicy = computeRetrievalPolicy(directive.style);
+      }
+    } catch { /* non-fatal */ }
+
     // ── Engagement quality hint ──
     // Analyze recent user messages for effort level and inject a subtle behavioral hint
     const recentUserEntries = history.filter(e => e.role === "user").slice(-5);
@@ -819,6 +963,7 @@ export class AgentLoop {
 
     // 9.4: Set typing speed modifier for streaming
     setTypingSpeedMultiplier(bodyState.fatigue, bodyState.caffeineLevel);
+    try { routerSetTypingSpeed(bodyState.fatigue, bodyState.caffeineLevel); } catch { /* non-fatal */ }
 
     // Anchor: inject current activity so the LLM doesn't contradict the schedule
     // (e.g., don't say "going to sleep" when the character is at pottery class)
@@ -925,7 +1070,7 @@ export class AgentLoop {
 
     // Separate emotion (always-on, dedicated section) from world context
     const worldContext = selected.map(b => b.text).join("\n\n");
-    const systemPrompt = await this.buildSystemPrompt(conversationContext, skillSelection, worldContext, finalEmotionContext, contextPlan);
+    const systemPrompt = await this.buildSystemPrompt(conversationContext, skillSelection, worldContext, finalEmotionContext, contextPlan, directive?.style?.memoryQuery, directive ?? null, retrievalPolicy);
 
     // Pre-decide voice vs text mode BEFORE streaming.
     // In voice mode we suppress text streaming (no placeholder, no edits) —
@@ -1052,8 +1197,127 @@ export class AgentLoop {
       selectedBlocks: selected,
     });
 
-    // Invalidate emotion cache so next turn generates fresh emotion
-    // that accounts for what just happened in the conversation
+    // TurnDirective adherence check (Phase B + F1)
+    if (directive) {
+      try {
+        const control = deriveReplyControl(directive);
+        const adherence = checkAdherence(accumulated, directive, control);
+        this.lastAdherenceScore = adherence.adherenceScore;
+        this.consecutiveLowAdherence = adherence.adherenceScore < 0.5
+          ? this.consecutiveLowAdherence + 1
+          : 0;
+        this.lastAdherenceResult = { control, adherence };
+
+        // Self-model write-back: adherence → self_efficacy
+        try {
+          if (brainstemNudgeSelfEfficacy) {
+            if (adherence.adherenceScore >= 0.7) {
+              brainstemNudgeSelfEfficacy(+0.02);
+            } else if (adherence.adherenceScore < 0.4) {
+              brainstemNudgeSelfEfficacy(-0.01);
+            }
+          }
+        } catch { /* non-fatal */ }
+
+        log.info(
+          `directive-adherence: score=${adherence.adherenceScore.toFixed(2)} ` +
+          `mode=${adherence.replyMode} ` +
+          `commitments=${adherence.surfacedCommitments.length}/${control.mustMention.length} ` +
+          `slots=${adherence.surfacedSlots.length}/${control.shouldGroundIn.length}`
+        );
+
+        traceBuilder.recordAdherence(adherence);
+
+        // Append to turn-directive.jsonl
+        try {
+          const replayEntry = {
+            ts: Date.now(),
+            traceId: turnTraceId,
+            directive: {
+              conversationGoal: directive.conversationGoal,
+              slotsCount: directive.mustReferenceSlots.length,
+              commitmentsCount: directive.openCommitments.length,
+              uncertaintyLevel: directive.uncertaintyLevel,
+              affectRegulationOverride: directive.affectRegulationOverride,
+            },
+            selectedBlockIds: selected.map(b => b.id),
+            surfacedCommitments: adherence.surfacedCommitments,
+            surfacedSlots: adherence.surfacedSlots,
+            replyMode: adherence.replyMode,
+            adherenceScore: adherence.adherenceScore,
+            responseLength: accumulated.length,
+            userMessageLength: actualText.length,
+          };
+          fs.appendFileSync(
+            path.join(this.config.statePath, "turn-directive.jsonl"),
+            JSON.stringify(replayEntry) + "\n",
+          );
+        } catch { /* non-fatal */ }
+
+        traceBuilder.finalize();
+      } catch (err) { incrementError("loop", "directive_replay"); }
+
+      // Record identity-relevant conversation events
+      try {
+        if (directive.identityLens && brainstemRecordIdentityEvent) {
+          const lens = directive.identityLens;
+          // Use character-agnostic stance detection patterns
+          const stanceMarkers = /I disagree|I don't think|not necessarily|I see it differently|I wouldn't say|actually I think/i;
+          const expressedStance = stanceMarkers.test(accumulated);
+          const selfShareMarkers = /I've been|for me|personally|I recently|to be honest/i;
+          const sharedSelf = selfShareMarkers.test(accumulated) && lens.selfDisclosureLevel !== "minimal";
+
+          if (expressedStance || sharedSelf) {
+            const adhScore = this.lastAdherenceResult?.adherence.adherenceScore ?? 1;
+            brainstemRecordIdentityEvent({
+              type: expressedStance ? "stance_expression" : "self_disclosure",
+              disagreementReadiness: lens.disagreementReadiness,
+              adherenceScore: adhScore,
+              topicOwnership: lens.topicOwnership,
+              timestamp: Date.now(),
+            });
+
+            // Extract exemplar on high-adherence identity events
+            if (adhScore >= 0.8) {
+              maybeExtractExemplar(
+                actualText, accumulated,
+                expressedStance ? "disagreed" : "disclosed",
+                adhScore,
+                lens.topicOwnership?.caresAbout?.[0] ?? "general",
+                this.config.statePath,
+              ).catch(() => {});
+            }
+          }
+
+          // topicOwnership → blackboard for proactive follow-up
+          if (blackboard && lens.topicOwnership && lens.topicOwnership.followupWorthiness > 0.5
+              && lens.topicOwnership.caresAbout.length > 0) {
+            const existingFollowups = blackboard.peek("identity_followup");
+            const topicsKey = [...lens.topicOwnership.caresAbout].sort().join(",");
+            const isDuplicate = existingFollowups.some((p: any) => {
+              const pTopics = ((p.payload.topics as string[]) ?? []).sort().join(",");
+              return pTopics === topicsKey;
+            });
+            if (!isDuplicate) {
+              blackboard.write({
+                source: "external",
+                type: "identity_followup",
+                payload: {
+                  topics: lens.topicOwnership.caresAbout,
+                  worthiness: lens.topicOwnership.followupWorthiness,
+                },
+                salience: 0.5,
+                ttl: 3 * 24 * 60 * 60 * 1000, // 3 days
+              });
+            }
+          }
+        }
+      } catch (err) { incrementError("loop", "identity_events"); }
+    } else {
+      traceBuilder.finalize();
+    }
+
+    // Soft-invalidate emotion cache — only regenerates if >5 min old.
     invalidateEmotionCache();
 
     // Store pending style features for interaction learning (style-reaction pairing)
@@ -1064,46 +1328,28 @@ export class AgentLoop {
       storePendingStyleFeatures(sessionId, styleFeatures, accumulated);
     } catch { /* non-fatal */ }
 
-    // Episode recording — capture significant conversation moments
-    try {
-      const { addEpisode } = await import("../memory/episodes.js");
-      // Only record episodes for substantive exchanges
-      if (actualText.length > 20 && accumulated.length > 30) {
-        const valence = emotionalState
-          ? ((emotionalState.valence ?? 5) - 5) / 5  // normalize 1-10 → -1 to 1
-          : 0;
-        const now = Date.now();
-        const dateStr = new Date(now).toISOString().slice(0, 10);
-        addEpisode({
-          when: now,
-          date: dateStr,
-          who: [getCharacter().user.name, getCharacter().name],
-          what: `${actualText.slice(0, 100)} → ${accumulated.slice(0, 100)}`,
-          emotionalValence: valence,
-          emotionalNote: emotionalState?.mood ?? "neutral",
-          topics: actualText.split(/[\s,;.!?]+/).filter(w => w.length >= 3).slice(0, 5),
-          significance: Math.min(1, actualText.length / 200),
-          sourceType: "observed",
-        });
-      }
-    } catch (err) { incrementError("loop", "episode_recording"); }
-
-    // Background memory extraction — only fires when the user message likely
-    // contains personal facts. Skipping trivial messages (greetings, commands,
-    // short queries) eliminates ~50-70% of extraction calls.
+    // Post-turn pipeline — background extraction (memory, timeline, intents, understanding)
     // NOTE: recentHistory is captured BEFORE appending the assistant entry (above)
     // to ensure the last entry is the user message, preventing the early-return bug.
-    if (this.shouldExtractMemories(actualText)) {
-      this.extractAndSaveMemories(recentHistory).catch((err) =>
-        console.error("Memory extraction error:", err),
-      );
-    }
-
-    // Timeline extraction — use LLM to extract any concrete facts from
-    // the conversation (both user message and the character's reply). Not limited
-    // to current schedule block — catches plans, events, activities, etc.
-    if (accumulated.length > 5) {
-      this.maybeExtractTimelineEvent(actualText, accumulated, work.currentBlock ?? undefined).catch(() => {});
+    try {
+      runPostTurnPipeline({
+        userMessage: actualText,
+        response: accumulated,
+        recentHistory,
+        currentBlock: work.currentBlock ?? undefined,
+        config: this.config,
+        tools: this.tools,
+      }).catch((err) => log.warn("Post-turn pipeline error", err));
+    } catch {
+      // Fallback: inline memory extraction if post-turn pipeline fails to load
+      if (this.shouldExtractMemories(actualText)) {
+        this.extractAndSaveMemories(recentHistory).catch((err) =>
+          console.error("Memory extraction error:", err),
+        );
+      }
+      if (accumulated.length > 5) {
+        this.maybeExtractTimelineEvent(actualText, accumulated, work.currentBlock ?? undefined).catch(() => {});
+      }
     }
 
     // Voice-or-text is now handled above (pre-decided before streaming).
@@ -1111,10 +1357,142 @@ export class AgentLoop {
 
     // Check if compaction is needed — flush important memories first
     if (this.session.needsCompaction()) {
+      // Save cognitive carryover before compaction
+      if (this.lastDirective) {
+        try {
+          const turnSignals = brainstemGetTurnSignals ? brainstemGetTurnSignals() : null;
+          const wmSnapshot = turnSignals ? Object.fromEntries(
+            Object.entries(turnSignals.slots)
+              .filter(([, s]: [string, any]) => s.conceptId !== null)
+              .map(([name, s]: [string, any]) => [name, { conceptId: s.conceptId, label: s.label, strength: s.strength }])
+          ) : {};
+          // Extract unresolved questions from last adherence
+          const unresolvedQuestions: string[] = [];
+          if (this.lastAdherenceResult) {
+            const { control: lastCtrl, adherence: lastAdh } = this.lastAdherenceResult;
+            for (const m of lastCtrl.mustMention) {
+              if (!lastAdh.surfacedCommitments.includes(m)) unresolvedQuestions.push(m);
+            }
+            for (const sg of lastCtrl.shouldGroundIn) {
+              if (!lastAdh.surfacedSlots.includes(sg)) unresolvedQuestions.push(sg);
+            }
+          }
+          writeJsonAtomic(path.join(this.config.statePath, "sessions", "carryover.json"), {
+            openCommitments: this.lastDirective.openCommitments,
+            activeGoalIds: this.lastDirective.activeGoalAlignment.map((g: any) => g.goalId),
+            wmSnapshot,
+            groundingHints: this.lastDirective.groundingHints.slice(0, 5),
+            unresolvedQuestions: unresolvedQuestions.slice(0, 5),
+            ts: Date.now(),
+          });
+          log.info("carryover saved before compaction");
+        } catch (err) {
+          log.warn("carryover save failed", err);
+        }
+      }
+
       console.log("Context threshold exceeded, flushing memories before compaction...");
-      await this.preCompactionFlush();
+      try {
+        await preCompactionFlush(() => this.session.loadAll(), this.tools);
+      } catch {
+        // Fall back to inline pre-compaction flush
+        await this.preCompactionFlush();
+      }
       console.log("Starting compaction...");
       await this.session.compact();
+    }
+  }
+
+  /**
+   * Restore cognitive state from previous session's carryover.
+   * Called once on first message of a new session.
+   */
+  private restoreSessionCarryover(userText: string): void {
+    try {
+      const carryoverPath = path.join(this.config.statePath, "sessions", "carryover.json");
+      if (!fs.existsSync(carryoverPath)) return;
+
+      // Guard: brainstem must be initialized
+      const turnSignals = brainstemGetTurnSignals ? brainstemGetTurnSignals() : null;
+      if (!turnSignals) {
+        log.info("carryover: brainstem not initialized yet, deferring restore");
+        return;
+      }
+
+      interface CarryoverData {
+        openCommitments: Array<{ content: string; urgency: number }>;
+        activeGoalIds: string[];
+        wmSnapshot: Record<string, unknown>;
+        groundingHints: string[];
+        unresolvedQuestions?: string[];
+        ts: number;
+      }
+      const raw = readJsonSafe<Record<string, unknown>>(carryoverPath, {});
+      if (!raw || !raw.ts) {
+        try { fs.unlinkSync(carryoverPath); } catch { /* ok */ }
+        return;
+      }
+      const carryover = raw as unknown as CarryoverData;
+
+      // Skip if > 4 hours old
+      if (Date.now() - carryover.ts > 4 * 60 * 60 * 1000) {
+        log.info("carryover expired (>4h), skipping");
+        try { fs.unlinkSync(carryoverPath); } catch { /* ok */ }
+        return;
+      }
+
+      // Restore WM slots
+      if (brainstemRestoreWM && carryover.wmSnapshot && Object.keys(carryover.wmSnapshot).length > 0) {
+        brainstemRestoreWM(carryover.wmSnapshot);
+        log.info(`carryover: restored ${Object.keys(carryover.wmSnapshot).length} WM slots`);
+      }
+
+      // Restore commitments as goal_active WM slots
+      if (brainstemLoadSlot && Array.isArray(carryover.openCommitments)) {
+        const valid = carryover.openCommitments.filter(
+          c => typeof c.content === "string" && typeof c.urgency === "number"
+        );
+        const sorted = [...valid]
+          .sort((a, b) => a.urgency - b.urgency)
+          .slice(0, 3);
+        for (let i = 0; i < sorted.length; i++) {
+          brainstemLoadSlot("goal_active", `carryover_${Date.now()}_${i}`, sorted[i].content);
+        }
+      }
+
+      // Restore unresolved questions
+      if (brainstemLoadSlot && Array.isArray(carryover.unresolvedQuestions) && carryover.unresolvedQuestions.length > 0) {
+        for (let i = 0; i < carryover.unresolvedQuestions.length; i++) {
+          brainstemLoadSlot("open_question", `unresolved_${Date.now()}_${i}`, carryover.unresolvedQuestions[i]);
+        }
+        log.info(`carryover: restored ${carryover.unresolvedQuestions.length} unresolved questions`);
+      }
+
+      // Staleness gate for concept boosts
+      if (brainstemBoostNode && tokenize && Array.isArray(carryover.groundingHints) && carryover.groundingHints.length > 0) {
+        const userTokens = new Set(tokenize(userText));
+        const hintTokens = carryover.groundingHints.flatMap(h => tokenize!(h));
+        let overlap = 0;
+        for (const t of hintTokens) {
+          if (userTokens.has(t)) overlap++;
+        }
+        const overlapRatio = hintTokens.length > 0 ? overlap / hintTokens.length : 0;
+
+        if (overlapRatio > 0.1) {
+          for (const hint of carryover.groundingHints) {
+            brainstemBoostNode(hint, 0.3, "replay");
+          }
+          log.info(`carryover: boosted ${carryover.groundingHints.length} concepts (overlap=${overlapRatio.toFixed(2)})`);
+        } else {
+          log.info(`carryover: skipped concept boosts (overlap=${overlapRatio.toFixed(2)} < 0.1, new topic)`);
+        }
+      }
+
+      // Delete carryover file only after successful restore
+      try { fs.unlinkSync(carryoverPath); } catch { /* ok */ }
+      log.info("carryover restored and cleaned up");
+    } catch (err) {
+      log.warn("carryover restore failed (file preserved for retry)", err);
     }
   }
 
@@ -1381,8 +1759,8 @@ export class AgentLoop {
     return calls;
   }
 
-  private async buildSystemPrompt(conversationContext?: string, skillSelection?: SkillSelection, worldContext?: string, emotionContext?: string, plan?: ContextPlan): Promise<string> {
-    return assembleSystemPrompt(this.config, conversationContext, skillSelection, worldContext, emotionContext, plan);
+  private async buildSystemPrompt(conversationContext?: string, skillSelection?: SkillSelection, worldContext?: string, emotionContext?: string, plan?: ContextPlan, memoryQuery?: string, directive?: TurnDirective | null, retrievalPolicy?: ReturnType<typeof computeRetrievalPolicy>): Promise<string> {
+    return assembleSystemPrompt(this.config, conversationContext, skillSelection, worldContext, emotionContext, plan, memoryQuery, directive, retrievalPolicy);
   }
 
   /**

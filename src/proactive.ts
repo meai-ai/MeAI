@@ -35,7 +35,9 @@ import { generateVoice, isTTSEnabled, getVoiceDailyCount } from "./tts.js";
 import { addTimelineEvent, enqueueTimelineJob, getTodayTimeline } from "./timeline.js";
 import { getCharacter, s, renderTemplate } from "./character.js";
 import { recordCharacterOutreach, markAwaitingReply, isGoodTimeToReachOut, getAttachmentState } from "./lib/relationship-model.js";
+import { recordProactiveSent, getTimingAdvice, formatLearningContext, extractTopicsFromText, getTopicPreferences, getPendingProactive } from "./interaction-learning.js";
 import { checkProactiveGate } from "./lib/action-gate.js";
+import { formatPredictions, getUserState } from "./user-state.js";
 import { createLogger } from "./lib/logger.js";
 
 const MIN_DAILY_SELFIES = 5;
@@ -435,6 +437,14 @@ export class ProactiveScheduler {
 
     console.log(`[proactive] ${getCharacter().name} reached out: ${message.slice(0, 60)}...`);
 
+    // Record interaction signal for learning (with topic extraction)
+    try {
+      const userFocuses = getUserState().focuses.map(f => f.topic);
+      const msgTopics = extractTopicsFromText(message);
+      const sentTopics = [...new Set([...userFocuses, ...msgTopics])].slice(0, 5);
+      recordProactiveSent(message.slice(0, 100), sentTopics.length > 0 ? sentTopics : undefined);
+    } catch { try { recordProactiveSent(message.slice(0, 100)); } catch { /* non-fatal */ } }
+
     // Extract timeline events from proactive message (fire-and-forget)
     this.extractProactiveTimeline(message).catch(() => {});
 
@@ -635,9 +645,15 @@ export class ProactiveScheduler {
 
     // Pending proactive — warn if character already sent a message with no reply
     try {
-      const attachment = getAttachmentState();
-      if (attachment.lastMessageUnanswered) {
-        parts.push(`⚠️ You recently sent a message that ${_char.user.name} hasn't replied to yet. Don't repeat similar topics or press further — either pick a completely different angle, or ${SKIP_TOKEN}.`);
+      const pendingInfo = getPendingProactive();
+      if (pendingInfo.pending && pendingInfo.sentAt) {
+        const minAgo = Math.round((Date.now() - pendingInfo.sentAt) / 60000);
+        parts.push(`⚠️ You sent a proactive message ${minAgo} minutes ago and ${_char.user.name} hasn't replied yet. Don't repeat similar topics or press further — either pick a completely different angle, or ${SKIP_TOKEN}.`);
+      } else {
+        const attachment = getAttachmentState();
+        if (attachment.lastMessageUnanswered) {
+          parts.push(`⚠️ You recently sent a message that ${_char.user.name} hasn't replied to yet. Don't repeat similar topics or press further — either pick a completely different angle, or ${SKIP_TOKEN}.`);
+        }
       }
     } catch { /* non-fatal */ }
 
@@ -664,6 +680,32 @@ export class ProactiveScheduler {
     if (freshContent) {
       parts.push(`\nNews and articles you came across today (source material — don't relay directly, chat about it in your own words):\n${freshContent}`);
     }
+
+    // Interaction learning — timing advice + topic preferences
+    try {
+      const advice = getTimingAdvice();
+      if (advice.bestTimes.length > 0 || advice.avoidTimes.length > 0) {
+        const learningParts: string[] = [`Overall reply rate: ${Math.round(advice.replyRate * 100)}%`];
+        if (advice.bestTimes.length > 0) learningParts.push(`High reply rate: ${advice.bestTimes.join(", ")}`);
+        if (advice.avoidTimes.length > 0) learningParts.push(`Low reply rate: ${advice.avoidTimes.join(", ")}`);
+        parts.push(`Interaction learning: ${learningParts.join(" | ")}`);
+      }
+      const { preferred, avoided } = getTopicPreferences();
+      if (preferred.length > 0) {
+        parts.push(`Topics ${_char.user.name} engages with (prefer these): ${preferred.slice(0, 5).join(", ")}`);
+      }
+      if (avoided.length > 0) {
+        parts.push(`Topics ${_char.user.name} rarely responds to (avoid bringing up): ${avoided.slice(0, 3).join(", ")}`);
+      }
+    } catch { /* non-fatal */ }
+
+    // Predictive Theory of Mind — temporal pattern predictions about the user
+    try {
+      const predText = formatPredictions();
+      if (predText) {
+        parts.push(`\nYour hunches (based on past patterns): ${predText}`);
+      }
+    } catch { /* non-fatal */ }
 
     return parts.join("\n");
   }
@@ -844,8 +886,11 @@ export class ProactiveScheduler {
     // Stricter dedup when a previous proactive is still unanswered
     let hasUnanswered = false;
     try {
-      hasUnanswered = getAttachmentState().lastMessageUnanswered;
-    } catch { /* non-fatal */ }
+      const pending = getPendingProactive();
+      hasUnanswered = pending.pending;
+    } catch {
+      try { hasUnanswered = getAttachmentState().lastMessageUnanswered; } catch { /* non-fatal */ }
+    }
     const threshold = hasUnanswered ? 0.25 : 0.4;
     const lookback = hasUnanswered ? 10 : 6;
 

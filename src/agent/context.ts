@@ -25,7 +25,7 @@ import { formatGoalContext } from "../goals.js";
 import { formatNarrativeContext } from "../narrative.js";
 import { formatDocumentContext, getDocumentsDir } from "../documents.js";
 import type { ContextPlan } from "./context-planner.js";
-import type { TurnDirective } from "./turn-directive.js";
+import { type TurnDirective, renderTurnDirectiveSection } from "./turn-directive.js";
 import type { RetrievalPolicy } from "./cognitive-controller.js";
 import { getRecentMoments } from "../moments.js";
 import { getCharacter, s, renderTemplate, isBlankSlate, BLANK_SLATE_PERSONA } from "../character.js";
@@ -602,6 +602,11 @@ Use memory_set to remember things about the user themselves.`);
   // lowest-priority sections are dropped to fit.
   const prioritizedSections: Array<{ content: string; priority: number; label: string }> = [];
 
+  // Cognitive directive — injected first so it frames all subsequent context
+  if (directive) {
+    prioritizedSections.push({ content: renderTurnDirectiveSection(directive), priority: 100, label: "directive" });
+  }
+
   // Memories — category-aware loading (budget-limited, skip when plan says false)
   if (!plan || plan.memories) {
     const memorySection = await assembleMemoryContext(config, conversationContext, memoryQuery, directive, retrievalPolicy);
@@ -688,6 +693,13 @@ Use memory_set to remember things about the user themselves.`);
     } catch { /* non-fatal */ }
   }
 
+  // Intent capture — open commitments and promises
+  if (!blankSlate) try {
+    const { formatIntentContext } = await import("../intents.js");
+    const intentCtx = formatIntentContext();
+    if (intentCtx) prioritizedSections.push({ content: intentCtx, priority: 60, label: "intents" });
+  } catch { /* non-fatal */ }
+
   // 8.4: Opinions — evolving viewpoints for natural disagreement; skip in blank-slate mode
   if (!blankSlate && (!plan || plan.opinions)) {
     try {
@@ -697,6 +709,17 @@ Use memory_set to remember things about the user themselves.`);
       }
     } catch { /* non-fatal */ }
   }
+
+  // Continuity snapshot — cross-session context from heartbeat
+  if (!blankSlate) try {
+    const { getContinuitySnapshot } = await import("../heartbeat.js");
+    const continuity = getContinuitySnapshot();
+    if (continuity.value > 0.3) {
+      prioritizedSections.push({ content:
+        `## Recent activities\n` + continuity.components.map((c: string) => `- ${c}`).join("\n"),
+        priority: 50, label: "continuity" });
+    }
+  } catch { /* non-fatal */ }
 
   // 10.1: Narrative arcs — skip in blank-slate mode
   if (!blankSlate && (!plan || plan.narrative)) {
@@ -779,6 +802,37 @@ Use memory_set to remember things about the user themselves.`);
     const { formatUserStateContext } = await import("../user-state.js");
     const userStateCtx = formatUserStateContext();
     if (userStateCtx) prioritizedSections.push({ content: `### ${getCharacter().user.name}'s recent state\n${userStateCtx}`, priority: 25, label: "user-state" });
+  } catch { /* non-fatal */ }
+
+  // Prediction context — user behavioral predictions
+  if (!blankSlate) try {
+    const { formatPredictionContext } = await import("../heartbeat.js");
+    const predCtx = formatPredictionContext(config.statePath);
+    if (predCtx) {
+      prioritizedSections.push({ content: `## Self-knowledge\n${predCtx}`, priority: 25, label: "predictions" });
+    }
+  } catch { /* non-fatal */ }
+
+  // Emerging values — patterns crystallizing into values
+  if (!blankSlate) try {
+    const { formatValueContext } = await import("../lib/value-formation.js");
+    const valueCtx = formatValueContext(config.statePath);
+    if (valueCtx) {
+      prioritizedSections.push({ content: valueCtx, priority: 25, label: "emerging-values" });
+    }
+  } catch { /* non-fatal */ }
+
+  // Relational reciprocity + personal stance
+  if (!blankSlate) try {
+    const { formatReciprocityContext, formatPersonalStanceContext } = await import("../relational-impact.js");
+    const reciprocityCtx = formatReciprocityContext();
+    if (reciprocityCtx) {
+      prioritizedSections.push({ content: reciprocityCtx, priority: 20, label: "reciprocity" });
+    }
+    const stanceCtx = formatPersonalStanceContext();
+    if (stanceCtx) {
+      prioritizedSections.push({ content: stanceCtx, priority: 20, label: "personal-stance" });
+    }
   } catch { /* non-fatal */ }
 
   // Past sessions index — gives the agent awareness of conversation history

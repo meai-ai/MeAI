@@ -34,33 +34,40 @@ import path from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "./lib/atomic-file.js";
 import type { AppConfig } from "./types.js";
 import { getStoreManager } from "./memory/store-manager.js";
+import { shouldReconsolidate } from "./memory/reconsolidation.js";
 import type { CuriosityEngine } from "./curiosity.js";
 import type { ProactiveScheduler } from "./proactive.js";
 import type { SocialEngine } from "./social.js";
 import type { ActivityScheduler } from "./activities.js";
+import { appendActionLedger, generateActionId, type ActionLedgerEntry, type ActionArtifact } from "./activities.js";
 import type { WatchdogEngine } from "./watchdog.js";
-import { getEmotionalState, formatEmotionContext, invalidateEmotionCache } from "./emotion.js";
+import { getEmotionalState, formatEmotionContext, invalidateEmotionCache, getActiveThreads, getNarrativeThreads } from "./emotion.js";
 import { recordHobbySession, loadHobbyProgress } from "./hobbies.js";
 import { formatHobbyContext } from "./hobbies.js";
 import { formatSocialSummary } from "./friends.js";
-import { getWorkContext, fetchMarketSnapshot, type TimeBlock, getSleepData, getPetMoments, getOutfit, fetchWeather } from "./world.js";
+import { getWorkContext, fetchMarketSnapshot, type TimeBlock, getSleepData, getPetMoments, getOutfit, fetchWeather, classifyBlock } from "./world.js";
 import { getBodyState, formatBodyContext, getCurrentPeriodPhase } from "./body.js";
 import { loadSubscriptions } from "./interests.js";
+import { generatePredictions, formatPredictions } from "./user-state.js";
 import { claudeText } from "./claude-runner.js";
 import { runWithTrace } from "./lib/prompt-trace.js";
 import { checkNotifications, getUnread } from "./notifications.js";
 import { createLogger } from "./lib/logger.js";
+import { incrementError, flushErrorMetrics, formatErrorMetricsContext } from "./lib/error-metrics.js";
 import { runContextAnalysis } from "./agent/context-eval.js";
-import { addDiaryEntry, getPastEntryDates, type DiaryEntry } from "./journal.js";
-import { evolveOpinion, loadOpinions } from "./opinions.js";
-import { addGoal, getActiveGoals, type Goal } from "./goals.js";
-import { advanceArcs } from "./narrative.js";
+import { addDiaryEntry, getPastEntryDates, getThemeHistory, type DiaryEntry } from "./journal.js";
+import { evolveOpinion, loadOpinions, challengeBelief, getEvolvedOpinionCount, type EvidenceItem } from "./opinions.js";
+import { addGoal, getActiveGoals, getDriveSignal, getGoalHealth, recordGoalInvestment, type Goal } from "./goals.js";
+import { advanceArcs, getActiveArcs } from "./narrative.js";
 import { maybeMoment, isMomentsEnabled } from "./moments.js";
 import { maybeProactiveSelfie } from "./selfie.js";
 import { getBlockEvent, addTimelineEvent, getTodayTimeline, enqueueTimelineJob, type TimelineEvent } from "./timeline.js";
 import { pstDateStr, getUserTZ } from "./lib/pst-date.js";
 import type { ResearchEngine } from "./research.js";
 import {
+  brainstemBoostNode,
+  brainstemGetTopK,
+  brainstemGetEntropy,
   brainstemGetActionPreferences,
   brainstemWantsToAct,
   brainstemGetTurnSignals,
@@ -69,11 +76,15 @@ import {
   brainstemResolvePendingOutcomes,
   brainstemRecordPendingReachOut,
   brainstemSetEmotion,
+  brainstemMarkConversation,
   getBrainstemRecentThoughts,
+  brainstemGetRecentIdentityEvents,
 } from "./brainstem/index.js";
 import type { ActGateArm } from "./brainstem/thought-gate.js";
 import { computeVeto, type BrainstemVeto } from "./brainstem/governance.js";
-import { formatLearningContext } from "./interaction-learning.js";
+import { emitState } from "./lib/state-bus.js";
+import { blackboard, DEFAULT_TTL } from "./blackboard.js";
+import { formatLearningContext, computePatterns as computeInteractionPatterns } from "./interaction-learning.js";
 import { getAttachmentState, updateAttachmentState } from "./lib/relationship-model.js";
 import { repairAndParseJson } from "./lib/json-repair.js";
 import { s, renderTemplate, getCharacter } from "./character.js";
@@ -221,6 +232,9 @@ const PULSE_JITTER_MS = 60 * 1000;
 const WARMUP_MIN = 2;
 const WARMUP_MAX = 3;
 
+/** Minimum confidence for direct skill dispatch (bypassing LLM evaluation) */
+const DIRECT_DISPATCH_MIN_CONFIDENCE = 0.7;
+
 /** Minimum cooldowns after each action type (minutes) */
 const COOLDOWNS: Record<string, number> = {
   explore: 45,      // Don't explore again for at least 45 min
@@ -273,12 +287,17 @@ interface VitalSigns {
   scheduleNextBlock: TimeBlock | null;
   /** Current location from schedule */
   scheduleLocation: string;
+  /** Execution mode from classifyBlock */
+  scheduleExecutionMode?: "real" | "experiential" | "groundable";
+  /** Ground-to activity type when mode=groundable */
+  scheduleGroundTo?: string;
 }
 
 interface HeartbeatDecision {
   action: HeartbeatAction;
   reason: string;           // Why this action, in the character's voice
   confidence: number;       // 0-1
+  alternatives?: Array<{ action: string; reason: string; score: number }>;
 }
 
 interface HeartbeatLog {
@@ -289,6 +308,14 @@ interface HeartbeatLog {
   executed: boolean;
   duration_ms: number;
   error?: string;
+  directDispatch?: boolean;
+  dispatchSkill?: string;
+  alternatives?: Array<{ action: string; reason: string; score: number }>;
+  governanceVeto?: {
+    authorityLevel: string;
+    reasons: string[];
+    blockedActions?: string[];
+  };
 }
 
 // ── Heartbeat Engine ─────────────────────────────────────────────────
@@ -333,6 +360,9 @@ export class Heartbeat {
   // Block transition: tracks the last seen block to detect changes
   private lastBlockKey = "";
 
+  // Nightly jobs tracking
+  private lastNightlyRunDate = "";
+
   constructor(
     config: AppConfig,
     modules: {
@@ -365,15 +395,15 @@ export class Heartbeat {
   boostActivation(topic: string, boost: number, source: string): void {
     const existing = this.activations.get(topic);
     if (existing) {
+      // Anti-obsession gate: reject boost if already at max consecutive
+      if (existing.consecutiveBoosts >= ACTIVATION_MAX_CONSECUTIVE) {
+        log.info(`[governance] Rejected boost for topic "${topic}" — at max consecutive boosts`);
+        return;
+      }
       existing.weight = Math.min(1, existing.weight + boost);
       existing.lastBoosted = Date.now();
       existing.source = source;
       existing.consecutiveBoosts++;
-      // Force cooldown if boosted too many times consecutively
-      if (existing.consecutiveBoosts >= ACTIVATION_MAX_CONSECUTIVE) {
-        existing.weight *= 0.3;
-        existing.consecutiveBoosts = 0;
-      }
     } else {
       this.activations.set(topic, {
         weight: Math.min(1, boost),
@@ -390,6 +420,14 @@ export class Heartbeat {
         this.activations.delete(sorted[i][0]);
       }
     }
+
+    // Delegate to brainstem concept graph
+    const brainstemSource = (source === "curiosity" || source === "conversation" || source === "notification")
+      ? source as "curiosity" | "conversation" | "notification"
+      : "memory" as const;
+    try {
+      brainstemBoostNode(topic, boost, brainstemSource);
+    } catch { /* brainstem may not be initialized yet */ }
   }
 
   /** Get Shannon entropy of activation weights (0 = concentrated, 1 = evenly spread). */
@@ -452,22 +490,60 @@ export class Heartbeat {
     return this.pulseCount;
   }
 
-  /** Get continuity snapshot for context injection. */
+  /** Compute how much accumulated context the system has built up. */
   getContinuitySnapshot(): { value: number; components: string[] } {
     const components: string[] = [];
     let value = 0;
 
-    // Pulse count contribution
-    if (this.pulseCount > 5) {
-      value += 0.3;
-      components.push(`${this.pulseCount} heartbeats`);
-    }
+    // Active goals with investment (0.1 per goal, max 0.3)
+    try {
+      const goalsWithInvestment = getActiveGoals().filter(g => (g.investment ?? 0) > 0);
+      const goalContrib = Math.min(0.3, goalsWithInvestment.length * 0.1);
+      if (goalContrib > 0) {
+        value += goalContrib;
+        const goalNames = goalsWithInvestment.slice(0, 3).map(g => g.description.slice(0, 25)).join(", ");
+        components.push(`working on: ${goalNames}`);
+      }
+    } catch { /* non-fatal */ }
 
-    // Topic activation contribution
-    const topActs = this.getTopActivations(3);
-    if (topActs.length > 0) {
-      value += 0.3;
-      const topicNames = topActs.map(a => a.topic.slice(0, 15)).join(", ");
+    // Deep curiosity discoveries (0.05 per deep dive, max 0.2)
+    try {
+      const deepDives = this.curiosity.getRecentDiscoveries(20).filter(d => d.depth === "deep");
+      const deepContrib = Math.min(0.2, deepDives.length * 0.05);
+      if (deepContrib > 0) {
+        value += deepContrib;
+        const diveTopics = deepDives.slice(0, 2).map(d => (d.query ?? "").slice(0, 20)).filter(Boolean).join(", ");
+        components.push(diveTopics ? `deep dives: ${diveTopics}` : `${deepDives.length} deep explorations`);
+      }
+    } catch { /* non-fatal */ }
+
+    // Active narrative arcs (0.1 per arc, max 0.2)
+    try {
+      const arcs = getActiveArcs();
+      const arcContrib = Math.min(0.2, arcs.length * 0.1);
+      if (arcContrib > 0) {
+        value += arcContrib;
+        const arcTitles = arcs.slice(0, 2).map(a => a.title.slice(0, 20)).join(", ");
+        components.push(`story arcs: ${arcTitles}`);
+      }
+    } catch { /* non-fatal */ }
+
+    // Opinions with revision history (0.05 per evolved opinion, max 0.15)
+    try {
+      const evolvedCount = getEvolvedOpinionCount();
+      const opinionContrib = Math.min(0.15, evolvedCount * 0.05);
+      if (opinionContrib > 0) {
+        value += opinionContrib;
+        components.push(`${evolvedCount} evolved opinions`);
+      }
+    } catch { /* non-fatal */ }
+
+    // Active attention topics with weight > 0.2 (0.03 per topic, max 0.15)
+    const activeTopicEntries = [...this.activations.entries()].filter(([, a]) => a.weight > 0.2);
+    const topicContrib = Math.min(0.15, activeTopicEntries.length * 0.03);
+    if (topicContrib > 0) {
+      value += topicContrib;
+      const topicNames = activeTopicEntries.sort(([, a], [, b]) => b.weight - a.weight).slice(0, 3).map(([t]) => t.slice(0, 15)).join(", ");
       components.push(`focus: ${topicNames}`);
     }
 
@@ -521,6 +597,10 @@ export class Heartbeat {
     const startMs = Date.now();
     this.pulseCount++;
 
+    // Save pulse timestamp immediately so watchdog doesn't report stalled
+    // during long-running pulse operations (narrate, execute, etc.)
+    this.saveActionTimes();
+
     try {
       // 0. Check immune system — is the circuit breaker open?
       if (this.watchdog?.isCircuitOpen()) {
@@ -534,18 +614,36 @@ export class Heartbeat {
         new Date().toLocaleString("en-US", { timeZone: getUserTZ() }),
       ).getHours();
       if (userHour >= 0 && userHour < 7) {
+        // Run nightly jobs during 2-4am window
+        await this.nightlyJobs(userHour).catch(err => {
+          log.warn("nightly jobs error", err);
+          incrementError("heartbeat", "nightly_jobs");
+        });
         console.log(`[heartbeat] 💓 #${this.pulseCount} → rest 😴 — late night, time to sleep`);
+        this.saveActionTimes(); // record pulse so watchdog doesn't report stalled
         setTimeout(() => this.pulse(), DEFAULT_PULSE_INTERVAL_MS);
         return;
       }
 
-      // 0.5. Check all notification sources for new items
-      await checkNotifications().catch(err =>
-        console.error("[heartbeat] Notification check error:", err),
-      );
+      // Missed-window fallback — catch-up before noon if nightly didn't run
+      {
+        const today = pstDateStr();
+        if (this.lastNightlyRunDate !== today && userHour < 12) {
+          await this.nightlyJobs(userHour).catch(err => {
+            log.warn("nightly jobs fallback error", err);
+            incrementError("heartbeat", "nightly_jobs");
+          });
+        }
+      }
 
-      // 0.9. Decay activations each pulse
+      // 0.5. Decay activations before gathering vitals
       this.decayActivations();
+
+      // 0.6. Check all notification sources for new items
+      await checkNotifications().catch(err => {
+        console.error("[heartbeat] Notification check error:", err);
+        incrementError("heartbeat", "notifications");
+      });
 
       // 1. Gather vital signs
       const vitals = await this.gatherVitals();
@@ -578,6 +676,26 @@ export class Heartbeat {
       let turnSignals: ReturnType<typeof brainstemGetTurnSignals> = null;
       try { turnSignals = brainstemGetTurnSignals(); } catch { /* brainstem may not be initialized */ }
 
+      // 1.8. Check commitment deadlines → post to blackboard for TurnDirective consumption
+      if (turnSignals) {
+        try {
+          const DEADLINE_ALERT_MS = 2 * 60 * 60 * 1000; // 2 hours
+          for (const c of turnSignals.openCommitments) {
+            const age = Date.now() - c.createdAt;
+            // High urgency commitments that have been open for > 2h
+            if (c.urgency > 0.5 && age > DEADLINE_ALERT_MS) {
+              blackboard.write({
+                source: "heartbeat",
+                type: "unresolved_commitment",
+                payload: { content: c.content, urgency: c.urgency, ageMs: age },
+                salience: Math.min(1.0, c.urgency + 0.1),
+                ttl: DEFAULT_TTL,
+              });
+            }
+          }
+        } catch (err) { log.warn("commitment check error", err); incrementError("heartbeat", "commitment_check"); }
+      }
+
       // 2. Check cooldowns + schedule constraints — which actions are even available?
       let availableActions = this.getAvailableActions(vitals);
 
@@ -604,25 +722,44 @@ export class Heartbeat {
         } catch { /* brainstem governance may not be available */ }
       }
 
-      // 3. If rest is the only option, skip the LLM call — use a deterministic decision
+      // 3. Decide action: direct dispatch → rest-only shortcut → LLM evaluation
       let decision: HeartbeatDecision;
       let busySkip = false;
-      if (availableActions.length === 1 && availableActions[0] === "rest") {
+      let directDispatchSkill: string | undefined;
+
+      // 3a. Try direct dispatch — bypass LLM when brainstem has high-confidence intent
+      const direct = this.tryDirectDispatch(availableActions, vitals);
+      if (direct) {
+        decision = { action: direct.action, reason: direct.reason, confidence: direct.confidence };
+        directDispatchSkill = direct.skillName;
+      } else if (availableActions.length === 1 && availableActions[0] === "rest") {
         const block = vitals.scheduleBlock;
         let reason: string;
         if (block) {
-          // Use timeline entry if available (concrete), fall back to schedule activity (generic)
+          // Use timeline entry if available (concrete), then active thread, fall back to schedule activity (generic)
           const timelineEvent = getBlockEvent(block.category, vitals.hour);
-          const activity = timelineEvent ? timelineEvent.summary : block.activity;
+          let activity: string;
+          if (timelineEvent) {
+            activity = timelineEvent.summary;
+          } else if (block.busy && block.category === "work") {
+            const threads = getActiveThreads();
+            activity = threads.length > 0 ? threads[0] : block.activity;
+          } else {
+            activity = block.activity;
+          }
           reason = `${block.busy ? "busy: " : ""}${activity} (${block.location})`;
         } else {
           reason = "no scheduled block";
         }
         decision = { action: "rest", reason, confidence: 1 };
         busySkip = !!block;
+
+        // Ensure emotion refreshes during busy periods (cache is 2h, but
+        // busy-skip bypasses evaluate() which normally triggers the refresh)
+        getEmotionalState().catch(() => {});
       } else {
         // LLM evaluates: what should I do?
-        decision = await this.evaluate(vitals, availableActions);
+        decision = await this.evaluate(vitals, availableActions, backgroundVeto);
       }
 
       // 3.5. Check daily budget with watchdog
@@ -663,7 +800,9 @@ export class Heartbeat {
       let executed = false;
       if (decision.action !== "rest") {
         this.consecutiveRests = 0;
+        emitState({ type: "activity:started", activity: decision.action });
         executed = await this.execute(decision);
+        emitState({ type: "activity:completed", activity: decision.action, outcome: executed ? "success" : "failed" });
         if (executed) {
           this.lastActionAt[decision.action] = Date.now();
           this.saveActionTimes();
@@ -742,6 +881,8 @@ export class Heartbeat {
         decision,
         executed,
         duration_ms: Date.now() - startMs,
+        ...(directDispatchSkill ? { directDispatch: true, dispatchSkill: directDispatchSkill } : {}),
+        ...(decision.alternatives ? { alternatives: decision.alternatives } : {}),
         ...(backgroundVeto && backgroundVeto.reasons.length > 0 ? {
           governanceVeto: {
             authorityLevel: backgroundVeto.authorityLevel,
@@ -751,10 +892,34 @@ export class Heartbeat {
         } : {}),
       });
 
+      // 6a. Conflict logging — when multiple strong signals competed
+      if (decision.action !== "rest" && availableActions.length > 2) {
+        const boostText = this.computeSignalBoosts(vitals);
+        const strongSignals = boostText.split("\n").filter(l => l.includes("[strong signal]") || l.includes("[drive]"));
+        if (strongSignals.length > 1) {
+          const logEntry = {
+            type: "conflict",
+            timestamp: Date.now(),
+            competing: availableActions.filter(a => a !== "rest"),
+            resolved: decision.action,
+            reason: decision.reason,
+            signals: strongSignals,
+          };
+          const today = pstDateStr();
+          const logFile = path.join(this.logDir, `${today}.jsonl`);
+          try {
+            fs.appendFileSync(logFile, JSON.stringify(logEntry) + "\n", "utf-8");
+          } catch { /* non-fatal */ }
+        }
+      }
+
       // Notify MAIP bridge
       this.onPulseCallback?.(decision.action, decision.reason);
 
-      if (busySkip) {
+      if (directDispatchSkill) {
+        const statusIcon = executed ? " ✓" : " (skipped)";
+        console.log(`[heartbeat] 💓 #${this.pulseCount} → ${decision.action} ⚡ DIRECT (${directDispatchSkill})${statusIcon} — ${decision.reason}`);
+      } else if (busySkip) {
         console.log(`[heartbeat] 💓 #${this.pulseCount} — ${decision.reason}`);
       } else {
         const statusIcon = executed ? " ✓" : decision.action === "rest" ? " 😴" : " (skipped)";
@@ -762,9 +927,13 @@ export class Heartbeat {
       }
     } catch (err) {
       console.error(`[heartbeat] Pulse #${this.pulseCount} error:`, err);
+      incrementError("heartbeat", "pulse");
       // Report error to watchdog
       this.watchdog?.reportApiError("heartbeat", err instanceof Error ? err.message : String(err));
     }
+
+    // Flush error metrics to disk
+    flushErrorMetrics();
 
     // Schedule next pulse — 7.2: adaptive interval based on vitals
     const jitter = (Math.random() * 2 - 1) * PULSE_JITTER_MS;
@@ -801,10 +970,12 @@ export class Heartbeat {
     let scheduleBlock: TimeBlock | null = null;
     let scheduleNextBlock: TimeBlock | null = null;
     let scheduleLocation = "home";
+    let scheduleExecutionMode: "real" | "experiential" | "groundable" | undefined;
+    let scheduleGroundTo: string | undefined;
 
     try {
       const [work, market, body] = await Promise.all([
-        getWorkContext().catch(() => ({ currentActivity: "", fullSchedule: "", busy: false, currentBlock: null, nextBlock: null, location: "home", isWorkDay: false })),
+        getWorkContext().catch(() => ({ currentActivity: "", fullSchedule: "", busy: false, currentBlock: null, nextBlock: null, location: "home", isWorkDay: false, executionMode: "experiential" as const, groundTo: undefined as string | undefined })),
         fetchMarketSnapshot().catch(() => ""),
         getBodyState().catch(() => null),
       ]);
@@ -813,6 +984,8 @@ export class Heartbeat {
       scheduleBlock = work.currentBlock ?? null;
       scheduleNextBlock = work.nextBlock ?? null;
       scheduleLocation = work.location || "home";
+      scheduleExecutionMode = (work as any).executionMode;
+      scheduleGroundTo = (work as any).groundTo;
       if (body) {
         hunger = body.hunger;
         fatigue = body.fatigue;
@@ -874,6 +1047,8 @@ export class Heartbeat {
       scheduleBlock,
       scheduleNextBlock,
       scheduleLocation,
+      scheduleExecutionMode,
+      scheduleGroundTo,
     };
   }
 
@@ -920,13 +1095,13 @@ export class Heartbeat {
    * Constrains what the character can do based on what they're currently doing in their day.
    */
   private getScheduleAllowedActions(block: TimeBlock | null): HeartbeatAction[] {
-    if (!block) return ["rest", "explore", "reach_out", "post", "activity", "reflect"]; // no block = free time
+    if (!block) return ["rest", "explore", "reach_out", "post", "activity", "reflect", "research"]; // no block = free time
 
-    const ALL_ACTIONS: HeartbeatAction[] = ["rest", "explore", "reach_out", "post", "activity", "reflect"];
+    const ALL_ACTIONS: HeartbeatAction[] = ["rest", "explore", "reach_out", "post", "activity", "reflect", "research"];
 
     switch (block.category) {
       case "sleep":
-        return ["rest"];
+        return ["rest", "research"]; // research runs while character "sleeps"
       case "morning":
         return ["rest", "explore"]; // scrolling phone at breakfast
       case "commute":
@@ -940,9 +1115,13 @@ export class Heartbeat {
       case "exercise":
         return ["rest"];
       case "hobby":
+      case "social": {
+        const blockInfo = classifyBlock(block);
+        if (blockInfo.mode === "groundable" || blockInfo.mode === "real") {
+          return ["rest", "activity", "reach_out"];
+        }
         return ["rest"];
-      case "social":
-        return ["rest"];
+      }
       case "entertainment":
         return ALL_ACTIONS; // free time
       case "pet":
@@ -987,6 +1166,12 @@ export class Heartbeat {
       if (idx >= 0) available.splice(idx, 1);
     }
 
+    // Research only available if engine exists
+    if (!this.research && available.includes("research")) {
+      const idx = available.indexOf("research");
+      if (idx >= 0) available.splice(idx, 1);
+    }
+
     // Don't offer reach_out if the user was active in the last 20 min — proactive would skip it anyway
     const idleSinceUserMs = Date.now() - this.getLastUserActivity();
     if (idleSinceUserMs < 20 * 60 * 1000) {
@@ -1012,14 +1197,65 @@ export class Heartbeat {
     return available;
   }
 
+  // ── Direct Dispatch ────────────────────────────────────────────────
+
+  /**
+   * Try to bypass LLM evaluation when brainstem has a high-confidence skill intent.
+   * Returns null if direct dispatch isn't appropriate (falls back to LLM).
+   */
+  private tryDirectDispatch(
+    availableActions: HeartbeatAction[],
+    vitals: VitalSigns,
+  ): { action: HeartbeatAction; reason: string; confidence: number; skillName: string } | null {
+    try {
+      const intent = brainstemGetSkillIntent();
+      if (!intent) return null;
+      if (intent.confidence < DIRECT_DISPATCH_MIN_CONFIDENCE) return null;
+
+      const action = intent.actionType as HeartbeatAction;
+      if (!availableActions.includes(action)) return null;
+
+      // Don't direct-dispatch reach_out if awaiting reply
+      if (action === "reach_out" && vitals.awaitingReply) return null;
+
+      // Check watchdog budget
+      if (this.watchdog) {
+        const budgetMap: Record<string, string> = {
+          explore: "explorations",
+          reach_out: "proactive",
+          post: "posts",
+          activity: "activities",
+        };
+        const budgetKey = budgetMap[action];
+        if (budgetKey && !this.watchdog.isActionAllowed(budgetKey as "posts" | "proactive" | "explorations" | "activities")) {
+          return null;
+        }
+      }
+
+      return {
+        action,
+        reason: intent.reason,
+        confidence: intent.confidence,
+        skillName: intent.skillName,
+      };
+    } catch {
+      // Brainstem may not be initialized
+      return null;
+    }
+  }
+
   // ── LLM Evaluation ─────────────────────────────────────────────────
 
   private async evaluate(
     vitals: VitalSigns,
     availableActions: HeartbeatAction[],
+    veto?: BrainstemVeto | null,
   ): Promise<HeartbeatDecision> {
-    // During quiet hours (midnight-7am), always rest
+    // During quiet hours (midnight-7am), rest or research
     if (vitals.hour >= 0 && vitals.hour < 7) {
+      if (this.research && availableActions.includes("research")) {
+        return { action: "research", reason: "late night research time", confidence: 0.9 };
+      }
       return { action: "rest", reason: "late night, time to sleep", confidence: 1.0 };
     }
 
@@ -1153,41 +1389,139 @@ Pick the best action:`,
             }
           } catch { /* brainstem may not be initialized */ }
 
-          const explored = await this.curiosity.tick();
-          // Post discovery moment if share-worthy
-          if (explored && isMomentsEnabled()) {
-            try {
+          const exploreActionId = generateActionId("explore");
+          const exploreStart = Date.now();
+          const exploreLedgerBase = {
+            actionId: exploreActionId, type: "explore" as const, title: "web exploration",
+            source: "interest" as const, artifacts: [] as ActionArtifact[],
+          };
+          appendActionLedger({ ...exploreLedgerBase, phase: "intent", timestamp: Date.now() });
+
+          try {
+            appendActionLedger({ ...exploreLedgerBase, phase: "in_progress", timestamp: Date.now() });
+            const explored = await this.curiosity.tick();
+            if (explored) {
+              // Boost activations from discovery
               const recent = this.curiosity.getRecentDiscoveries(1);
               const d = recent[recent.length - 1];
               if (d) {
-                await maybeMoment("explore", {
-                  discovery: {
-                    query: d.query,
-                    summary: d.summary,
-                    reaction: d.reaction,
-                    shareWorthy: d.shareWorthy,
-                    sources: d.sources,
-                  },
+                const keywords = d.query.split(/\s+/).filter(w => w.length > 2);
+                for (const kw of keywords.slice(0, 3)) {
+                  this.boostActivation(kw, 0.4, "curiosity");
+                }
+                this.checkGoalAlignment(`${d.query} ${d.summary}`);
+
+                appendActionLedger({
+                  ...exploreLedgerBase, phase: "finished", outcome: "success", timestamp: Date.now(),
+                  title: d.query,
+                  artifacts: [{ type: "url", url: d.sources?.[0] ?? "", description: `search: ${d.query}` }],
+                  durationMs: Date.now() - exploreStart,
+                });
+
+                // Write curiosity spike to blackboard
+                blackboard.write({
+                  source: "heartbeat",
+                  type: "curiosity_spike",
+                  payload: { query: d.query, summary: d.summary, category: d.category, shareWorthy: d.shareWorthy },
+                  salience: d.shareWorthy ? 0.8 : 0.4,
+                  ttl: DEFAULT_TTL,
                 });
               }
-            } catch { /* non-fatal */ }
+              if (isMomentsEnabled()) {
+                try {
+                  if (d) {
+                    await maybeMoment("explore", {
+                      discovery: {
+                        query: d.query, summary: d.summary,
+                        reaction: d.reaction, shareWorthy: d.shareWorthy, sources: d.sources,
+                      },
+                    });
+                  }
+                } catch { /* non-fatal */ }
+              }
+            } else {
+              appendActionLedger({
+                ...exploreLedgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+                failureReason: "curiosity.tick returned false", durationMs: Date.now() - exploreStart,
+              });
+            }
+            success = explored;
+          } catch (exploreErr) {
+            appendActionLedger({
+              ...exploreLedgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+              failureReason: exploreErr instanceof Error ? exploreErr.message : String(exploreErr),
+              durationMs: Date.now() - exploreStart,
+            });
+            throw exploreErr;
           }
-          success = explored;
           break;
         }
-        case "reach_out":
-          success = await this.proactive.tick();
-          if (success && this.lastBrainstemActArm && this.lastBrainstemActArm.targetId !== "self") {
-            try { brainstemRecordPendingReachOut(this.lastBrainstemActArm); } catch { /* non-fatal */ }
-            this.lastBrainstemActArm = null;
+        case "reach_out": {
+          const reachActionId = generateActionId("reach_out");
+          const reachStart = Date.now();
+          const reachLedgerBase = {
+            actionId: reachActionId, type: "reach_out" as const, title: "message user",
+            source: "interest" as const, artifacts: [] as ActionArtifact[],
+          };
+          appendActionLedger({ ...reachLedgerBase, phase: "intent", timestamp: Date.now() });
+          try {
+            appendActionLedger({ ...reachLedgerBase, phase: "in_progress", timestamp: Date.now() });
+            const sent = await this.proactive.tick();
+            if (sent) {
+              if (this.lastBrainstemActArm && this.lastBrainstemActArm.targetId !== "self") {
+                try { brainstemRecordPendingReachOut(this.lastBrainstemActArm); } catch { /* non-fatal */ }
+                this.lastBrainstemActArm = null;
+              }
+              appendActionLedger({
+                ...reachLedgerBase, phase: "finished", outcome: "success", timestamp: Date.now(),
+                artifacts: [{ type: "note", description: "sent message to user" }],
+                durationMs: Date.now() - reachStart,
+              });
+            } else {
+              appendActionLedger({
+                ...reachLedgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+                failureReason: "proactive.tick returned false", durationMs: Date.now() - reachStart,
+              });
+            }
+            success = sent;
+          } catch (reachErr) {
+            appendActionLedger({
+              ...reachLedgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+              failureReason: reachErr instanceof Error ? reachErr.message : String(reachErr),
+              durationMs: Date.now() - reachStart,
+            });
+            throw reachErr;
           }
           break;
-        case "post":
-          if (this.social) {
+        }
+        case "post": {
+          if (!this.social) { success = false; break; }
+          const postActionId = generateActionId("post");
+          const postStart = Date.now();
+          const postLedgerBase = {
+            actionId: postActionId, type: "post" as const, title: "social post",
+            source: "interest" as const, artifacts: [] as ActionArtifact[],
+          };
+          appendActionLedger({ ...postLedgerBase, phase: "intent", timestamp: Date.now() });
+          try {
+            appendActionLedger({ ...postLedgerBase, phase: "in_progress", timestamp: Date.now() });
             await this.social.tick();
+            appendActionLedger({
+              ...postLedgerBase, phase: "finished", outcome: "success", timestamp: Date.now(),
+              artifacts: [{ type: "note", description: "posted on social" }],
+              durationMs: Date.now() - postStart,
+            });
             success = true;
+          } catch (postErr) {
+            appendActionLedger({
+              ...postLedgerBase, phase: "finished", outcome: "failed", timestamp: Date.now(),
+              failureReason: postErr instanceof Error ? postErr.message : String(postErr),
+              durationMs: Date.now() - postStart,
+            });
+            throw postErr;
           }
           break;
+        }
         case "activity": {
           success = await this.activities.tick();
           if (success) {
@@ -1253,6 +1587,9 @@ Pick the best action:`,
   /** Synthesize recent memories, emotions, and life data into insights. */
   async doReflection(): Promise<boolean> {
     try {
+      // Compute interaction learning patterns (lightweight, no LLM)
+      try { computeInteractionPatterns(); } catch { /* non-fatal */ }
+
       // Load recent memories (last 7 days, max 15)
       let recentMemories: Array<{ key: string; value: string }> = [];
       try {
@@ -1284,6 +1621,33 @@ Pick the best action:`,
       try { hobbyCtx = formatHobbyContext(); } catch { /* ok */ }
       try { socialCtx = formatSocialSummary(); } catch { /* ok */ }
 
+      // Identity events — recent self-expression for reflection
+      let identityEventContext = "";
+      try {
+        const identityEvents = brainstemGetRecentIdentityEvents(5);
+        if (identityEvents.length > 0) {
+          const eventLines = identityEvents.map(e => {
+            const ago = Math.round((Date.now() - e.timestamp) / 60_000);
+            const topicStr = e.topicOwnership?.caresAbout?.join(", ") ?? "";
+            return `- ${ago}min ago: ${e.type}${topicStr ? ` (about: ${topicStr})` : ""}, certainty=${e.disagreementReadiness.toFixed(2)}`;
+          });
+          identityEventContext = `\nRecent self-expression events:\n${eventLines.join("\n")}`;
+        }
+      } catch { /* ok */ }
+
+      // Relational observation summary — recent observations about the user
+      let relationalCtx = "";
+      try {
+        const { getRecentObservations } = await import("./relational-impact.js");
+        const recentObs = getRecentObservations(7);
+        if (recentObs.length > 0) {
+          const obsLines = recentObs.map(o =>
+            `- ${o.type}: ${o.description} (possible trigger: ${o.possibleTrigger}, causal confidence=${o.causalConfidence.toFixed(2)})`
+          );
+          relationalCtx = `\nRecent relational observations:\n${obsLines.join("\n")}`;
+        }
+      } catch { /* non-fatal */ }
+
       const char = getCharacter();
       const prompt = `You are ${char.name}'s inner reflection system. Review recent memories, emotional changes, social and hobby status, and generate 2-3 insights.
 
@@ -1298,13 +1662,15 @@ ${hobbyCtx || "(none)"}
 
 Social status:
 ${socialCtx || "(none)"}
-
+${identityEventContext}${relationalCtx}
+${(() => { const emc = formatErrorMetricsContext(); return emc ? `\nSystem health:\n${emc}` : ""; })()}
 Generate 2-3 insights, such as:
 - Emotional patterns ("mood tends to drop when work pressure builds")
 - Social observations ("haven't seen a friend in a while")
 - Hobby progress ("pottery is going well but drums are falling behind")
 - Life rhythm ("been staying up late recently")
 - Observations about ${char.user.name} ("they seem interested in X lately")
+- Relational thoughts ("what they said about X means something to me")
 
 Output strictly as a JSON array:
 [{"key": "insights.topic.MMDD", "value": "insight content"}]`;
@@ -1330,19 +1696,55 @@ Output strictly as a JSON array:
         await manager.set(insight.key, insight.value, 0.85);
       }
 
-      console.log(`[heartbeat] 🪞 Reflection generated ${insights.length} insights: ${insights.map(i => i.key).join(", ")}`);
+      log.info(`reflection: ${insights.length} insights: ${insights.map(i => i.key).join(", ")}`);
+
+      // Write reflection insights to blackboard
+      for (const insight of insights) {
+        blackboard.write({
+          source: "reflection",
+          type: "reflection_insight",
+          payload: { key: insight.key, value: insight.value },
+          salience: 0.5,
+          ttl: DEFAULT_TTL,
+        });
+      }
+
+      // Fire-and-forget: reconsolidate emotional memories accessed during reflection
+      try {
+        const emotionalMemories = manager.loadCategory("emotional");
+        const reconCandidates = emotionalMemories
+          .filter(m => shouldReconsolidate(m, "emotional"))
+          .slice(0, 3);
+        if (reconCandidates.length > 0 && this.config.openaiApiKey) {
+          manager.scheduleReconsolidation(
+            reconCandidates.map(m => ({ memory: m, category: "emotional" as const })),
+            recentEmotions,
+            this.config.openaiApiKey,
+          ).catch(err => log.warn("heartbeat reconsolidation failed", err));
+        }
+      } catch { /* non-fatal */ }
 
       // 8.3: Generate diary entry
       await this.generateDiaryEntry(recentEmotions, hobbyCtx, socialCtx).catch(err =>
         log.warn("diary generation failed", err),
       );
 
-      // 8.4: Evolve opinions based on recent activity
+      // Structured reflection — conservative annotation-first approach
+      await this.extractStructuredReflection(recentMemories, recentEmotions, hobbyCtx, socialCtx, insights).catch(err =>
+        log.warn("structured reflection failed", err),
+      );
+
+      // Self-predictions: resolve old ones first
+      await this.resolvePredictions(recentEmotions, recentMemories).catch(err =>
+        log.warn("prediction resolution failed", err),
+      );
+
+      // 8.4: Evolve opinions based on recent activity (with belief challenge)
       await this.evolveOpinions(recentMemories, recentEmotions).catch(err =>
         log.warn("opinion evolution failed", err),
       );
 
-      // 8.2: Weekly goal generation (only if few active goals)
+      // 8.2: Weekly goal generation (with drive system)
       await this.maybeGenerateGoals(recentMemories, hobbyCtx).catch(err =>
         log.warn("goal generation failed", err),
       );
@@ -1354,13 +1756,373 @@ Output strictly as a JSON array:
         if (completed.length > 0) log.info(`narrative arcs completed: ${completed.join(", ")}`);
       } catch (err) { log.warn("narrative arc advancement failed", err); }
 
+      // Generate new self-predictions (uses all updated state)
+      await this.generateSelfPredictions().catch(err =>
+        log.warn("prediction generation failed", err),
+      );
+
       // Context block self-evaluation — aggregate stats + LLM keyword discovery
       await runContextAnalysis().catch(err => log.warn("context analysis failed", err));
+
+      // Growth marker detection — pure heuristic, once per day
+      this.detectGrowthMarkers().catch(err =>
+        log.warn("growth marker detection failed", err),
+      );
+
+      // Self-narrative — weekly synthesis (1 LLM call max)
+      try {
+        const { maybeUpdateSelfNarrative } = await import("./self-narrative.js");
+        await maybeUpdateSelfNarrative();
+      } catch { /* non-fatal */ }
+
+      // User prediction generation
+      try {
+        generatePredictions();
+      } catch { /* non-fatal */ }
 
       return true;
     } catch (err) {
       console.error("[heartbeat] Reflection error:", err);
       return false;
+    }
+  }
+
+  // ── Growth Marker Detection ─────────────────────────────────────────
+
+  private async detectGrowthMarkers(): Promise<void> {
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    const today = pstDateStr();
+
+    // Load existing markers, deduplicate by date
+    const markersPath = path.join(this.config.statePath, "growth-markers.json");
+    const state = readJsonSafe<GrowthMarkerState>(markersPath, { markers: [] });
+
+    // Only run once per day
+    const alreadyRanToday = state.markers.some(
+      m => pstDateStr(new Date(m.detectedAt)) === today,
+    );
+    if (alreadyRanToday) return;
+
+    const newMarkers: GrowthMarker[] = [];
+
+    // 1. Recurring theme: appears in 3+ diary entries in last 14 days
+    try {
+      const themeHistory = getThemeHistory(14);
+      for (const [theme, count] of themeHistory) {
+        if (count >= 3) {
+          newMarkers.push({
+            type: "recurring_theme",
+            description: `"${theme}" appeared in diary ${count} times in the last 2 weeks`,
+            evidence: [`theme:${theme}:count=${count}`],
+            detectedAt: now,
+          });
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    // 2. New habit: thread ongoing 7+ days
+    try {
+      const threads = getNarrativeThreads();
+      for (const t of threads) {
+        if (t.status !== "ongoing") continue;
+        const ageDays = (now - t.startedAt) / DAY;
+        if (ageDays >= 7) {
+          newMarkers.push({
+            type: "new_habit",
+            description: `${t.description} (ongoing ${Math.round(ageDays)} days)`,
+            evidence: [`thread:${t.id}`],
+            detectedAt: now,
+          });
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    // 3. Milestone: thread just resolved, was active 5+ days
+    try {
+      const threads = getNarrativeThreads();
+      for (const t of threads) {
+        if (t.status !== "resolved") continue;
+        const ageDays = (now - t.startedAt) / DAY;
+        if (ageDays < 5) continue;
+
+        // Deduplicate by key
+        const dedupeKey = `milestone:${t.id}:${today}`;
+        if (state.markers.some(m => m.evidence.includes(dedupeKey))) continue;
+
+        newMarkers.push({
+          type: "milestone",
+          description: `${t.description} (completed! took ${Math.round(ageDays)} days)`,
+          evidence: [dedupeKey, `thread:${t.id}`],
+          detectedAt: now,
+        });
+      }
+    } catch { /* non-fatal */ }
+
+    if (newMarkers.length === 0) return;
+
+    // Persist
+    state.markers.push(...newMarkers);
+    // Keep last 50
+    if (state.markers.length > 50) {
+      state.markers = state.markers.slice(-50);
+    }
+    writeJsonAtomic(markersPath, state);
+
+    // Write to blackboard for TurnDirective consumption
+    for (const marker of newMarkers) {
+      blackboard.write({
+        source: "reflection",
+        type: "growth_marker",
+        payload: { type: marker.type, description: marker.description },
+        salience: 0.4,
+        ttl: 2 * 60 * 60 * 1000, // 2 hours
+      });
+    }
+
+    log.info(`growth markers detected: ${newMarkers.length} — ${newMarkers.map(m => m.type).join(", ")}`);
+  }
+
+  // ── Structured Reflection ─────────────────────────────────────────
+
+  /** Extract structured reflection records and log them. Conservative writeback. */
+  private async extractStructuredReflection(
+    recentMemories: Array<{ key: string; value: string }>,
+    recentEmotions: string,
+    hobbyCtx: string,
+    socialCtx: string,
+    insights: Array<{ key: string; value: string }>,
+  ): Promise<void> {
+    if (insights.length === 0) return;
+
+    const prompt = `You are ${getCharacter().name}'s structured reflection system. Based on the following insights and context, generate structured reflection records.
+
+Insights:
+${insights.map(i => `- ${i.key}: ${i.value}`).join("\n")}
+
+Recent emotions:
+${recentEmotions || "(none)"}
+
+Hobbies: ${hobbyCtx || "(none)"}
+Social: ${socialCtx || "(none)"}
+
+For each insight, generate a structured record. Type must be one of:
+- hypothesis_updated: updated understanding of something
+- preference_inferred: discovered a preference
+- pattern_observed: observed a behavior/emotion pattern
+- anomaly_detected: found something unusual
+
+Output strictly as a JSON array:
+[{"type": "pattern_observed", "topic": "topic", "content": "content", "confidence": 0.7, "evidence": "based on what"}]`;
+
+    try {
+      const text = await claudeText({
+        label: "heartbeat.structured_reflection",
+        system: "Output only a JSON array, nothing else.",
+        prompt,
+        model: "fast",
+        timeoutMs: 60_000,
+      });
+
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) return;
+
+      const parsed = repairAndParseJson(jsonMatch[0]);
+      if (!Array.isArray(parsed) || parsed.length === 0) return;
+      const records = parsed as ReflectionRecord[];
+
+      // Append ALL records to reflection log (annotation layer)
+      const logPath = path.join(this.config.statePath, "brainstem", "reflection-log.jsonl");
+      for (const record of records) {
+        const entry = { ...record, ts: Date.now() };
+        fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
+      }
+      log.info(`structured reflection: ${records.length} records logged`);
+
+      // Conservative writeback: only high-confidence hypothesis/preference → concept boost
+      for (const record of records) {
+        if (
+          record.confidence >= 0.8 &&
+          (record.type === "hypothesis_updated" || record.type === "preference_inferred") &&
+          record.topic
+        ) {
+          const boostDelta = Math.min(0.3, record.confidence * 0.3);
+          try {
+            brainstemBoostNode(record.topic, boostDelta, "reflection");
+            log.info(`structured reflection writeback: boosted "${record.topic}" by ${boostDelta.toFixed(2)}`);
+          } catch { /* brainstem may not be initialized */ }
+        }
+      }
+    } catch (err) {
+      log.warn("structured reflection extraction failed", err);
+    }
+  }
+
+  // ── Self-Prediction ───────────────────────────────────────────────
+
+  private loadPredictions(): PredictionState {
+    const filePath = path.join(this.config.statePath, "predictions.json");
+    return readJsonSafe<PredictionState>(filePath, {
+      predictions: [],
+      accuracy: { total: 0, surpriseSum: 0, lastCalculated: 0 },
+    });
+  }
+
+  private savePredictions(state: PredictionState): void {
+    const filePath = path.join(this.config.statePath, "predictions.json");
+    writeJsonAtomic(filePath, state);
+  }
+
+  /** Resolve old predictions by comparing to what actually happened. */
+  private async resolvePredictions(
+    recentEmotions: string,
+    recentMemories: Array<{ key: string; value: string }>,
+  ): Promise<void> {
+    const state = this.loadPredictions();
+    const now = Date.now();
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+
+    // Find unresolved predictions older than 6 hours
+    const toResolve = state.predictions.filter(
+      p => !p.resolved && now - p.predictedAt > SIX_HOURS,
+    );
+    if (toResolve.length === 0) return;
+
+    const predictionsText = toResolve.map(p =>
+      `- [${p.category}] "${p.content}" (predicted on ${new Date(p.predictedAt).toLocaleDateString()})`,
+    ).join("\n");
+
+    const actualContext = [
+      recentEmotions ? `Recent emotions:\n${recentEmotions}` : "",
+      recentMemories.length > 0 ? `Recent memories:\n${recentMemories.slice(-5).map(m => `- ${m.value}`).join("\n")}` : "",
+    ].filter(Boolean).join("\n\n");
+
+    const text = await claudeText({
+      label: "heartbeat.assessPredictions",
+      system: `You are ${getCharacter().name}'s self-assessment system. Compare previous predictions to what actually happened. Output only a JSON array.`,
+      prompt: `Previous predictions:
+${predictionsText}
+
+What actually happened:
+${actualContext || "(limited information)"}
+
+For each prediction, assess: what actually happened? Was the prediction accurate?
+JSON format:
+[{"id": "prediction_id", "actual": "what actually happened", "surprise": 0.3}]
+surprise: 0=fully accurate, 0.5=partially accurate, 1=totally wrong`,
+      model: "fast",
+      timeoutMs: 60_000,
+    });
+
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return;
+
+    try {
+      const results = JSON.parse(jsonMatch[0]) as Array<{
+        id?: string;
+        actual?: string;
+        surprise?: number;
+      }>;
+      for (const r of results) {
+        const pred = state.predictions.find(p => p.id === r.id);
+        if (!pred) continue;
+        pred.resolved = true;
+        pred.actual = r.actual ?? "unknown";
+        pred.surprise = Math.max(0, Math.min(1, r.surprise ?? 0.5));
+        pred.resolvedAt = now;
+        state.accuracy.total++;
+        state.accuracy.surpriseSum += pred.surprise;
+        state.accuracy.lastCalculated = now;
+      }
+      this.savePredictions(state);
+      const resolved = results.filter(r => state.predictions.some(p => p.id === r.id));
+      if (resolved.length > 0) log.info(`resolved ${resolved.length} predictions`);
+    } catch { /* non-fatal */ }
+  }
+
+  /** Generate new self-predictions based on current state. */
+  private async generateSelfPredictions(): Promise<void> {
+    const state = this.loadPredictions();
+    const unresolved = state.predictions.filter(p => !p.resolved);
+    if (unresolved.length >= 3) return; // enough pending predictions
+
+    const topActs = this.getTopActivations(5);
+    const { topDrive } = getDriveSignal();
+    const emotionState = await getEmotionalState().catch(() => null);
+
+    const contextParts = [
+      topActs.length > 0 ? `Topics on my mind: ${topActs.map(a => a.topic).join(", ")}` : "",
+      topDrive ? `Strongest drive goal: ${topDrive.description}` : "",
+      emotionState ? `Current mood: ${emotionState.mood} (${emotionState.cause})` : "",
+    ].filter(Boolean).join("\n");
+
+    const char = getCharacter();
+    const text = await claudeText({
+      label: "heartbeat.predictNext",
+      system: `You are ${char.name}'s self-prediction system. Based on current state, predict what they might do, think, or feel next. Output only a JSON array.`,
+      prompt: `Current state:
+${contextParts || "(limited information)"}
+
+Generate 2-3 specific predictions about what might happen in the next 6-12 hours:
+- What new topics might catch their interest
+- Possible emotional changes
+- Activities they might do
+- Topics they might chat about with ${char.user.name}
+
+Predictions should be specific and verifiable, not vague.
+
+JSON format:
+[{"content": "I might...", "category": "curiosity"}]
+category: "curiosity" | "emotion" | "activity" | "social"`,
+      model: "fast",
+      timeoutMs: 60_000,
+    });
+
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return;
+
+    try {
+      const predictions = JSON.parse(jsonMatch[0]) as Array<{
+        content?: string;
+        category?: string;
+      }>;
+      const validCategories = new Set(["curiosity", "emotion", "activity", "social"]);
+      for (const p of predictions) {
+        if (!p.content) continue;
+        state.predictions.push({
+          id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
+          predictedAt: Date.now(),
+          horizon: "next_reflection",
+          content: p.content,
+          category: validCategories.has(p.category ?? "") ? p.category as Prediction["category"] : "curiosity",
+        });
+      }
+      // Keep max 30 predictions
+      if (state.predictions.length > 30) {
+        state.predictions = state.predictions.slice(-30);
+      }
+      this.savePredictions(state);
+      log.info(`generated ${predictions.length} self-predictions`);
+    } catch { /* non-fatal */ }
+  }
+
+  // ── Goal Alignment ────────────────────────────────────────────────────
+
+  /** After explore/activity, check if result matches a drive goal's topics. */
+  private checkGoalAlignment(context: string): void {
+    const goals = getActiveGoals().filter(g => g.relatedTopics && g.relatedTopics.length > 0);
+    for (const goal of goals) {
+      const matched = goal.relatedTopics!.some(topic =>
+        context.toLowerCase().includes(topic.toLowerCase()),
+      );
+      if (matched) {
+        recordGoalInvestment(goal.id, 5); // ~5 min per heartbeat action
+        // Boost related topics
+        for (const topic of goal.relatedTopics!) {
+          this.boostActivation(topic, 0.3, "goal");
+        }
+        log.info(`goal alignment: "${goal.description}" matched in context`);
+      }
     }
   }
 
@@ -1380,6 +2142,26 @@ Output strictly as a JSON array:
 
     const pastRef = pastDates.slice(-3).join(", ") || "none";
 
+    // Narrative substrate — themes/tensions from self-narrative (zero LLM cost)
+    let narrativeSubstrate = "";
+    try {
+      const { getNarrativeSubstrate } = await import("./self-narrative.js");
+      const substrate = getNarrativeSubstrate();
+      if (substrate) {
+        const parts: string[] = [];
+        if (substrate.recurringThemes.length > 0) {
+          parts.push("Recurring themes: " + substrate.recurringThemes.map((t: { theme: string; trajectory: string }) => `${t.theme}(${t.trajectory})`).join(", "));
+        }
+        if (substrate.unresolvedTensions.length > 0) {
+          parts.push("Unresolved tensions: " + substrate.unresolvedTensions.join(", "));
+        }
+        if (substrate.fragileHypotheses.length > 0) {
+          parts.push("Fragile hypotheses: " + substrate.fragileHypotheses.join(", "));
+        }
+        if (parts.length > 0) narrativeSubstrate = parts.join("\n");
+      }
+    } catch { /* non-fatal */ }
+
     const text = await claudeText({
       label: "heartbeat.diary",
       system: `You are ${getCharacter().name}'s diary system. Write a 300-500 word diary entry in their voice. Output only JSON, nothing else.`,
@@ -1395,7 +2177,7 @@ Social status:
 ${socialCtx || "(none)"}
 
 Past diary dates (can reference): ${pastRef}
-
+${narrativeSubstrate ? `\nInner threads (can weave into diary naturally, no need to include all):\n${narrativeSubstrate}` : ""}
 Requirements:
 - 300-500 words, in ${getCharacter().name}'s voice (casual, natural, warm)
 - Record today's highlights, mood changes, small reflections
@@ -1466,12 +2248,17 @@ ${recentEmotions || "(none)"}
 Based on recent experiences, are there opinions to update? Options:
 1. Modify an existing opinion's stance or confidence (new evidence found)
 2. Add a new opinion (recent experiences shaped a new view)
-3. If no changes, return an empty array
+3. Provide counter-evidence (evidence_against)
+4. Mark as undetermined when evidence is insufficient (status: "undetermined")
+5. If no changes, return an empty array
 
 Only include updates with real changes. Don't update for the sake of updating.
 
 JSON format:
-[{"topic": "topic", "position": "new stance", "confidence": 0.7, "evidence": ["reason for change"]}]
+[{"topic": "topic", "position": "new stance", "confidence": 0.7, "evidence": ["reason for change"], "evidence_quality": "firsthand", "evidence_source": "source URL or date", "evidence_against": [{"text": "counter-evidence", "source": "source"}], "status": "held"}]
+
+evidence_quality: "firsthand" | "secondhand" | "hearsay" | "inference"
+status: "held" | "undetermined" (use undetermined when evidence is insufficient)
 
 No changes? Return: []`,
       model: "smart",
@@ -1487,6 +2274,10 @@ No changes? Return: []`,
         position?: string;
         confidence?: number;
         evidence?: string[];
+        evidence_quality?: string;
+        evidence_source?: string;
+        evidence_against?: Array<{ text: string; source?: string }>;
+        status?: string;
       }>;
       for (const u of updates) {
         if (!u.topic) continue;
@@ -1495,6 +2286,19 @@ No changes? Return: []`,
           confidence: u.confidence,
           evidence: u.evidence,
         });
+
+        // Process counter-evidence
+        if (u.evidence_against) {
+          for (const ce of u.evidence_against) {
+            challengeBelief(u.topic, {
+              text: ce.text,
+              source: ce.source ?? `reflection:${pstDateStr()}`,
+              quality: "inference",
+              addedAt: Date.now(),
+            });
+          }
+        }
+
         log.info(`opinion evolved: ${u.topic}`);
       }
     } catch { /* non-fatal */ }
@@ -1607,6 +2411,48 @@ JSON format:
         boosts.push(`[signal] last 3 activities were all ${lastThree[0]} — too monotonous, switch it up`);
       }
     } catch { /* non-fatal */ }
+    // Activation signals
+    const topActs = this.getTopActivations(3);
+    if (topActs.length > 0) {
+      boosts.push(`[attention] topics on mind: ${topActs.map(a => `${a.topic}(${Math.round(a.weight * 100)}%)`).join(", ")}`);
+    }
+    const entropy = this.getActivationEntropy();
+    if (entropy < ACTIVATION_ENTROPY_FLOOR) {
+      boosts.push(`[attention too concentrated] entropy ${Math.round(entropy * 100)}% — should diversify`);
+    }
+
+    // Drive signal
+    const { topDrive, driveStrength } = getDriveSignal();
+    if (topDrive && driveStrength > 0.3) {
+      boosts.push(`[drive] ${topDrive.description} (strength: ${Math.round(driveStrength * 100)}%)`);
+    }
+    // Goal health warnings
+    for (const goal of getActiveGoals()) {
+      const health = getGoalHealth(goal);
+      if (health === "stalled") boosts.push(`[goal warning] "${goal.description}" has stalled — invested time but no progress`);
+      if (health === "obsessive") boosts.push(`[goal warning] "${goal.description}" over-invested — taking too much time`);
+    }
+
+    // Continuity value
+    const continuity = this.getContinuitySnapshot();
+    if (continuity.value > 0.5) {
+      boosts.push(`[continuity] ${Math.round(continuity.value * 100)}% — ${continuity.components.join(", ")}`);
+    }
+
+    // Reflect nudge: if it's been a while, hint to the LLM
+    const hrsSinceReflect = (Date.now() - (this.lastActionAt.reflect ?? 0)) / (60 * 60 * 1000);
+    if (hrsSinceReflect > 8) {
+      boosts.push(`[strong signal] ${Math.round(hrsSinceReflect)} hours since last reflection → consider reflect`);
+    }
+
+    // Evolved opinion count for continuity
+    try {
+      const evolvedCount = getEvolvedOpinionCount();
+      if (evolvedCount > 0) {
+        boosts.push(`[continuity] ${evolvedCount} evolved opinions`);
+      }
+    } catch { /* non-fatal */ }
+
     // Attention engine signals
     try {
       if (shouldSuggestBreak()) boosts.push("[signal] ultradian cycle peak — consider a break");
@@ -1647,6 +2493,15 @@ JSON format:
         boosts.push(`[intent routing] subconscious wants to ${skillIntent.reason} → recommend ${skillIntent.skillName} skill (${skillIntent.actionType})`);
       }
     } catch { /* brainstem may not be initialized */ }
+
+    // Predictive Theory of Mind — temporal pattern predictions about user
+    try {
+      generatePredictions();
+      const predText = formatPredictions();
+      if (predText) {
+        boosts.push(`[prediction] ${predText}`);
+      }
+    } catch { /* non-fatal */ }
 
     // Interaction learning — reply rate patterns
     try {
@@ -1934,17 +2789,109 @@ Requirements:
 
   private loadActionTimes(): void {
     const filePath = path.join(this.logDir, "state.json");
-    const data = readJsonSafe<{ lastActionAt?: Record<string, number>; pulseCount?: number }>(filePath, {});
+    const data = readJsonSafe<{
+      lastActionAt?: Record<string, number>;
+      pulseCount?: number;
+      activations?: Record<string, Activation>;
+    }>(filePath, {});
     Object.assign(this.lastActionAt, data.lastActionAt ?? {});
     this.pulseCount = data.pulseCount ?? 0;
+    if (data.activations) {
+      for (const [k, v] of Object.entries(data.activations)) {
+        this.activations.set(k, v);
+      }
+    }
   }
 
   private saveActionTimes(): void {
     const filePath = path.join(this.logDir, "state.json");
+    const activationsObj: Record<string, Activation> = {};
+    for (const [k, v] of this.activations) {
+      activationsObj[k] = v;
+    }
     writeJsonAtomic(filePath, {
       lastActionAt: this.lastActionAt,
       lastPulseAt: Date.now(),
       pulseCount: this.pulseCount,
+      activations: activationsObj,
     });
+  }
+
+  // ── Nightly Jobs ──────────────────────────────────────────────────
+
+  private async nightlyJobs(hour: number): Promise<void> {
+    const today = pstDateStr();
+    if (this.lastNightlyRunDate === today) return;
+    // Normal window: 2-4am; fallback before noon handled by caller
+    const inWindow = hour >= 2 && hour <= 4;
+    const isFallback = hour >= 7 && hour < 12; // missed-window catch-up
+    if (!inWindow && !isFallback) return;
+
+    this.lastNightlyRunDate = today;
+    log.info(`nightly jobs starting (hour=${hour})`);
+
+    await this.mergeProposals().catch(err =>
+      log.warn("merge proposals failed", err),
+    );
+    this.scanStaleMemories();
+
+    // Behavioral snapshot — 1st and 15th of each month
+    try {
+      const dayOfMonth = new Date(new Date().toLocaleString("en-US", { timeZone: getUserTZ() })).getDate();
+      if (dayOfMonth === 1 || dayOfMonth === 15) {
+        const { generateSnapshot, saveSnapshot } = await import("./behavioral-snapshot.js");
+        const snapshot = generateSnapshot(this.config.statePath);
+        saveSnapshot(this.config.statePath, snapshot);
+        log.info(`behavioral snapshot saved for ${snapshot.dateStr}`);
+      }
+    } catch (err) { log.warn("behavioral snapshot failed", err); }
+  }
+
+  private async mergeProposals(): Promise<void> {
+    const { loadProposals, saveProposals } = await import("./memory/reconsolidation.js");
+    const proposals = loadProposals();
+    const pending = proposals.filter(p => p.status === "pending");
+    if (pending.length === 0) return;
+
+    const MAX_NIGHTLY_MERGES = 20;
+    const toProcess = pending.slice(0, MAX_NIGHTLY_MERGES);
+    let merged = 0;
+    let discarded = 0;
+
+    const sm = getStoreManager();
+    for (const p of toProcess) {
+      try {
+        const success = await sm.applyReconsolidationProposal(p);
+        p.status = success ? "merged" : "discarded";
+        if (success) merged++;
+        else discarded++;
+      } catch (err) {
+        log.warn(`failed to apply proposal ${p.id}`, err);
+        p.status = "discarded";
+        discarded++;
+      }
+    }
+
+    saveProposals(proposals);
+    log.info(`nightly merge: ${merged} merged, ${discarded} discarded, ${pending.length - toProcess.length} remaining`);
+  }
+
+  private scanStaleMemories(): void {
+    const DAY_30 = 30 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const sm = getStoreManager();
+    const categories = ["knowledge", "emotional", "insights", "commitment"] as const;
+    for (const cat of categories) {
+      try {
+        const memories = sm.loadCategory(cat);
+        const stale = memories.filter(m => {
+          const lastAccess = m.lastAccessedAt ?? m.lastReconsolidatedAt ?? m.timestamp;
+          return now - lastAccess > DAY_30;
+        });
+        if (stale.length > 0) {
+          log.info(`stale scan: ${cat} has ${stale.length} memories >30d unaccessed`);
+        }
+      } catch { /* non-fatal */ }
+    }
   }
 }

@@ -98,6 +98,22 @@ export class JournalEngine {
     const state = this.loadDiary();
     return state.entries.map(e => e.date);
   }
+
+  /** Get theme frequency map from diary entries in a date range. */
+  getThemeHistory(days: number): Map<string, number> {
+    const state = this.loadDiary();
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const counts = new Map<string, number>();
+
+    for (const entry of state.entries) {
+      if (new Date(entry.date).getTime() < cutoff) continue;
+      for (const theme of entry.themes ?? []) {
+        counts.set(theme, (counts.get(theme) ?? 0) + 1);
+      }
+    }
+
+    return counts;
+  }
 }
 
 // ── Backward-compat singleton ────────────────────────────────────────
@@ -119,3 +135,4 @@ export function addDiaryEntry(entry: DiaryEntry): void { _get().addDiaryEntry(en
 export function getRecentDiaryEntries(count = 3): DiaryEntry[] { return _get().getRecentDiaryEntries(count); }
 export function formatDiaryContext(): string { return _get().formatDiaryContext(); }
 export function getPastEntryDates(): string[] { return _get().getPastEntryDates(); }
+export function getThemeHistory(days: number): Map<string, number> { return _get().getThemeHistory(days); }
