@@ -478,10 +478,10 @@ export async function callAnthropic(
               text: stablePrompt,
               cache_control: { type: "ephemeral" as const },
             },
-            {
+            ...(dynamicPrompt ? [{
               type: "text" as const,
               text: dynamicPrompt,
-            },
+            }] : []),
           ],
           messages: apiMessages,
           ...(toolDefs.length > 0 ? { tools: toolDefs as Anthropic.Tool[] } : {}),

@@ -209,8 +209,15 @@ export class EmotionEngine {
     const now = new Date();
     const userTime = new Date(now.toLocaleString("en-US", { timeZone: getUserTZ() }));
     const hour = userTime.getHours();
-    const dayOfWeek = s().time.day_names[userTime.getDay()];
-    const isWeekend = userTime.getDay() === 0 || userTime.getDay() === 6;
+
+    // Before 4 AM, psychologically it's still "today" (the previous calendar day).
+    // Use yesterday's day-of-week to avoid saying "had a great Friday" at 00:11
+    // when the person is actually reflecting on Thursday.
+    const effectiveTime = hour < 4
+      ? new Date(userTime.getTime() - 24 * 60 * 60 * 1000)
+      : userTime;
+    const dayOfWeek = s().time.day_names[effectiveTime.getDay()];
+    const isWeekend = effectiveTime.getDay() === 0 || effectiveTime.getDay() === 6;
     const month = userTime.getMonth() + 1;
     const day = userTime.getDate();
 
@@ -246,6 +253,7 @@ export class EmotionEngine {
     try {
       const raw = JSON.parse(fs.readFileSync(p, "utf-8")) as EmotionJournal;
       raw.entries = raw.entries ?? [];
+      raw.threads = raw.threads ?? [];
       return raw;
     } catch (err) {
       log.warn("failed to parse emotion journal", err);

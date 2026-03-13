@@ -64,6 +64,10 @@ data/evolution/rollback/
 data/watchdog/
 data/documents/
 
+# Personal identity & user profile
+data/memory/IDENTITY.md
+data/memory/USER.md
+
 # Personal content
 reading/
 projects/

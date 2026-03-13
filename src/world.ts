@@ -864,19 +864,27 @@ export class WorldEngine {
     delayMs: number;
     reason: string;
   }> {
+    // ── Recently chatting? Skip all delays ──
+    try {
+      const proactivePath = path.join(this.dataPath, "proactive.json");
+      if (fs.existsSync(proactivePath)) {
+        const data = JSON.parse(fs.readFileSync(proactivePath, "utf-8"));
+        const lastMsg = data.lastUserMessageAt ?? 0;
+        if (Date.now() - lastMsg < 10 * 60 * 1000) {
+          return { delayMs: 0, reason: "" }; // active conversation — no delay
+        }
+      }
+    } catch { /* ignore */ }
+
     const { currentBlock } = await this.getWorkContext(now);
     const userTime = new Date(now.toLocaleString("en-US", { timeZone: getUserTZ() }));
     const hour = userTime.getHours();
     const category = currentBlock?.category ?? "";
 
-    // ── Sleeping: delay until she wakes up (~7:00-7:30 AM) ──
+    // ── Sleeping: short delay to simulate waking up ──
     if (category === "sleep" || (hour >= 0 && hour < 7 && !currentBlock)) {
-      const wakeHour = 7;
-      const wakeMinute = Math.floor(Math.random() * 30); // 7:00-7:29
-      const wakeTime = new Date(userTime);
-      wakeTime.setHours(wakeHour, wakeMinute, 0, 0);
-      if (wakeTime <= userTime) wakeTime.setDate(wakeTime.getDate() + 1);
-      const delayMs = wakeTime.getTime() - userTime.getTime();
+      // Don't block for hours — just a brief "waking up" delay (1-5 min)
+      const delayMs = (1 + Math.random() * 4) * 60 * 1000;
       return { delayMs, reason: s().schedule.sleeping };
     }
 
