@@ -502,10 +502,9 @@ function sanitizeAITone(text: string): string | null {
   return cleaned || null;
 }
 
-// Max tokens in the context window reserved for session history.
-// 20% of context (~36K tokens) is sufficient for most conversations and saves
-// ~27K input tokens per turn vs the previous 35% ratio.
-const SESSION_TOKEN_BUDGET_RATIO = 0.20;
+// Sliding window for session history: keep last N messages / tokens.
+const RECENT_WINDOW_TOKENS = 10_000;
+const RECENT_WINDOW_MESSAGES = 80;
 
 /** Returns true if the model string is an OpenAI model (gpt-*, o1-*, o3-*) */
 function isOpenAIModel(model: string): boolean {
@@ -766,11 +765,8 @@ export class AgentLoop {
       await new Promise((r) => setTimeout(r, delayMs));
     }
 
-    // Load recent session history
-    const maxSessionTokens = Math.floor(
-      this.config.maxContextTokens * SESSION_TOKEN_BUDGET_RATIO,
-    );
-    const history = this.session.loadRecent(maxSessionTokens);
+    // Load recent session history (sliding window with rolling summary)
+    const { messages: history } = this.session.loadWindowed(RECENT_WINDOW_TOKENS, RECENT_WINDOW_MESSAGES);
 
     // ── Context planner: decide which sections are needed ──
     // Launched early so it runs in parallel with skill loading + data fetches (~0 added latency)
@@ -1205,6 +1201,11 @@ export class AgentLoop {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     };
     this.session.append(assistantEntry);
+
+    // Increment rolling summary turn counter (triggers refresh every 30 turns)
+    this.session.incrementTurnCounter().catch(err =>
+      console.warn("Rolling summary turn counter error:", err)
+    );
 
     // Context eval: record selection + utilization for this turn
     recordContextTurn({

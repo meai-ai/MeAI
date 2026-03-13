@@ -29,7 +29,7 @@ export const ConfigSchema = z.object({
   claudeModel: z.string().default("claude-sonnet-4-5-20250929"),
   conversationProvider: z.enum(["anthropic", "openai"]).optional(),
   maxContextTokens: z.number().int().positive().default(180_000),
-  compactionThreshold: z.number().min(0).max(1).default(0.8),
+  compactionThreshold: z.number().min(0).max(1).default(0.3),
   statePath: z.string().default(""),
   /** X (Twitter) API credentials — all optional, enables social features when present */
   xApiKey: z.string().optional(),

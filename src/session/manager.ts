@@ -17,6 +17,19 @@ import type { TranscriptEntry, AppConfig } from "../types.js";
 import { SessionIndexManager } from "./index.js";
 
 const JSONL_FILE = "main.jsonl";
+const ROLLING_SUMMARY_FILE = "rolling-summary.json";
+
+/** Persisted rolling summary that bridges older conversation into the sliding window. */
+interface RollingSummary {
+  /** The summary text covering older messages */
+  text: string;
+  /** Timestamp of the last message covered by this summary */
+  coveredUpTo: number;
+  /** Number of messages summarized so far */
+  messagesCovered: number;
+  /** Turn counter — triggers refresh every N turns */
+  turnsSinceRefresh: number;
+}
 
 // Rough token estimate: 1 token ≈ 4 characters
 const CHARS_PER_TOKEN = 4;
@@ -241,6 +254,161 @@ export class SessionManager {
       // Clear anyway so the user gets a fresh start
       fs.writeFileSync(this.filePath, "", "utf-8");
       return null;
+    }
+  }
+
+  // ── Rolling summary support ───────────────────────────────────────
+
+  private get rollingSummaryPath(): string {
+    return path.join(this.config.statePath, "sessions", ROLLING_SUMMARY_FILE);
+  }
+
+  /** Load the persisted rolling summary, or null if none exists. */
+  private loadRollingSummary(): RollingSummary | null {
+    if (!fs.existsSync(this.rollingSummaryPath)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(this.rollingSummaryPath, "utf-8")) as RollingSummary;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Save the rolling summary to disk. */
+  private saveRollingSummary(summary: RollingSummary): void {
+    fs.writeFileSync(this.rollingSummaryPath, JSON.stringify(summary, null, 2), "utf-8");
+  }
+
+  /**
+   * Load a sliding window of recent messages, capped by both token budget
+   * and message count. Prepends the rolling summary as a system-like entry
+   * if one exists.
+   */
+  loadWindowed(
+    maxRecentTokens: number,
+    maxMessages: number,
+  ): { messages: TranscriptEntry[] } {
+    if (!fs.existsSync(this.filePath)) {
+      return { messages: [] };
+    }
+
+    const raw = fs.readFileSync(this.filePath, "utf-8");
+    const lines = raw.trim().split("\n").filter(Boolean);
+
+    const entries: TranscriptEntry[] = [];
+    let totalChars = 0;
+    const maxChars = maxRecentTokens * CHARS_PER_TOKEN;
+
+    // Walk backwards, collecting up to maxMessages within token budget
+    for (let i = lines.length - 1; i >= 0 && entries.length < maxMessages; i--) {
+      const line = lines[i];
+      if (totalChars + line.length > maxChars && entries.length > 0) break;
+      try {
+        const entry: TranscriptEntry = JSON.parse(line);
+        entries.unshift(entry);
+        totalChars += line.length;
+      } catch {
+        console.warn(`Skipping malformed JSONL line ${i}`);
+      }
+    }
+
+    // Prepend rolling summary if available
+    const summary = this.loadRollingSummary();
+    if (summary?.text) {
+      const summaryEntry: TranscriptEntry = {
+        role: "assistant",
+        content: `[conversation summary]: ${summary.text}`,
+        timestamp: summary.coveredUpTo,
+      };
+      entries.unshift(summaryEntry);
+    }
+
+    return { messages: entries };
+  }
+
+  /**
+   * Summarize messages between the rolling summary coverage and the current
+   * sliding window, updating the rolling summary.
+   */
+  async refreshSummary(): Promise<void> {
+    const all = this.loadAll();
+    if (all.length === 0) return;
+
+    const summary = this.loadRollingSummary();
+    const coveredUpTo = summary?.coveredUpTo ?? 0;
+
+    // Find gap messages: those after the summary but before the recent window
+    // We summarize everything except the last KEEP_RECENT messages
+    const gapEnd = Math.max(0, all.length - KEEP_RECENT);
+    const gapMessages = all.slice(0, gapEnd).filter(e => e.timestamp > coveredUpTo);
+
+    if (gapMessages.length === 0) return;
+
+    const gapText = gapMessages
+      .map(e => `[${e.role}]: ${e.content}`)
+      .join("\n\n");
+
+    try {
+      const existingSummary = summary?.text ?? "";
+      const prompt = existingSummary
+        ? `Previous summary:\n${existingSummary}\n\nNew conversation to incorporate:\n${gapText}`
+        : `Summarize this conversation segment:\n\n${gapText}`;
+
+      const newSummary = await claudeText({
+        label: "session.rolling-summary",
+        system:
+          "Summarize this conversation segment concisely, preserving key facts, " +
+          "decisions, and context. If a previous summary is provided, merge the new " +
+          "information into a unified summary. Be factual and brief.",
+        prompt,
+        model: "smart",
+        timeoutMs: 90_000,
+      });
+
+      if (!newSummary || newSummary.trim() === "") {
+        console.warn("[session] Rolling summary returned empty, skipping update");
+        return;
+      }
+
+      const lastGapMsg = gapMessages[gapMessages.length - 1];
+      this.saveRollingSummary({
+        text: newSummary,
+        coveredUpTo: lastGapMsg.timestamp,
+        messagesCovered: (summary?.messagesCovered ?? 0) + gapMessages.length,
+        turnsSinceRefresh: 0,
+      });
+
+      console.log(`[session] Rolling summary updated, covering ${(summary?.messagesCovered ?? 0) + gapMessages.length} messages`);
+    } catch (err) {
+      console.error("[session] Rolling summary refresh failed:", err);
+      // Append a note that some conversation could not be summarized
+      if (summary) {
+        this.saveRollingSummary({
+          ...summary,
+          text: summary.text + "\n(partial conversation could not be summarized)",
+          turnsSinceRefresh: 0,
+        });
+      }
+    }
+  }
+
+  /**
+   * Increment the turn counter and trigger a rolling summary refresh
+   * every 30 turns.
+   */
+  async incrementTurnCounter(): Promise<void> {
+    const summary = this.loadRollingSummary() ?? {
+      text: "",
+      coveredUpTo: 0,
+      messagesCovered: 0,
+      turnsSinceRefresh: 0,
+    };
+
+    summary.turnsSinceRefresh += 1;
+
+    if (summary.turnsSinceRefresh >= 30) {
+      await this.refreshSummary();
+    } else {
+      this.saveRollingSummary(summary);
     }
   }
 
