@@ -101,10 +101,10 @@ async function callAgent(
     system: systemPrompt,
     prompt: userPrompt,
     model: "smart",
-    timeoutMs: 120_000,
+    timeoutMs: 300_000,
     maxOutputChars: opts.maxOutputChars ?? 16_000,
   });
-  if (!text) throw new Error("Empty response from Claude CLI");
+  if (!text) throw new Error("Empty response from LLM");
   return text;
 }
 

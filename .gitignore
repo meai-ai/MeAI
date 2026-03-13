@@ -6,6 +6,7 @@ dist/
 # Secrets & personal config
 data/config.json
 data/character.yaml
+.oauth-tokens.json
 
 # Runtime state (regenerated automatically)
 data/memory/*.json
