@@ -310,6 +310,13 @@ Choose how to create your character:
 
     console.log("\nStarting AI character generation...\n");
 
+    // Initialize Max OAuth + API client so character-gen uses API (fast) instead of CLI (slow)
+    const statePath = path.join(PROJECT_ROOT, "data");
+    const { initMaxOAuth } = await import("../src/max-oauth.js");
+    const { initClaudeRunnerApi } = await import("../src/claude-runner.js");
+    initMaxOAuth(statePath);
+    initClaudeRunnerApi(String(config.anthropicApiKey ?? ""));
+
     // Dynamic import to avoid loading at module level
     const { generateCharacter } = await import("./character-gen.js");
 
