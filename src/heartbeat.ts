@@ -47,6 +47,7 @@ import { getWorkContext, fetchMarketSnapshot, type TimeBlock, getSleepData, getP
 import { getBodyState, formatBodyContext, getCurrentPeriodPhase } from "./body.js";
 import { loadSubscriptions } from "./interests.js";
 import { claudeText } from "./claude-runner.js";
+import { runWithTrace } from "./lib/prompt-trace.js";
 import { checkNotifications, getUnread } from "./notifications.js";
 import { createLogger } from "./lib/logger.js";
 import { runContextAnalysis } from "./agent/context-eval.js";
@@ -512,6 +513,11 @@ export class Heartbeat {
   private async pulse(): Promise<void> {
     if (this.stopped) return;
 
+    const traceId = `hb_${Date.now()}_${this.pulseCount}`;
+    await runWithTrace({ traceId, source: "heartbeat" }, () => this._pulse());
+  }
+
+  private async _pulse(): Promise<void> {
     const startMs = Date.now();
     this.pulseCount++;
 
@@ -1043,6 +1049,7 @@ Rules: ~30-40% rest; share-worthy discoveries → reach_out; morning→explore, 
 Format: {"action":"rest","reason":"short reason","confidence":0.7}`;
 
       const text = await claudeText({
+        label: "heartbeat.classify",
         system,
         prompt: `Current state:
 - time: ${vitals.timeOfDay} (${vitals.hour}:${String(vitals.minute).padStart(2, "0")}) ${vitals.dayType === "weekend" ? "(weekend)" : "(workday)"}
@@ -1303,6 +1310,7 @@ Output strictly as a JSON array:
 [{"key": "insights.topic.MMDD", "value": "insight content"}]`;
 
       const text = await claudeText({
+        label: "heartbeat.introspect",
         system: "You are an introspection system. Output only a JSON array, nothing else.",
         prompt,
         model: "smart",
@@ -1373,6 +1381,7 @@ Output strictly as a JSON array:
     const pastRef = pastDates.slice(-3).join(", ") || "none";
 
     const text = await claudeText({
+      label: "heartbeat.diary",
       system: `You are ${getCharacter().name}'s diary system. Write a 300-500 word diary entry in their voice. Output only JSON, nothing else.`,
       prompt: `Write today's (${today}) diary entry.
 
@@ -1443,6 +1452,7 @@ JSON format:
       .join("\n") || "(none)";
 
     const text = await claudeText({
+      label: "heartbeat.evolveOpinions",
       system: `You are ${getCharacter().name}'s opinion evolution system. Update their opinions based on recent experiences. Output only a JSON array, nothing else.`,
       prompt: `${getCharacter().name}'s current opinions:
 ${opinionsText}
@@ -1516,6 +1526,7 @@ No changes? Return: []`,
       .join("\n") || "(none)";
 
     const text = await claudeText({
+      label: "heartbeat.evolveGoals",
       system: `You are ${getCharacter().name}'s goal-setting system. Based on recent life, generate 1-2 new goals. Output only a JSON array.`,
       prompt: `${getCharacter().name}'s current goals:
 ${currentGoalsText}
@@ -1828,6 +1839,7 @@ Requirements:
 - duration_minutes: how long does this event roughly last? Judge by activity type — buying coffee 5min, meeting 60min, lunch 40min, commute 25min, focused coding 90min, pottery class 120min. The next event happens naturally after this
 - JSON format: {"event": "what is happening", "mood_effect": "brief mood impact", "share_worthy": false, "duration_minutes": 30}`;
       const text = await claudeText({
+        label: "heartbeat.simulateActivity",
         system: narrationSystem,
         prompt: contextParts.join("\n"),
         model: "fast",

@@ -183,6 +183,7 @@ If the replies are already natural with no obvious issues, output only: ${SKIP_T
 
     try {
       const output = (await claudeText({
+        label: "evolution.promptOptimizer",
         system: "You are a prompt optimization assistant. Output only the rule or SKIP.",
         prompt,
         model: "fast",

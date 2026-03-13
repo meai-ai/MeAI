@@ -76,6 +76,7 @@ export class SessionIndexManager {
 
     try {
       const raw = await claudeText({
+        label: "session.archiveMetadata",
         system:
           "You generate metadata for conversation archives. " +
           "Respond with ONLY valid JSON, no markdown fences, no explanation.",

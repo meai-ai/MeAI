@@ -35,6 +35,8 @@ import { generateVoice, isTTSEnabled, getVoiceDailyCount } from "./tts.js";
 import { addTimelineEvent, enqueueTimelineJob, getTodayTimeline } from "./timeline.js";
 import { getCharacter, s, renderTemplate } from "./character.js";
 import { recordCharacterOutreach, markAwaitingReply, isGoodTimeToReachOut, getAttachmentState } from "./lib/relationship-model.js";
+import { checkProactiveGate } from "./lib/action-gate.js";
+import { createLogger } from "./lib/logger.js";
 
 const MIN_DAILY_SELFIES = 5;
 const MIN_DAILY_VOICES = 5;
@@ -44,6 +46,26 @@ const randMs = (minMin: number, maxMin: number) =>
 
 /** The magic word: if the LLM returns this, she chose not to reach out */
 const SKIP_TOKEN = "SKIP";
+
+const log = createLogger("proactive");
+
+/** Get proactive gap with relationship-phase multiplier bias. */
+function getProactiveGapMs(sent: boolean): number {
+  const baseline = sent ? randMs(20, 45) : randMs(15, 30);
+  try {
+    const attachment = getAttachmentState();
+    if (attachment.phaseConfidence < 0.6) return baseline; // low confidence -> no change
+    let multiplier = 1.0;
+    if (attachment.stage === "anxious") multiplier = 0.7;
+    else if (attachment.stage === "ruminating" && attachment.lastMessageUnanswered) multiplier = 2.5;
+    else if (attachment.stage === "secure") multiplier = 1.1;
+    if (multiplier !== 1.0) {
+      log.info(`suppression: attachment-phase multiplier (stage=${attachment.stage}, multiplier=${multiplier})`);
+    }
+    return baseline * multiplier;
+  } catch { /* non-fatal */ }
+  return baseline;
+}
 
 interface ProactiveState {
   lastSentAt: number;
@@ -124,8 +146,8 @@ export class ProactiveScheduler {
     if (this.stopped) return;
     try {
       const sent = await this.maybeReachOut();
-      // After sending: 20-45 min gap; after skip: try again in 15-30 min
-      setTimeout(() => this.loop(), sent ? randMs(20, 45) : randMs(15, 30));
+      // After sending: 20-45 min gap; after skip: try again in 15-30 min (with relationship multiplier)
+      setTimeout(() => this.loop(), getProactiveGapMs(sent));
     } catch (e) {
       console.error("[proactive] Error:", e);
       setTimeout(() => this.loop(), randMs(20, 40));
@@ -158,6 +180,13 @@ export class ProactiveScheduler {
   }
 
   private async _doReachOut(): Promise<boolean> {
+    // Action gate: rumination veto, reply-rate, contact pacing
+    const gate = checkProactiveGate();
+    if (!gate.allowed) {
+      console.log(`[proactive] Blocked by action gate: [${gate.ruleName}] ${gate.reason}`);
+      return false;
+    }
+
     const now = new Date();
     const userTime = new Date(
       now.toLocaleString("en-US", { timeZone: getUserTZ() }),
@@ -453,6 +482,7 @@ export class ProactiveScheduler {
         prompt: `${getCharacter().name}: ${message}`,
         model: "fast",
         timeoutMs: 60_000,
+        label: "proactive.extractTimeline",
       });
 
       if (!text) return;
@@ -705,6 +735,7 @@ export class ProactiveScheduler {
         prompt: `Current situation:\n${context}`,
         model: "smart",
         timeoutMs: 90_000,
+        label: "proactive.decide",
       })).trim();
 
       console.log("[proactive] LLM raw output:", text.slice(0, 200));

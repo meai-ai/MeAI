@@ -194,6 +194,7 @@ export async function maybeUpdateSelfNarrative(): Promise<void> {
       : "";
 
     const result = await claudeText({
+      label: "self-narrative.synthesize",
       system: `You are ${charName}'s self-narrative module. Based on the past two weeks of diary themes, emotional trends, emerging value tendencies, and growth markers, generate a brief self-understanding.
 
 Requirements:

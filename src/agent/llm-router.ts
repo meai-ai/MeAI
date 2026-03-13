@@ -324,6 +324,7 @@ export async function callClaudeCode(
     const prompt = serializeMessages(messages) + extraContext;
 
     const result = await claudeRun({
+      label: "llm-router.callClaudeCode",
       system: fullSystem,
       prompt,
       model: modelChoice,

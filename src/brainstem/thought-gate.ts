@@ -678,6 +678,7 @@ Requirements: 15-30 characters, one sentence. No explanation, just say it.`;
   } else {
     try {
       content = await claudeText({
+        label: "brainstem.innerMonologue",
         system: `You are ${charName}'s inner monologue generator. Output one brief inner thought.`,
         prompt,
         model: "fast",
@@ -930,6 +931,7 @@ async function evaluateActGate(
       const hour = new Date().getHours();
       const sanityPrompt = `Thought: ${thought.content}\nTarget: ${target.id} (${target.type})\nTrigger: ${thought.trigger}\nBasis: ${thought.grounding[0]?.type ?? "none"}\nCurrent time: ${hour}:00\nIn conversation: ${ctx.isConversationActive() ? "yes" : "no"}`;
       const sanityResult = await claudeText({
+        label: "brainstem.sanityCheck",
         system: "Judge whether it's appropriate to proactively reach out or perform an action right now. Only answer YES or NO.",
         prompt: sanityPrompt,
         model: "fast",
@@ -1099,6 +1101,7 @@ Template: ${templateLabel}
 
 Describe this hypothetical thought as a short noun phrase (3-8 words). Output the phrase directly, no explanation.`;
     const llmLabel = await claudeText({
+      label: "brainstem.nameThought",
       system: "You are a concept namer. Output only one short noun phrase.",
       prompt,
       model: "fast",

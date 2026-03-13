@@ -543,6 +543,7 @@ Output strictly in this JSON format:
 If she's not in the mood to explore right now (e.g., late at night, just searched, nothing particular in mind), output: {"query": "", "reason": "SKIP"}`;
 
       const text = await claudeText({
+        label: "curiosity.pickTopic",
         system: curiositySystem,
         prompt: `It's ${dayName} ${hour}:00, ${timeSinceLastHr} hours since last exploration.
 Her recent interests and memories:\n${memText || "(no records yet)"}${mediaInspo}${activationSection}${topicPrefSection}\n\nIs her curiosity driving her to search for something?`,
@@ -599,6 +600,7 @@ Output strictly as JSON:
 {"summary": "what you learned", "reaction": "your reaction", "shareWorthy": true/false, "category": "category"}`;
 
       const text = await claudeText({
+        label: "curiosity.synthesize",
         system: synthesisSystem,
         prompt: `You searched: "${topic.query}" (because: ${topic.reason})
 
@@ -686,6 +688,7 @@ Penalty factors:
 Output strictly a single number (1-5).`;
 
       const text = await claudeText({
+        label: "curiosity.triage",
         system: triageSystem,
         prompt: `Shallow search topic: "${discovery.query}"
 Finding: ${discovery.summary}
@@ -827,6 +830,7 @@ Score (1-5):`,
   private async generateRelatedQueries(discovery: Discovery): Promise<string[]> {
     try {
       const text = await claudeText({
+        label: "curiosity.relatedQueries",
         system: `You are ${getCharacter().name}. She just searched a topic and found it interesting enough to dig deeper.
 Come up with 2-3 related but differently-angled search queries to help her understand the topic more comprehensively.
 
@@ -887,6 +891,7 @@ Come up with related search queries:`,
     try {
       const char = getCharacter();
       const text = await claudeText({
+        label: "curiosity.deepSynthesize",
         system: `You are ${char.name}. You previously did a shallow search on a topic and found it interesting. Now you've spent time reading several articles in depth.
 You've also reviewed other topics you explored recently to see if there are any interesting connections.
 
@@ -999,6 +1004,7 @@ Now write a deep summary.`,
     try {
       const char = getCharacter();
       const text = await claudeText({
+        label: "curiosity.digestToMemory",
         system: `You are ${char.name}'s knowledge digestion system. She just completed an exploration, and you need to extract knowledge points worth remembering long-term.
 
 These knowledge points will be stored in her long-term memory for natural recall during future conversations with ${char.user.name}.
@@ -1070,6 +1076,7 @@ Extract knowledge points worth remembering long-term:`,
     try {
       const char = getCharacter();
       const text = await claudeText({
+        label: "curiosity.checkSubscriptions",
         system: `You are ${char.name}. You just finished exploring a topic. Based on the content you encountered, decide if there are any YouTube channels or podcasts worth subscribing to.
 
 Currently subscribed:
@@ -1159,6 +1166,7 @@ Did you encounter any YouTube channels or podcasts worth subscribing to?`,
 
     try {
       const text = await claudeText({
+        label: "curiosity.checkDuplicate",
         system: `You are a curiosity dedup system. The character wants to search a new topic. Compare it with recent searches and classify:
 
 1. "new" — genuinely new topic with no obvious overlap with past searches

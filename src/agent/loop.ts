@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { claudeRun, claudeText } from "../claude-runner.js";
+import { runWithTrace } from "../lib/prompt-trace.js";
 /** Generic reply result — decoupled from Telegraf's Message type. */
 type ReplyResult = { message_id: number } | { messageId: number | string };
 
@@ -557,6 +558,20 @@ export class AgentLoop {
    * Handle an incoming user message — run the full agentic loop.
    */
   async handleMessage(
+    text: string,
+    chatId: number | string,
+    sendReply: (text: string) => Promise<ReplyResult>,
+    editReply: (messageId: number | string, text: string) => Promise<void>,
+    sendTyping: () => Promise<void>,
+    imageData?: ImageData,
+  ): Promise<void> {
+    return runWithTrace(
+      { traceId: `conv_${Date.now()}`, source: "conversation" },
+      () => this._handleMessage(text, chatId, sendReply, editReply, sendTyping, imageData),
+    );
+  }
+
+  private async _handleMessage(
     text: string,
     chatId: number | string,
     sendReply: (text: string) => Promise<ReplyResult>,
@@ -1448,6 +1463,7 @@ export class AgentLoop {
         prompt: `Extract important facts from this conversation before it's compacted:\n\n${text}`,
         model: "smart",
         timeoutMs: 90_000,
+        label: "loop.preCompactionFlush",
       });
 
       const jsonMatch = result.match(/\[[\s\S]*\]/);
@@ -1571,6 +1587,7 @@ export class AgentLoop {
         model: modelChoice,
         timeoutMs: 90_000,
         maxOutputChars: 2_000,
+        label: "loop.callClaudeCode",
       });
 
       if (!result.ok) {
@@ -1982,6 +1999,7 @@ export class AgentLoop {
         prompt: `${getCharacter().user.name}: ${userMessage}\n${getCharacter().name}: ${response}`,
         model: "fast",
         timeoutMs: 60_000,
+        label: "loop.seedTimeline",
       });
 
       if (!text) return;
@@ -2061,6 +2079,7 @@ export class AgentLoop {
       prompt: conversationText,
       model: "smart",
       timeoutMs: 90_000,
+      label: "loop.extractMemories",
     });
 
     // Match a JSON array — must start with [{ to avoid matching [user] from conversation text

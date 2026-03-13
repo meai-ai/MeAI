@@ -183,6 +183,7 @@ export class SessionManager {
 
     try {
       const summary = await claudeText({
+        label: "session.compact",
         system:
           "You are a conversation summarizer. Summarize the following conversation transcript " +
           "into a concise summary, preserving key facts, decisions, and context that would be " +

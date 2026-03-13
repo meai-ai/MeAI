@@ -13,6 +13,17 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import type Anthropic from "@anthropic-ai/sdk";
 import { createAnthropicClient, isMaxOAuthAvailable } from "./max-oauth.js";
+import {
+  getTraceContext,
+  generateSpanId,
+  tracePrompt,
+  hashTemplate,
+  hashInstance,
+  getCodeVersion,
+  annotateTrace,
+} from "./lib/prompt-trace.js";
+
+export { annotateTrace };
 
 // ── Binary Lookup ────────────────────────────────────────────────────
 
@@ -67,6 +78,10 @@ export interface ClaudeRunOptions {
   timeoutMs?: number;
   /** Max output chars to return (default: 16000) */
   maxOutputChars?: number;
+  /** Trace label — identifies the caller (e.g. "curiosity.pickTopic") */
+  label?: string;
+  /** Hand-annotated template version (e.g. "v1", "2026-03-07-a") */
+  templateVersion?: string;
 }
 
 export interface ClaudeRunResult {
@@ -74,7 +89,9 @@ export interface ClaudeRunResult {
   text: string;
   error?: string;
   /** Token usage — only available when using the API path */
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number };
+  /** Trace span ID for this call */
+  spanId?: string;
 }
 
 // ── API Client (Max OAuth) ───────────────────────────────────────────
@@ -145,6 +162,8 @@ async function runApi(
  * Primary: Anthropic API via Max OAuth (when enabled).
  * Fallback: Claude Code CLI (`claude --print`).
  */
+let _warnedNoLabel = false;
+
 export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
   const {
     system,
@@ -154,102 +173,155 @@ export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult
     maxOutputChars = 16_000,
   } = opts;
 
+  if (!opts.label && !_warnedNoLabel) {
+    console.warn(`[prompt-trace] claudeRun called without label — add label: "module.action" for tracing`);
+    _warnedNoLabel = true;
+  }
+
+  const label = opts.label ?? "unknown";
+  const ctx = getTraceContext();
+  const spanId = generateSpanId();
+  const parentSpanId = ctx?.currentSpanId;
+  const startMs = Date.now();
+
   // Strip null bytes — scraped web content can contain them and spawn() rejects them
   const cleanSystem = system.replace(/\0/g, "");
   const cleanPrompt = prompt.replace(/\0/g, "");
 
+  let result: ClaudeRunResult | undefined;
+  let useApi = false;
+
   // Primary path: API via Max OAuth
   if (apiClient) {
-    const result = await runApi(cleanSystem, cleanPrompt, model, timeoutMs, maxOutputChars);
-    if (result.ok) return result;
-    // API failed — fall back to CLI
-    console.warn(`[claude-runner] API failed, falling back to CLI: ${result.error}`);
+    useApi = true;
+    result = await runApi(cleanSystem, cleanPrompt, model, timeoutMs, maxOutputChars);
+    if (!result.ok) {
+      // API failed — fall back to CLI
+      console.warn(`[claude-runner] API failed, falling back to CLI: ${result.error}`);
+      useApi = false;
+      result = undefined;
+    }
   }
 
   // Fallback: Claude CLI
-  const claudePath = await findClaude();
-  if (!claudePath) {
-    return {
-      ok: false,
-      text: "",
-      error: "Claude Code CLI not found. Run: npm install -g @anthropic-ai/claude-code",
-    };
-  }
-
-  const modelFlag = modelId(model);
-
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-
-    // Strip CLAUDECODE env to allow nested invocation
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
-
-    const child = spawn(
-      claudePath,
-      [
-        "--print",
-        "--dangerously-skip-permissions",
-        "--model", modelFlag,
-        "--system-prompt", cleanSystem,
-        cleanPrompt,
-      ],
-      {
-        cwd: homedir(),
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 3_000);
-    }, timeoutMs);
-
-    child.on("close", (code: number | null) => {
-      clearTimeout(timer);
-
-      if (timedOut) {
-        resolve({
-          ok: false,
-          text: stdout.slice(-2_000),
-          error: `Timed out after ${Math.round(timeoutMs / 1000)}s`,
-        });
-        return;
-      }
-
-      if (code !== 0) {
-        resolve({
-          ok: false,
-          text: stdout.slice(0, 2_000),
-          error: stderr.slice(0, 1_000) || `Exit code ${code}`,
-        });
-        return;
-      }
-
-      resolve({
-        ok: true,
-        text: stdout.length > maxOutputChars
-          ? stdout.slice(0, maxOutputChars)
-          : stdout,
-      });
-    });
-
-    child.on("error", (err: Error) => {
-      clearTimeout(timer);
-      resolve({
+  if (!result) {
+    const claudePath = await findClaude();
+    if (!claudePath) {
+      result = {
         ok: false,
         text: "",
-        error: `Spawn error: ${err.message}`,
+        error: "Claude Code CLI not found. Run: npm install -g @anthropic-ai/claude-code",
+      };
+    } else {
+      const modelFlag = modelId(model);
+      result = await new Promise<ClaudeRunResult>((resolve) => {
+        let stdout = "";
+        let stderr = "";
+        let timedOut = false;
+
+        // Strip CLAUDECODE env to allow nested invocation
+        const env = { ...process.env };
+        delete env.CLAUDECODE;
+
+        const child = spawn(
+          claudePath,
+          [
+            "--print",
+            "--dangerously-skip-permissions",
+            "--model", modelFlag,
+            "--system-prompt", cleanSystem,
+            cleanPrompt,
+          ],
+          {
+            cwd: homedir(),
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+
+        child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+        child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 3_000);
+        }, timeoutMs);
+
+        child.on("close", (code: number | null) => {
+          clearTimeout(timer);
+
+          if (timedOut) {
+            resolve({
+              ok: false,
+              text: stdout.slice(-2_000),
+              error: `Timed out after ${Math.round(timeoutMs / 1000)}s`,
+            });
+            return;
+          }
+
+          if (code !== 0) {
+            resolve({
+              ok: false,
+              text: stdout.slice(0, 2_000),
+              error: stderr.slice(0, 1_000) || `Exit code ${code}`,
+            });
+            return;
+          }
+
+          resolve({
+            ok: true,
+            text: stdout.length > maxOutputChars
+              ? stdout.slice(0, maxOutputChars)
+              : stdout,
+          });
+        });
+
+        child.on("error", (err: Error) => {
+          clearTimeout(timer);
+          resolve({
+            ok: false,
+            text: "",
+            error: `Spawn error: ${err.message}`,
+          });
+        });
       });
-    });
+    }
+  }
+
+  // ── Write trace record ──────────────────────────────────────────────
+  const durationMs = Date.now() - startMs;
+  const status = result.ok ? "ok" as const : (result.error?.includes("Timed out") ? "timeout" as const : (useApi ? "api_error" as const : "cli_error" as const));
+
+  tracePrompt({
+    kind: "trace",
+    ts: new Date(startMs).toISOString(),
+    traceId: ctx?.traceId ?? "no_trace",
+    spanId,
+    parentSpanId,
+    source: ctx?.source ?? "unknown",
+    label,
+    model: modelId(model),
+    runtime: useApi ? "api" : "cli",
+    durationMs,
+    status,
+    inputTokens: result.usage?.inputTokens,
+    outputTokens: result.usage?.outputTokens,
+    cacheReadTokens: result.usage?.cacheReadTokens,
+    cacheWriteTokens: result.usage?.cacheWriteTokens,
+    systemChars: system.length,
+    promptChars: prompt.length,
+    responseChars: result.text.length,
+    templateHash: hashTemplate(label, system),
+    instanceHash: hashInstance(system, prompt),
+    templateVersion: opts.templateVersion,
+    codeVersion: getCodeVersion(),
+    system: system.slice(0, 500),
+    prompt: prompt.slice(0, 500),
+    response: result.text.slice(0, 500),
   });
+
+  return { ...result, spanId };
 }
 
 /** Check if an error is transient and worth retrying. */

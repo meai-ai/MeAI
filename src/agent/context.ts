@@ -10,8 +10,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig, Memory, Skill } from "../types.js";
 import { getSearchEngine } from "../evolution/memory.js";
+import { tokenize } from "../memory/search.js";
 import { getMem0 } from "../memory/mem0-engine.js";
 import { getStoreManager } from "../memory/store-manager.js";
+import type { MemoryCategory } from "../memory/store-manager.js";
+import { shouldReconsolidate } from "../memory/reconsolidation.js";
 import type { SkillSelection } from "./skill-router.js";
 import { SessionIndexManager } from "../session/index.js";
 import { createLogger } from "../lib/logger.js";
@@ -22,6 +25,7 @@ import { formatGoalContext } from "../goals.js";
 import { formatNarrativeContext } from "../narrative.js";
 import { formatDocumentContext, getDocumentsDir } from "../documents.js";
 import type { ContextPlan } from "./context-planner.js";
+import type { TurnDirective } from "./turn-directive.js";
 import type { RetrievalPolicy } from "./cognitive-controller.js";
 import { getRecentMoments } from "../moments.js";
 import { getCharacter, s, renderTemplate, isBlankSlate, BLANK_SLATE_PERSONA } from "../character.js";
@@ -38,6 +42,21 @@ const SYSTEM_PROMPT_BUDGET_RATIO = 0.40; // 40% of context window for system pro
 const DEFAULT_MEMORY_BUDGET_RATIO = 0.15;  // 15% of system prompt budget for memories
 const DEFAULT_WORLD_BUDGET_RATIO = 0.25;   // 25% for world/body/emotion context
 const SKILLS_BUDGET_RATIO = 0.20;          // 20% for skills
+
+/**
+ * Compact a memory entry: strip namespace prefix, remove timestamps, cap at 200 chars.
+ */
+function compactMemoryEntry(key: string, value: string): string {
+  // Strip namespace prefix (e.g., "user.age" -> "age", "emotional.mood" -> "mood")
+  const shortKey = key.includes(".") ? key.split(".").slice(1).join(".") : key;
+  // Remove timestamp annotations like "2026-02" or "(2026-02-28)"
+  let compactValue = value
+    .replace(/\s*\(\d{4}-\d{2}(?:-\d{2})?\)\s*/g, "")
+    .trim();
+  // Cap at 200 chars
+  if (compactValue.length > 200) compactValue = compactValue.slice(0, 197) + "...";
+  return `${shortKey}: ${compactValue}`;
+}
 
 /**
  * Rank memories by recency (exponential decay over 30 days) weighted by confidence.
@@ -92,6 +111,7 @@ async function assembleMemoryContext(
   config: AppConfig,
   conversationContext?: string,
   memoryQuery?: string,
+  directive?: TurnDirective | null,
   retrievalPolicy?: RetrievalPolicy,
 ): Promise<string> {
   const manager = getStoreManager();
@@ -112,7 +132,7 @@ async function assembleMemoryContext(
   // 1. Core — always loaded in full
   const coreMemories = manager.loadCategory("core");
   if (coreMemories.length > 0) {
-    const lines = coreMemories.map((m) => `- ${m.key}: ${m.value}`);
+    const lines = coreMemories.map((m) => `- ${compactMemoryEntry(m.key, m.value)}`);
     sections.push(`### ${renderTemplate(s().headers.user_key_info)}\n${lines.join("\n")}`);
   }
 
@@ -193,12 +213,64 @@ async function assembleMemoryContext(
       scored.push({ memory, baseScore, category });
     }
 
-    // Apply soft penalty per category
+    // Apply soft penalty per category (before directive reranking)
     if (retrievalPolicy?.softPenalty) {
       for (const sm of scored) {
         const penalty = retrievalPolicy.softPenalty[sm.category] ?? 1.0;
         sm.baseScore *= penalty;
       }
+    }
+
+    // Directive-guided memory reranking
+    if (directive) {
+      // Layer 1: Structural boost — commitment entity linkage
+      for (const sm of scored) {
+        for (const c of directive.openCommitments) {
+          const cTokens = tokenize(c.content);
+          const mTokens = tokenize(sm.memory.key + " " + sm.memory.value);
+          const cSet = new Set(cTokens);
+          let matches = 0;
+          for (const t of mTokens) { if (cSet.has(t)) matches++; }
+          if (cTokens.length > 0 && matches / cTokens.length > 0.3) {
+            sm.baseScore += 0.4;
+            break;
+          }
+        }
+      }
+
+      // Layer 2: Token overlap boost — grounding hints / concepts / goals
+      // Denominator is hintTokens.size (what fraction of hints appear in memory),
+      // NOT memTokens.length, to avoid near-zero boosts for long memories
+      const hintTokenArr = directive.groundingHints.flatMap(h => tokenize(h))
+        .concat(directive.conceptActivations.flatMap(c => tokenize(c.topic)))
+        .concat(directive.activeGoalAlignment.flatMap(g => tokenize(g.description)));
+      const hintTokens = new Set(hintTokenArr);
+      const hintCount = hintTokens.size;
+      for (const sm of scored) {
+        if (hintCount === 0) break;
+        const memTokenSet = new Set(tokenize(sm.memory.value));
+        let overlap = 0;
+        for (const t of hintTokens) { if (memTokenSet.has(t)) overlap++; }
+        sm.baseScore += 0.2 * (overlap / hintCount);
+      }
+    }
+
+    // Touch access for scored memories (debounced, non-blocking)
+    const accessedKeys = scored.map(sm => sm.memory.key);
+    if (accessedKeys.length > 0) {
+      manager.touchAccess(accessedKeys);
+    }
+
+    // Fire-and-forget reconsolidation for stale memories
+    const reconCandidates = scored
+      .filter(sm => shouldReconsolidate(sm.memory, sm.category as MemoryCategory))
+      .slice(0, 3);
+    if (reconCandidates.length > 0 && config.openaiApiKey) {
+      manager.scheduleReconsolidation(
+        reconCandidates.map(sm => ({ memory: sm.memory, category: sm.category as MemoryCategory })),
+        searchQuery,
+        config.openaiApiKey,
+      ).catch(err => log.warn("reconsolidation scheduling failed", err));
     }
 
     // Fill emotional bucket (policy-driven size, with category bonus)
@@ -223,7 +295,7 @@ async function assembleMemoryContext(
     }
 
     if (emotionalBucket.length > 0) {
-      const lines = emotionalBucket.map((sm) => `- ${sm.memory.key}: ${sm.memory.value}`);
+      const lines = emotionalBucket.map((sm) => `- ${compactMemoryEntry(sm.memory.key, sm.memory.value)}`);
       sections.push(`### ${s().headers.emotional_memories}\n${lines.join("\n")}`);
     }
 
@@ -271,7 +343,7 @@ async function assembleMemoryContext(
     // Render knowledge section (only when conversation context exists)
     if (conversationContext && conversationContext.length >= 5) {
       if (knBucket.length > 0) {
-        const lines = knBucket.map((sm) => `- ${sm.memory.key}: ${sm.memory.value}`);
+        const lines = knBucket.map((sm) => `- ${compactMemoryEntry(sm.memory.key, sm.memory.value)}`);
         sections.push(`### ${s().headers.relevant_knowledge}\n${lines.join("\n")}`);
       }
     }
@@ -445,6 +517,7 @@ export async function assembleSystemPrompt(
   emotionContext?: string,
   plan?: ContextPlan,
   memoryQuery?: string,
+  directive?: TurnDirective | null,
   retrievalPolicy?: RetrievalPolicy,
 ): Promise<string> {
   const maxContextTokens = config.maxContextTokens ?? 180_000;
@@ -531,7 +604,7 @@ Use memory_set to remember things about the user themselves.`);
 
   // Memories — category-aware loading (budget-limited, skip when plan says false)
   if (!plan || plan.memories) {
-    const memorySection = await assembleMemoryContext(config, conversationContext, memoryQuery, retrievalPolicy);
+    const memorySection = await assembleMemoryContext(config, conversationContext, memoryQuery, directive, retrievalPolicy);
     const { text: budgetedMemory, truncated: memTruncated } = truncateToTokenBudget(memorySection, memoryBudget);
     if (memTruncated) log.info(`memories truncated to ${memoryBudget} token budget`);
     prioritizedSections.push({ content: budgetedMemory, priority: 90, label: "memories" });

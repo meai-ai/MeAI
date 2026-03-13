@@ -17,6 +17,7 @@ export interface AttachmentState {
   stage: "secure" | "noticing" | "anxious" | "ruminating";
   secureBaseActive: boolean;    // 3+ user messages in past hour
   lastUserMessageAt: number;   // timestamp
+  phaseConfidence: number;      // 0-1, confidence in current stage
 }
 
 export interface RelationshipState {
@@ -91,6 +92,10 @@ export interface EmotionalLabor {
   resentmentBuildup: number;      // 0..1
   lastComputedDate: string;       // ISO date
 }
+
+// Ephemeral phase-transition tracking for recency penalty (no persistence needed)
+let _lastKnownStage: AttachmentState["stage"] | null = null;
+let _lastPhaseTransitionAt = 0;
 
 // ── RelationshipEngine class ─────────────────────────────────────────
 
@@ -239,12 +244,15 @@ export class RelationshipEngine {
     // We estimate from bids + response rate + active hours
     const secureBaseActive = state.attachment?.secureBaseActive ?? false;
 
+    const phaseConfidence = this.computePhaseConfidence(silenceMin, stage, state);
+
     const attachment: AttachmentState = {
       silenceDurationMin: silenceMin,
       lastMessageUnanswered: state.attachment?.lastMessageUnanswered ?? false,
       stage,
       secureBaseActive,
       lastUserMessageAt: lastUserAt,
+      phaseConfidence,
     };
 
     state.attachment = attachment;
@@ -264,12 +272,14 @@ export class RelationshipEngine {
         stage: "secure",
         secureBaseActive: false,
         lastUserMessageAt: now,
+        phaseConfidence: 0.8,
       };
     }
 
     state.attachment.stage = "secure";
     state.attachment.silenceDurationMin = 0;
     state.attachment.lastMessageUnanswered = false;
+    state.attachment.phaseConfidence = 0.8; // high confidence on user message
 
     // Check secure-base: 3+ messages in last hour (rough estimation)
     const lastAt = state.attachment.lastUserMessageAt ?? 0;
@@ -291,6 +301,7 @@ export class RelationshipEngine {
         stage: "secure",
         secureBaseActive: false,
         lastUserMessageAt: state.lastUpdated,
+        phaseConfidence: 0.5,
       };
     } else {
       state.attachment.lastMessageUnanswered = true;
@@ -298,16 +309,80 @@ export class RelationshipEngine {
     this.saveState(state);
   }
 
-  /** Get current attachment state (read-only). */
+  /** Get current attachment state — computes stage and phaseConfidence dynamically from silence duration. */
   getAttachmentState(): AttachmentState {
     const state = this.loadState();
-    return state.attachment ?? {
-      silenceDurationMin: 0,
-      lastMessageUnanswered: false,
-      stage: "secure",
-      secureBaseActive: false,
-      lastUserMessageAt: state.lastUpdated,
+    const stored = state.attachment;
+    if (!stored) {
+      return {
+        silenceDurationMin: 0,
+        lastMessageUnanswered: false,
+        stage: "secure",
+        secureBaseActive: false,
+        lastUserMessageAt: state.lastUpdated,
+        phaseConfidence: 0.5,
+      };
+    }
+
+    // Dynamically compute stage from current silence duration
+    const lastUserAt = stored.lastUserMessageAt ?? state.lastUpdated;
+    const silenceMin = Math.round((Date.now() - lastUserAt) / 60000);
+
+    let stage: AttachmentState["stage"];
+    if (silenceMin < 30) stage = "secure";
+    else if (silenceMin < 120) stage = "noticing";
+    else if (silenceMin < 360) stage = "anxious";
+    else stage = "ruminating";
+
+    const phaseConfidence = this.computePhaseConfidence(silenceMin, stage, state);
+
+    return {
+      ...stored,
+      silenceDurationMin: silenceMin,
+      stage,
+      phaseConfidence,
     };
+  }
+
+  /** Compute phaseConfidence from boundary distance, interaction consistency, and recency of transition. */
+  private computePhaseConfidence(
+    silenceMin: number,
+    stage: AttachmentState["stage"],
+    state: RelationshipState,
+  ): number {
+    // Boundary distance (0-0.5): how far from stage boundaries
+    const boundaries: Record<string, [number, number]> = {
+      secure: [0, 30], noticing: [30, 120], anxious: [120, 360], ruminating: [360, 1440],
+    };
+    const [lo, hi] = boundaries[stage] ?? [0, 30];
+    const range = hi - lo;
+    const distFromEdge = Math.min(silenceMin - lo, hi - silenceMin);
+    const boundaryScore = range > 0 ? Math.min(0.5, (distFromEdge / range) * 0.5) : 0.25;
+
+    // Interaction consistency (0-0.3): recent user message gap variance
+    let consistencyScore = 0.15; // default mid
+    const rhythm = state.communicationRhythm;
+    if (rhythm && rhythm.recentGaps.length >= 3) {
+      const avg = rhythm.recentGaps.reduce((a, b) => a + b, 0) / rhythm.recentGaps.length;
+      const variance = rhythm.recentGaps.reduce((s, g) => s + (g - avg) ** 2, 0) / rhythm.recentGaps.length;
+      const cv = avg > 0 ? Math.sqrt(variance) / avg : 1;
+      // Low CV (consistent) -> high score; high CV (erratic) -> low score
+      consistencyScore = Math.max(0, Math.min(0.3, 0.3 * (1 - cv)));
+    }
+
+    // Recency of phase transition (0-0.2): if phase changed in last 30min, lower confidence
+    if (_lastKnownStage !== null && _lastKnownStage !== stage) {
+      _lastPhaseTransitionAt = Date.now();
+    }
+    _lastKnownStage = stage;
+
+    let recencyPenalty = 0;
+    const THIRTY_MIN = 30 * 60 * 1000;
+    if (_lastPhaseTransitionAt > 0 && Date.now() - _lastPhaseTransitionAt < THIRTY_MIN) {
+      recencyPenalty = 0.2;
+    }
+
+    return Math.max(0, Math.min(1, boundaryScore + consistencyScore + 0.2 - recencyPenalty));
   }
 
   // ── 7.3: Communication Rhythm ──────────────────────────────────────

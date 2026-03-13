@@ -379,6 +379,7 @@ export class SelfieEngine {
       const selfieDecisionPrompt = getCharacter().persona.selfie_decision;
       if (!selfieDecisionPrompt) return false; // skip if no prompt configured
       const result = await claudeText({
+        label: "selfie.decide",
         system: selfieDecisionPrompt,
         prompt: contextLines,
         model: "fast",
@@ -484,6 +485,7 @@ export class SelfieEngine {
     contextParts.push(`Photo mode: ${mode}`);
 
     const result = await claudeText({
+      label: "selfie.generatePrompt",
       system: mode === "selfie" ? SELFIE_SYSTEM : THIRD_PERSON_SYSTEM,
       prompt: `Here is her current context:\n${contextParts.join("\n")}`,
       model: "fast",

@@ -276,6 +276,7 @@ Reply format (JSON):
   const prompt = `${currentQuestion}${previousContext ? `Previous research records:\n${previousContext}\n\n` : ""}Current source code and logs:\n${sourceContext}`;
 
   const result = await claudeText({
+    label: "research.analyze",
     system,
     prompt,
     model: "smart",

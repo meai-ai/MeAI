@@ -1838,6 +1838,7 @@ Otherwise respond JSON: {"description":"...", "category":"learning|project|socia
       }
 
       const result = await claudeText({
+        label: "brainstem.goalPlanner",
         system: `You are ${getCharacter().name}'s goal planner. Distill actionable small goals from subconscious thoughts.\n` +
           "description must be short and natural (<=20 words), like something you'd say to a friend, not a formal project plan.\n" +
           "Good examples: 'check the dashboard every morning', 'try writing a small Python scraper', 'finish that ceramics book'\n" +
@@ -1928,6 +1929,7 @@ Otherwise respond JSON: {"description":"...", "category":"learning|project|socia
       } else {
         try {
           const result = await claudeText({
+            label: "brainstem.selfReflection",
             system: `You are ${getCharacter().name}'s self-reflection assistant. Distill 3-5 self-observations from this month's subconscious thoughts. One sentence each.`,
             prompt: `This month's thoughts:\n${thoughtSummary}\n\nRespond in JSON array format: ["observation1","observation2","observation3"]`,
             model: "fast",

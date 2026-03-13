@@ -775,6 +775,7 @@ export class NotificationsEngine {
 
           // Route through claudeText for natural-language confirmation
           const response = await claudeText({
+            label: "notifications.confirmSubscribe",
             system: `You are ${getCharacter().name}. Confirm this subscription action in one short sentence. No prefixes or explanations.`,
             prompt: `Action result: ${actionResult}\nOriginal request params: ${JSON.stringify(input)}`,
             model: "fast",
@@ -832,6 +833,7 @@ export class NotificationsEngine {
 
           // Route through claudeText
           const response = await claudeText({
+            label: "notifications.confirmUnsubscribe",
             system: `You are ${getCharacter().name}. Confirm this unsubscribe action in one short sentence. No prefixes or explanations.`,
             prompt: `Unsubscribe ${target}: ${ok ? "success" : "not found"}`,
             model: "fast",
@@ -852,6 +854,7 @@ export class NotificationsEngine {
 
           // Route through claudeText for natural summary
           const response = await claudeText({
+            label: "notifications.listSubscriptions",
             system: `You are ${getCharacter().name}. Reorganize the subscription list below in your own voice, keep it concise and natural. Include all info but use casual language.`,
             prompt: rawList,
             model: "fast",
@@ -888,6 +891,7 @@ export class NotificationsEngine {
 
           // Route through claudeText for natural summary
           const response = await claudeText({
+            label: "notifications.summarize",
             system: `You are ${getCharacter().name}. Summarize these phone notifications in your own voice, like telling a friend 'I just got some notifications.' Highlight high-priority ones.`,
             prompt: `${unread.length} unread notifications:\n${rawLines.join("\n")}`,
             model: "fast",

@@ -469,6 +469,7 @@ Output strictly in the following JSON format, nothing else:
 
     try {
       const text = await claudeText({
+        label: "emotion.getState",
         system: systemPrompt,
         prompt: `Current signals:
 

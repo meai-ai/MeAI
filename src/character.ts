@@ -912,6 +912,7 @@ Instructions:
 Updated section:`;
 
   const updatedSection = await claudeText({
+    label: "character.updateSection",
     system: "You are a precise markdown editor. Output only the requested markdown section, nothing else.",
     prompt,
     model: "fast",
@@ -939,6 +940,7 @@ ${updatedSection.trim()}
 Summary of changes:`;
 
   const summary = await claudeText({
+    label: "character.summarizeChanges",
     system: "Output a brief bullet-point summary of changes. No preamble.",
     prompt: summaryPrompt,
     model: "fast",
@@ -1013,6 +1015,7 @@ Key requirements:
 Output ONLY the markdown document. No preamble, no explanation.`;
 
   const newIdentity = await claudeText({
+    label: "character.generateIdentity",
     system: "You are a creative writer generating a detailed character identity document. Output only the markdown document.",
     prompt,
     model: "smart",
@@ -1032,6 +1035,7 @@ ${newIdentity.slice(0, 3000)}
 Digest:`;
 
   const summary = await claudeText({
+    label: "character.digestIdentity",
     system: "Output a brief bullet-point digest. No preamble.",
     prompt: summaryPrompt,
     model: "fast",

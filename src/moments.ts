@@ -197,6 +197,7 @@ export class MomentsEngine {
       const emotionPrompt = getCharacter().persona.moments_emotion;
       if (!emotionPrompt) return false; // skip if no prompt configured
       const caption = await claudeText({
+        label: "moments.emotion",
         system: emotionPrompt,
         prompt: `Mood: ${mood}\nWhat happened: ${microEvent || cause}`,
         model: "fast",
@@ -233,6 +234,7 @@ export class MomentsEngine {
       const selfiePrompt = getCharacter().persona.moments_selfie;
       if (!selfiePrompt) return false; // skip if no prompt configured
       const caption = await claudeText({
+        label: "moments.selfie",
         system: selfiePrompt,
         prompt: `Photo scene: ${trigger}\n${moodLine}\n${timelineCtx}`,
         model: "fast",
@@ -263,6 +265,7 @@ export class MomentsEngine {
       const activityPrompt = getCharacter().persona.moments_activity;
       if (!activityPrompt) return false; // skip if no prompt configured
       const caption = await claudeText({
+        label: "moments.activity",
         system: activityPrompt,
         prompt: `Activity type: ${activityType}\nWhat I did: ${title}\nSummary: ${summary}\nReaction: ${reaction}`,
         model: "fast",
@@ -293,6 +296,7 @@ export class MomentsEngine {
       const discoveryPrompt = getCharacter().persona.moments_discovery;
       if (!discoveryPrompt) return false; // skip if no prompt configured
       const caption = await claudeText({
+        label: "moments.discovery",
         system: discoveryPrompt,
         prompt: `Searched for: ${query}\nDiscovery: ${summary}\nReaction: ${reaction}\nSources: ${sources.slice(0, 2).join(", ")}`,
         model: "fast",
@@ -329,6 +333,7 @@ export class MomentsEngine {
       const thoughtPrompt = getCharacter().persona.moments_thought;
       if (!thoughtPrompt) return false; // skip if no prompt configured
       const caption = await claudeText({
+        label: "moments.thought",
         system: thoughtPrompt,
         prompt: `Mood: ${mood}\nCause: ${cause}\nOn my mind: ${threads || "(nothing in particular)"}`,
         model: "fast",

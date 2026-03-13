@@ -292,6 +292,7 @@ Rules:
 
     try {
       const text = (await claudeText({
+        label: "social.composePost",
         system,
         prompt: "Think about whether you have something you want to post.",
         model: "smart",

@@ -91,6 +91,7 @@ export async function planContext(
 
   try {
     const content = await claudeText({
+      label: "context-planner.plan",
       system: PLANNER_PROMPT,
       prompt: userPrompt,
       model: "fast",

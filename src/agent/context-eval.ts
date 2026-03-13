@@ -378,6 +378,7 @@ export class ContextEvalEngine {
     if (blocksNeedingKeywords.length > 0) {
       try {
         const result = await claudeText({
+          label: "context-eval.keywordDiscovery",
           system: `You are a keyword discovery system. Given context block miss patterns (user mentioned related topics but the block wasn't selected), suggest new trigger keywords.
 Rules:
 - Only suggest 2-4 word keywords

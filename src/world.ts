@@ -477,6 +477,7 @@ export class WorldEngine {
 
     const callLLM = async () => {
       const text = await claudeText({
+        label: "world.generateSchedule",
         system: systemPrompt,
         prompt: `Generate full day for ${ctx.dayName} ${ctx.todayStr}`,
         model: "smart",

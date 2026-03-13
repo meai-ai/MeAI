@@ -388,7 +388,7 @@ Extract new concepts and relations:`;
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 15_000 });
+      const raw = await claudeText({ label: "brainstem.semanticAnalysis", system, prompt, model: "fast", timeoutMs: 15_000 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexSemanticOutput>(raw, ["concepts", "relations", "salienceHints"]);
 
@@ -468,7 +468,7 @@ Generate candidate actions:`;
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 15_000 });
+      const raw = await claudeText({ label: "brainstem.proposeConcept", system, prompt, model: "fast", timeoutMs: 15_000 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexProposalOutput>(raw, ["candidates"]);
 
@@ -568,7 +568,7 @@ Extract structured outcome:`;
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 10_000 });
+      const raw = await claudeText({ label: "brainstem.predict", system, prompt, model: "fast", timeoutMs: 10_000 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexOutcomeOutput>(raw, ["outcome", "fields", "confidence"]);
 
@@ -658,7 +658,7 @@ Simulate 2-4 possible outcomes:`;
 
     const startMs = this.clock.nowMs();
     try {
-      const raw = await claudeText({ system, prompt, model: "fast", timeoutMs: 12_000, maxOutputChars: 900 });
+      const raw = await claudeText({ label: "brainstem.simulate", system, prompt, model: "fast", timeoutMs: 12_000, maxOutputChars: 900 });
       const latencyMs = this.clock.nowMs() - startMs;
       const result = this.validateOutput<CortexSimulationOutput>(raw, ["outcomes", "confidence"]);
 
