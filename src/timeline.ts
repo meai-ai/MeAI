@@ -131,7 +131,30 @@ export class TimelineEngine {
     });
     if (skipped > 0) lines.unshift(`(${skipped} earlier entries omitted)`);
 
-    return `[recent] ${lines.join(" -> ")}\nTimeline > schedule. When they conflict, always follow the timeline. Infer location from timeline.`;
+    // Compute how long ago the last event was to give accurate time sense
+    const lastEvent = events[events.length - 1];
+    let timeLabel = "[just now]";
+    if (lastEvent?.time) {
+      const tz = getCharacter().timezone ?? "America/Los_Angeles";
+      const localNow = new Date(new Date().toLocaleString("en-US", { timeZone: tz }));
+      const [hh, mm] = lastEvent.time.split(":").map(Number);
+      if (!isNaN(hh) && !isNaN(mm)) {
+        const eventMinutes = hh * 60 + mm;
+        const nowMinutes = localNow.getHours() * 60 + localNow.getMinutes();
+        const gap = nowMinutes - eventMinutes;
+        if (gap <= 10) {
+          timeLabel = "[just now]";
+        } else if (gap <= 60) {
+          timeLabel = `[${gap} min ago]`;
+        } else {
+          const hours = Math.floor(gap / 60);
+          const mins = gap % 60;
+          timeLabel = mins > 0 ? `[${hours}h ${mins}min ago]` : `[${hours}h ago]`;
+        }
+      }
+    }
+
+    return `${timeLabel} ${lines.join(" -> ")}\nTimeline > schedule. When they conflict, always follow the timeline. Infer location from timeline.`;
   }
 }
 

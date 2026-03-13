@@ -1017,6 +1017,29 @@ export class AgentLoop {
       blocks.push({ id: "time", text: timeSpace, keywords: [], alwaysInclude: true, priority: 0 });
     }
 
+    // Conversation gap awareness — find how long since last user message
+    {
+      const gapParts: string[] = [];
+      const prevUserMsgs = history.filter(h => h.role === "user");
+      // The last entry in history is the current message; the one before it is the previous
+      if (prevUserMsgs.length >= 2) {
+        const prevTs = prevUserMsgs[prevUserMsgs.length - 2].timestamp;
+        if (prevTs) {
+          const gapMin = Math.round((Date.now() - prevTs) / 60_000);
+          if (gapMin >= 30 && gapMin < 120) {
+            gapParts.push(`${gapMin} minutes since last conversation`);
+          } else if (gapMin >= 120) {
+            const hours = Math.floor(gapMin / 60);
+            const mins = gapMin % 60;
+            gapParts.push(`${hours}h${mins > 0 ? ` ${mins}min` : ""} since last conversation — note time elapsed, don't treat earlier state as "just now"`);
+          }
+        }
+      }
+      if (gapParts.length > 0) {
+        blocks.push({ id: "conversation-gap", text: gapParts.join("\n"), keywords: [], alwaysInclude: true, priority: 1 });
+      }
+    }
+
     // Build schedule text
     if (worldSet.has("schedule")) {
       let scheduleText = "";
