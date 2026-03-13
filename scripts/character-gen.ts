@@ -751,42 +751,39 @@ export async function generateCharacter(
     throw new Error(`Psychology agent failed (critical): ${err instanceof Error ? err.message : err}`);
   }
 
-  // ── Step 2: Sociology Agent ──────────────────────────────────
-  progress(2, totalSteps, "Sociology agent: building social context...");
-  let sociologyResult: unknown = {};
-  try {
-    sociologyResult = await extractJSONWithRetry(
+  // ── Steps 2-4: Run in parallel (all depend only on psychology) ──
+  progress(2, totalSteps, "Running sociology, novelist, and director agents in parallel...");
+
+  const [sociologyResult, novelistResult, directorResult] = await Promise.all([
+    // Sociology Agent
+    extractJSONWithRetry(
       SOCIOLOGY_SYSTEM,
       buildSociologyPrompt(inputs, psychologyResult),
-    );
-  } catch {
-    // Non-critical — synthesizer can work with partial data
-    console.log("  (Sociology agent had issues, continuing with partial data)");
-  }
+    ).catch(() => {
+      console.log("  (Sociology agent had issues, continuing with partial data)");
+      return {} as unknown;
+    }),
 
-  // ── Step 3: Novelist Agent ───────────────────────────────────
-  progress(3, totalSteps, "Novelist agent: creating backstory and relationships...");
-  let novelistResult: unknown = {};
-  try {
-    novelistResult = await extractJSONWithRetry(
+    // Novelist Agent (pass empty sociology — it runs in parallel)
+    extractJSONWithRetry(
       NOVELIST_SYSTEM,
-      buildNovelistPrompt(inputs, psychologyResult, sociologyResult),
-    );
-  } catch {
-    console.log("  (Novelist agent had issues, continuing with partial data)");
-  }
+      buildNovelistPrompt(inputs, psychologyResult, {}),
+    ).catch(() => {
+      console.log("  (Novelist agent had issues, continuing with partial data)");
+      return {} as unknown;
+    }),
 
-  // ── Step 4: Director Agent ───────────────────────────────────
-  progress(4, totalSteps, "Director agent: designing appearance and daily life...");
-  let directorResult: unknown = {};
-  try {
-    directorResult = await extractJSONWithRetry(
+    // Director Agent (pass empty sociology/novelist — it runs in parallel)
+    extractJSONWithRetry(
       DIRECTOR_SYSTEM,
-      buildDirectorPrompt(inputs, psychologyResult, sociologyResult, novelistResult),
-    );
-  } catch {
-    console.log("  (Director agent had issues, continuing with partial data)");
-  }
+      buildDirectorPrompt(inputs, psychologyResult, {}, {}),
+    ).catch(() => {
+      console.log("  (Director agent had issues, continuing with partial data)");
+      return {} as unknown;
+    }),
+  ]);
+
+  progress(4, totalSteps, "Specialist agents complete.");
 
   // ── Step 5: Synthesizer ──────────────────────────────────────
   progress(5, totalSteps, "Synthesizer: weaving everything into a coherent character...");
@@ -857,31 +854,21 @@ export async function generateCharacter(
     yamlStringify(charObj, { lineWidth: 120, defaultStringType: "PLAIN", defaultKeyType: "PLAIN" }),
   ].join("\n");
 
-  // ── Step 7: Identity Writer ──────────────────────────────────
+  // ── Step 7: Identity Writer + User Profile (parallel) ───────
   progress(7, totalSteps, "Writing identity narrative...");
-  let identityMd: string;
-  try {
-    identityMd = await callAgent(
-      IDENTITY_WRITER_SYSTEM,
-      buildIdentityWriterPrompt(inputs, synthesizedResult),
-    );
-  } catch {
-    // Fallback identity
-    identityMd = `# Who I Am\n\nMy name is ${characterName}. I live in ${characterCity}.\n\n(Identity document generation failed — chat with me to build my identity!)`;
-  }
 
-  // ── Soul Match: User Profile ─────────────────────────────────
-  let userMd: string | undefined;
-  if (inputs.mode === "soul-match" && inputs.soulMatch) {
-    try {
-      userMd = await callAgent(
-        USER_PROFILE_SYSTEM,
-        buildUserProfilePrompt(inputs),
-      );
-    } catch {
-      // Non-critical
-    }
-  }
+  const identityPromise = callAgent(
+    IDENTITY_WRITER_SYSTEM,
+    buildIdentityWriterPrompt(inputs, synthesizedResult),
+  ).catch(() =>
+    `# Who I Am\n\nMy name is ${characterName}. I live in ${characterCity}.\n\n(Identity document generation failed — chat with me to build my identity!)`
+  );
+
+  const userMdPromise = (inputs.mode === "soul-match" && inputs.soulMatch)
+    ? callAgent(USER_PROFILE_SYSTEM, buildUserProfilePrompt(inputs)).catch(() => undefined)
+    : Promise.resolve(undefined);
+
+  const [identityMd, userMd] = await Promise.all([identityPromise, userMdPromise]);
 
   return {
     characterYaml,
