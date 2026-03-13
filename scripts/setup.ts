@@ -187,6 +187,10 @@ These are optional — press Enter to skip any.
   }
 
   // ── Step 5: Character Setup ──────────────────────────────────────
+  let charName = "Alex";
+  let characterCity = "New York";
+  let templateName = "minimal";
+
   // Skip if character.yaml already exists with a real character name
   const characterExists = fs.existsSync(CHARACTER_PATH) && (() => {
     try {
@@ -232,10 +236,6 @@ Choose how to create your character:
 
   const modeChoice = (await askOptional("Choice (1-5, default: 1): ")) || "1";
   const mode = modeChoice.trim();
-
-  let charName = "Alex";
-  let characterCity = "New York";
-  let templateName = "minimal";
 
   if (mode === "3" || mode === "4" || mode === "5") {
     // ── AI-powered character generation (uses Claude CLI) ──────────
