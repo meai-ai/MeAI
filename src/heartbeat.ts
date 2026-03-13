@@ -1648,6 +1648,27 @@ Pick the best action:`,
         }
       } catch { /* non-fatal */ }
 
+      // Active emotional care topics for reflection
+      let emotionalCareCtx = "";
+      try {
+        const { getActiveEmotionalCare } = await import("./care-topics.js");
+        const activeCare = getActiveEmotionalCare();
+        if (activeCare.length > 0) {
+          emotionalCareCtx = activeCare.map(t => {
+            const daysActive = Math.round((Date.now() - t.createdAt) / 86400000);
+            return `- "${t.need}" (${daysActive} days active, commitment=${(t.careCommitment ?? 0.5).toFixed(1)}): ${t.whyItMatters ?? ""}`;
+          }).join("\n");
+        }
+      } catch { /* ok */ }
+
+      // Provenance warnings — inject trend-confirmed warnings into reflection
+      let provenanceCtx = "";
+      try {
+        const { formatProvenanceWarnings } = await import("./lib/provenance-audit.js");
+        const warnings = formatProvenanceWarnings(this.config.statePath);
+        if (warnings) provenanceCtx = `\nNarrative credibility notes:\n${warnings}`;
+      } catch { /* non-fatal */ }
+
       const char = getCharacter();
       const prompt = `You are ${char.name}'s inner reflection system. Review recent memories, emotional changes, social and hobby status, and generate 2-3 insights.
 
@@ -1662,7 +1683,9 @@ ${hobbyCtx || "(none)"}
 
 Social status:
 ${socialCtx || "(none)"}
-${identityEventContext}${relationalCtx}
+${identityEventContext}
+${emotionalCareCtx ? `\nTopics of ongoing care:\n${emotionalCareCtx}` : ""}
+${provenanceCtx}${relationalCtx}
 ${(() => { const emc = formatErrorMetricsContext(); return emc ? `\nSystem health:\n${emc}` : ""; })()}
 Generate 2-3 insights, such as:
 - Emotional patterns ("mood tends to drop when work pressure builds")
@@ -1670,6 +1693,7 @@ Generate 2-3 insights, such as:
 - Hobby progress ("pottery is going well but drums are falling behind")
 - Life rhythm ("been staying up late recently")
 - Observations about ${char.user.name} ("they seem interested in X lately")
+- Care for ${char.user.name} ("they mentioned being tired recently, I still remember")
 - Relational thoughts ("what they said about X means something to me")
 
 Output strictly as a JSON array:
@@ -1709,6 +1733,54 @@ Output strictly as a JSON array:
         });
       }
 
+      // Generative care reassessment — let reflection output drive commitment changes
+      try {
+        const { getActiveEmotionalCare, logCareAction, updateCareCommitment } = await import("./care-topics.js");
+        const activeCare = getActiveEmotionalCare();
+        if (activeCare.length > 0) {
+          const insightText = insights.map(i => i.value).join("\n");
+          const careList = activeCare.map(t =>
+            `id=${t.id}: "${t.need}" (commitment=${(t.careCommitment ?? 0.5).toFixed(2)})`
+          ).join("\n");
+
+          const assessment = await claudeText({
+            label: "heartbeat.careReassessment",
+            system: `You are ${char.name}. You just did an inner reflection. Now review the topics you've been caring about.
+For each care topic, assess:
+1. Did your reflection naturally touch on it? (touched: true/false)
+2. Has your level of care changed? (commitmentDelta: -0.1 to +0.1, 0 means no change)
+   - Deeper: this matters more to you now
+   - Fading: it's naturally fading, not that you don't care, just less preoccupied
+   - Same: still there, no new feelings
+
+Output JSON array: [{"id":"...","touched":true,"commitmentDelta":0.05}]
+Only output JSON, no explanation.`,
+            prompt: `Your reflection:\n${insightText}\n\nTopics you care about:\n${careList}`,
+            model: "fast",
+            timeoutMs: 30_000,
+          });
+
+          if (assessment) {
+            const match = assessment.match(/\[[\s\S]*?\]/);
+            if (match) {
+              const items = JSON.parse(match[0]) as Array<{ id: string; touched?: boolean; commitmentDelta?: number }>;
+              for (const item of items) {
+                if (item.touched) {
+                  logCareAction(item.id, "reflected", Date.now());
+                }
+                if (item.commitmentDelta && item.commitmentDelta !== 0) {
+                  const ct = activeCare.find(t => t.id === item.id);
+                  if (ct) {
+                    const delta = Math.max(-0.1, Math.min(0.1, item.commitmentDelta));
+                    updateCareCommitment(ct.id, (ct.careCommitment ?? 0.5) + delta);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch { /* non-fatal */ }
+
       // Fire-and-forget: reconsolidate emotional memories accessed during reflection
       try {
         const emotionalMemories = manager.loadCategory("emotional");
@@ -1732,6 +1804,11 @@ Output strictly as a JSON array:
       // Structured reflection — conservative annotation-first approach
       await this.extractStructuredReflection(recentMemories, recentEmotions, hobbyCtx, socialCtx, insights).catch(err =>
         log.warn("structured reflection failed", err),
+      );
+
+      // Behavioral priors — generate tendencies from reflection insights
+      await this.generateBehavioralPriors(insights, emotionalCareCtx, identityEventContext).catch(err =>
+        log.warn("behavioral prior generation failed", err),
       );
 
       // Self-predictions: resolve old ones first
@@ -1773,6 +1850,30 @@ Output strictly as a JSON array:
       try {
         const { maybeUpdateSelfNarrative } = await import("./self-narrative.js");
         await maybeUpdateSelfNarrative();
+      } catch { /* non-fatal */ }
+
+      // Shared history marker — LLM-driven, max 1/week
+      await this.maybeGenerateSharedHistory().catch(err =>
+        log.warn("shared history generation failed", err),
+      );
+
+      // Value formation — full lifecycle (zero LLM cost)
+      try {
+        const vf = await import("./lib/value-formation.js");
+        vf.scanForValueCandidates(this.config.statePath);
+        vf.enablePromotion(this.config.statePath);
+        vf.scanCounterEvidence(this.config.statePath);
+        vf.processEmergingPromotions(this.config.statePath);
+        const bs = await import("./brainstem/index.js");
+        vf.processCommittedPromotions(this.config.statePath, bs.brainstemBirthTypedBelief);
+        vf.processDecommitments(this.config.statePath, bs.brainstemRemoveBelief);
+      } catch { /* non-fatal */ }
+
+      // Freedom metrics — trend monitoring (zero LLM cost)
+      try {
+        const { computeFreedomMetrics, saveFreedomMetrics } = await import("./lib/freedom-metrics.js");
+        const metrics = computeFreedomMetrics(this.config.statePath);
+        saveFreedomMetrics(this.config.statePath, metrics);
       } catch { /* non-fatal */ }
 
       // User prediction generation
@@ -1881,6 +1982,171 @@ Output strictly as a JSON array:
     }
 
     log.info(`growth markers detected: ${newMarkers.length} — ${newMarkers.map(m => m.type).join(", ")}`);
+  }
+
+  // ── Shared History Marker Generation ──────────────────────────────────
+
+  private async maybeGenerateSharedHistory(): Promise<void> {
+    // Guardrail: max 1 marker per week
+    const { getSharedHistory, addSharedHistoryMarker } = await import("./lib/relationship-model.js");
+    const existing = getSharedHistory();
+    const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
+    if (existing.length > 0 && Date.now() - existing[existing.length - 1].ts < ONE_WEEK) return;
+
+    // Guardrail: must have active emotional care topics
+    const { getActiveEmotionalCare } = await import("./care-topics.js");
+    const activeCare = getActiveEmotionalCare();
+    if (activeCare.length === 0) return;
+
+    const char = getCharacter();
+    const summary = activeCare.map(t => {
+      const daysActive = Math.round((Date.now() - t.createdAt) / 86400000);
+      return `- "${t.need}" (${daysActive} days, commitment=${(t.careCommitment ?? 0.5).toFixed(2)}, ${t.whyItMatters ?? ""})`;
+    }).join("\n");
+
+    const text = await claudeText({
+      label: "heartbeat.sharedHistory",
+      system: `You are ${char.name}. Review the topics of care between you and ${char.user.name}.
+
+Has any of these become more than just "you caring about them" — has it become a genuine shared experience?
+Such shared experiences might be:
+- They changed your perspective on something (user_changed_her)
+- You stayed with them through a difficult period (she_stayed_with_user)
+- A topic you both keep returning to (shared_theme)
+- A direction you're both growing in (mutual_growth)
+
+The criterion is not duration or metrics, but whether you feel "this has become meaningful for us."
+
+If yes, output JSON: {"type":"user_changed_her|she_stayed_with_user|shared_theme|mutual_growth","title":"one sentence","summary":"2-3 sentences describing the shared experience","whyItMatters":"why this matters for you both","narratable":true}
+If not yet, output null. Better to skip than force it.`,
+      prompt: `Topics you care about:\n${summary}`,
+      model: "fast",
+      timeoutMs: 30_000,
+    });
+
+    if (!text) return;
+    const jsonMatch = text.match(/\{[\s\S]*?\}/);
+    if (!jsonMatch) return;
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed?.title) return;
+
+    addSharedHistoryMarker({
+      id: `sh_${Date.now()}`,
+      ts: Date.now(),
+      type: parsed.type ?? "shared_theme",
+      title: parsed.title,
+      summary: parsed.summary ?? "",
+      whyItMatters: parsed.whyItMatters ?? "",
+      relatedCareTopicIds: activeCare.map(c => c.id),
+      narratable: parsed.narratable ?? true,
+    });
+    log.info(`shared history marker: "${parsed.title}"`);
+  }
+
+  // ── Behavioral Priors ─────────────────────────────────────────────────
+
+  private async generateBehavioralPriors(
+    insights: Array<{ key: string; value: string }>,
+    emotionalCareCtx: string,
+    identityEventCtx: string,
+  ): Promise<void> {
+    if (insights.length === 0) return;
+
+    let climateCtx = "";
+    try {
+      const { getWeeklyClimate } = await import("./emotion.js");
+      const climate = getWeeklyClimate();
+      if (climate) climateCtx = climate.summary;
+    } catch { /* ok */ }
+
+    const char = getCharacter();
+    const text = await claudeText({
+      label: "heartbeat.behavioralPriors",
+      system: "Output only a JSON array, nothing else.",
+      prompt: `You are ${char.name}. You just reflected on your recent state. Based on these insights, think about how you'd most like to behave in upcoming conversations.
+
+Your insights:
+${insights.map(i => `- ${i.value}`).join("\n")}
+${emotionalCareCtx ? `\nTopics you care about:\n${emotionalCareCtx}` : ""}
+${identityEventCtx || ""}
+${climateCtx ? `\nThis week's emotional climate: ${climateCtx}` : ""}
+
+Generate 1-2 behavioral tendencies. Note:
+- These are "tendencies" not "rules" -- use language like "I'd rather..." or "next time this happens, I tend to..."
+- Must be specific to a situation, not vague platitudes
+- situation must include a user-behavior trigger (e.g. "says they're tired", "mentions a past topic", "asks my opinion", "seems down")
+- tendency must include a concrete action (e.g. "ask first", "acknowledge", "explain", "bring up", "not rush to conclusions")
+- Each under 60 words
+
+Output strictly as JSON array:
+[{"situation": "when...", "tendency": "I'd rather...", "source": "based on which insight"}]`,
+      model: "fast",
+      timeoutMs: 30_000,
+    });
+
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return;
+    const parsed = repairAndParseJson(jsonMatch[0]);
+    if (!Array.isArray(parsed) || parsed.length === 0) return;
+
+    const priors = (parsed as Array<{ situation?: string; tendency?: string; source?: string }>)
+      .filter(p => {
+        if (!p.situation || !p.tendency) return false;
+        if ((p.tendency.length ?? 999) > 120) return false;
+        return true;
+      })
+      .slice(0, 2);
+    if (priors.length === 0) return;
+
+    // Dedup against existing behavioral.* memories
+    const manager = getStoreManager();
+    const existingBehavioral = manager.loadCategory("character")
+      .filter(m => m.key.startsWith("behavioral."));
+    const { tokenize } = await import("./memory/search.js");
+
+    // Helper: IoU overlap between two token arrays
+    const calcOverlap = (a: string[], b: string[]): number => {
+      if (a.length === 0 || b.length === 0) return 0;
+      const setA = new Set(a);
+      const setB = new Set(b);
+      let intersection = 0;
+      for (const t of setA) { if (setB.has(t)) intersection++; }
+      const union = new Set([...setA, ...setB]).size;
+      return union > 0 ? intersection / union : 0;
+    };
+
+    for (let i = 0; i < priors.length; i++) {
+      const prior = priors[i];
+      const value = `${prior.situation} -> ${prior.tendency}`;
+      const newTenTokens = tokenize(prior.tendency!);
+
+      // Compare tendency separately -- only dedup when tendency is similar (>0.5)
+      const duplicate = existingBehavioral.find(m => {
+        const parts = m.value.split(" -> ");
+        if (parts.length < 2) return false;
+        const existTenTokens = tokenize(parts.slice(1).join(" -> "));
+        return calcOverlap(newTenTokens, existTenTokens) > 0.5;
+      });
+
+      if (duplicate) {
+        const newIsBetter = value.length < duplicate.value.length;
+        const newValue = newIsBetter ? value : duplicate.value;
+        await manager.set(duplicate.key, newValue, Math.min(0.85, (duplicate.confidence ?? 0.6) + 0.05));
+        log.info(`behavioral prior dedup: ${newIsBetter ? "replaced" : "refreshed"} "${duplicate.key}"`);
+      } else {
+        const key = `behavioral.${Date.now()}.${i}`;
+        await manager.set(key, value, 0.6);
+      }
+
+      blackboard.write({
+        source: "reflection",
+        type: "behavioral_prior",
+        payload: { situation: prior.situation, tendency: prior.tendency, source: prior.source },
+        salience: 0.6,
+        ttl: DEFAULT_TTL,
+      });
+    }
+    log.info(`behavioral priors: ${priors.length} generated`);
   }
 
   // ── Structured Reflection ─────────────────────────────────────────
@@ -2834,6 +3100,12 @@ Requirements:
       log.warn("merge proposals failed", err),
     );
     this.scanStaleMemories();
+
+    // Provenance audit — nightly distribution scan + trend check
+    try {
+      const { runProvenanceAudit } = await import("./lib/provenance-audit.js");
+      runProvenanceAudit(this.config.statePath);
+    } catch { /* non-fatal */ }
 
     // Behavioral snapshot — 1st and 15th of each month
     try {
