@@ -129,11 +129,18 @@ async function assembleMemoryContext(
     }
   }
 
-  // 1. Core — always loaded in full
+  // 1. Core — cap at 5 entries, prioritize user.name + family.children
   const coreMemories = manager.loadCategory("core");
   if (coreMemories.length > 0) {
-    const lines = coreMemories.map((m) => `- ${compactMemoryEntry(m.key, m.value)}`);
-    sections.push(`### ${renderTemplate(s().headers.user_key_info)}\n${lines.join("\n")}`);
+    // Ensure user.name and family.children are always included
+    const priorityKeys = new Set(["user.name", "family.children"]);
+    const priority = coreMemories.filter(m => priorityKeys.has(m.key));
+    const rest = coreMemories.filter(m => !priorityKeys.has(m.key))
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 5 - priority.length);
+    const selected = [...priority, ...rest].slice(0, 5);
+    const lines = selected.map((m) => `- ${compactMemoryEntry(m.key, m.value)}`);
+    sections.push(`[user] ${lines.join(" ")}`);
   }
 
   // 2 + 3. Fused retrieval: one semantic + one BM25 search for all non-core memories
@@ -274,7 +281,7 @@ async function assembleMemoryContext(
     }
 
     // Fill emotional bucket (policy-driven size, with category bonus)
-    const emoBucketSize = retrievalPolicy?.buckets?.emotional ?? 8;
+    const emoBucketSize = retrievalPolicy?.buckets?.emotional ?? 5;
     const emoBonus = retrievalPolicy ? (retrievalPolicy.categoryBonus["emotional"] ?? 0) : 0.2;
     const emotionalBucket: (ScoredMemory & { adjustedScore: number })[] = scored
       .filter(sm => sm.category === "emotional")
@@ -296,7 +303,7 @@ async function assembleMemoryContext(
 
     if (emotionalBucket.length > 0) {
       const lines = emotionalBucket.map((sm) => `- ${compactMemoryEntry(sm.memory.key, sm.memory.value)}`);
-      sections.push(`### ${s().headers.emotional_memories}\n${lines.join("\n")}`);
+      sections.push(`[emotional] ${lines.join(" ")}`);
     }
 
     // Fill knowledge bucket (policy-driven)
@@ -344,7 +351,7 @@ async function assembleMemoryContext(
     if (conversationContext && conversationContext.length >= 5) {
       if (knBucket.length > 0) {
         const lines = knBucket.map((sm) => `- ${compactMemoryEntry(sm.memory.key, sm.memory.value)}`);
-        sections.push(`### ${s().headers.relevant_knowledge}\n${lines.join("\n")}`);
+        sections.push(`[knowledge] ${lines.join(" ")}`);
       }
     }
   }
@@ -356,7 +363,7 @@ async function assembleMemoryContext(
     const topInsights = latestPerTopic(insightsMemories, insightsBucketSize);
     if (topInsights.length > 0) {
       const lines = topInsights.map((m) => `- ${m.key}: ${m.value}`);
-      sections.push(`### ${s().headers.recent_insights}\n${lines.join("\n")}`);
+      sections.push(`[insights] ${lines.join(" ")}`);
     }
   }
 
@@ -366,7 +373,7 @@ async function assembleMemoryContext(
     return `## ${s().headers.my_memories}\n${s().headers.no_memories}`;
   }
 
-  return `## ${s().headers.my_memories}\n${sections.join("\n\n")}`;
+  return `## ${s().headers.my_memories}\n${sections.join("\n")}`;
 }
 
 /**
@@ -474,18 +481,21 @@ function getPersonaCompact(): string {
 
 // ── Compact Emotion ──────────────────────────────────────────────────
 
-/** One-line emotion summary format, used when plan.emotion === "summary".
- *  Preserves behaviorHints (policyHint) so they don't get stripped. */
+/** Compact emotion summary with cause, used when plan.emotion === "summary". */
 export function formatEmotionSummary(emotionContext: string): string {
-  // Extract valence and energy from the full emotion context using regex
-  const valenceMatch = emotionContext.match(/情绪值[：:]\s*(\d+)/) ?? emotionContext.match(/valence[:\s]*(\d+)/i);
-  const energyMatch = emotionContext.match(/精力[：:]\s*(\d+)/) ?? emotionContext.match(/energy[:\s]*(\d+)/i);
+  // Phase 2: parse dense [mood] format: "[mood] mood | energyX valenceY | cause"
+  const denseMatch = emotionContext.match(/\[mood\]\s*(.+?)\s*\|\s*energy(\d+)\s*valence(\d+)\s*\|\s*(.+)/);
+  if (denseMatch) {
+    return `${denseMatch[1]} (energy${denseMatch[2]} valence${denseMatch[3]}) ${denseMatch[4].slice(0, 60)}`;
+  }
+  // Fallback: try old format
+  const valenceMatch = emotionContext.match(/valence[:\s]*(\d+)/i) ?? emotionContext.match(/情绪值?[：:]\s*(\d+)/);
+  const energyMatch = emotionContext.match(/energy[:\s]*(\d+)/i) ?? emotionContext.match(/精力[值]?[：:]\s*(\d+)/);
+  const causeMatch = emotionContext.match(/Cause[：:]\s*(.+)/i);
   const valence = valenceMatch ? valenceMatch[1] : "?";
   const energy = energyMatch ? energyMatch[1] : "?";
-  // Preserve behaviorHints / state effects so they aren't lost in summary mode
-  const hintsMatch = emotionContext.match(/State effects:\s*(.+)/i) ?? emotionContext.match(/状态影响[：:]\s*(.+)/);
-  const hints = hintsMatch ? `\n${hintsMatch[0]}` : "";
-  return `${s().headers.inner_state}: valence ${valence}/10, energy ${energy}/10${hints}`;
+  const cause = causeMatch ? causeMatch[1].slice(0, 60) : "";
+  return `Mood: valence ${valence} energy ${energy}${cause ? ` (${cause})` : ""}`;
 }
 
 // ── Compact Capabilities ─────────────────────────────────────────────
@@ -618,15 +628,9 @@ Use memory_set to remember things about the user themselves.`);
   // Emotion — controlled by plan (full / summary / false); skip in blank-slate mode
   if (!blankSlate && emotionContext && plan?.emotion !== false) {
     if (plan?.emotion === "summary") {
-      prioritizedSections.push({ content: `## ${s().headers.inner_state}\n${formatEmotionSummary(emotionContext)}`, priority: 85, label: "emotion" });
+      prioritizedSections.push({ content: formatEmotionSummary(emotionContext), priority: 85, label: "emotion" });
     } else {
-      // Full emotion context with behavioral hints
-      const emotionBehavior = getCharacter().persona.emotion_behavior;
-      if (emotionBehavior) {
-        prioritizedSections.push({ content: `## ${s().headers.inner_state}\n${emotionContext}\n\n${renderTemplate(emotionBehavior)}`, priority: 85, label: "emotion" });
-      } else {
-        prioritizedSections.push({ content: `## ${s().headers.inner_state}\n${emotionContext}`, priority: 85, label: "emotion" });
-      }
+      prioritizedSections.push({ content: emotionContext, priority: 85, label: "emotion" });
     }
   }
 
@@ -677,11 +681,13 @@ Use memory_set to remember things about the user themselves.`);
       priority: 80, label: "world" });
   }
 
-  // Relationship context — attachment, communication rhythm
-  try {
-    const relCtx = formatRelationshipContext();
-    if (relCtx) prioritizedSections.push({ content: `### Relationship with ${getCharacter().user.name}\n${relCtx}`, priority: 75, label: "relationship" });
-  } catch { /* non-fatal */ }
+  // Relationship context — attachment, communication rhythm (gated)
+  if (!plan || plan.relationship !== false) {
+    try {
+      const relCtx = formatRelationshipContext();
+      if (relCtx) prioritizedSections.push({ content: relCtx, priority: 75, label: "relationship" });
+    } catch { /* non-fatal */ }
+  }
 
   // 8.2: Goals — skip in blank-slate mode
   if (!blankSlate && (!plan || plan.goals)) {
@@ -693,12 +699,14 @@ Use memory_set to remember things about the user themselves.`);
     } catch { /* non-fatal */ }
   }
 
-  // Intent capture — open commitments and promises
-  if (!blankSlate) try {
-    const { formatIntentContext } = await import("../intents.js");
-    const intentCtx = formatIntentContext();
-    if (intentCtx) prioritizedSections.push({ content: intentCtx, priority: 60, label: "intents" });
-  } catch { /* non-fatal */ }
+  // Intent capture — open commitments and promises (gated)
+  if (!blankSlate && (!plan || plan.intents !== false)) {
+    try {
+      const { formatIntentContext } = await import("../intents.js");
+      const intentCtx = formatIntentContext();
+      if (intentCtx) prioritizedSections.push({ content: intentCtx, priority: 60, label: "intents" });
+    } catch { /* non-fatal */ }
+  }
 
   // 8.4: Opinions — evolving viewpoints for natural disagreement; skip in blank-slate mode
   if (!blankSlate && (!plan || plan.opinions)) {
@@ -731,21 +739,23 @@ Use memory_set to remember things about the user themselves.`);
     } catch { /* non-fatal */ }
   }
 
-  // Recent Moments — skip in blank-slate mode
-  if (!blankSlate) try {
-    const moments = getRecentMoments(6);
-    if (moments.length > 0) {
-      const lines = moments.map((m) => {
-        const ago = Math.round((Date.now() - m.timestamp) / 60_000);
-        const timeLabel = ago < 60 ? s().time.minutes_ago.replace("{n}", String(ago)) : s().time.hours_ago.replace("{n}", String(Math.round(ago / 60)));
-        return `- ${timeLabel}: ${m.text}`;
-      });
-      prioritizedSections.push({ content:
-        `## ${s().headers.recent_moments}\n${lines.join("\n")}\n\n` +
-        renderTemplate(s().headers.moments_ownership),
-        priority: 40, label: "moments" });
-    }
-  } catch { /* non-fatal */ }
+  // Recent Moments — gated, default off
+  if (!blankSlate && plan?.moments) {
+    try {
+      const moments = getRecentMoments(6);
+      if (moments.length > 0) {
+        const lines = moments.map((m) => {
+          const ago = Math.round((Date.now() - m.timestamp) / 60_000);
+          const timeLabel = ago < 60 ? s().time.minutes_ago.replace("{n}", String(ago)) : s().time.hours_ago.replace("{n}", String(Math.round(ago / 60)));
+          return `- ${timeLabel}: ${m.text}`;
+        });
+        prioritizedSections.push({ content:
+          `## ${s().headers.recent_moments}\n${lines.join("\n")}\n\n` +
+          renderTemplate(s().headers.moments_ownership),
+          priority: 40, label: "moments" });
+      }
+    } catch { /* non-fatal */ }
+  }
 
   // 8.3: Diary — skip in blank-slate mode
   if (!blankSlate && (!plan || plan.diary)) {
@@ -783,26 +793,32 @@ Use memory_set to remember things about the user themselves.`);
     if (attentionCtx) prioritizedSections.push({ content: `### Attention state\n${attentionCtx}`, priority: 30, label: "attention" });
   } catch { /* non-fatal */ }
 
-  // Brainstem — subconscious thoughts (low priority, background reference)
-  if (!blankSlate) try {
-    const { formatBrainstemContext } = await import("../brainstem/index.js");
-    const brainstemCtx = formatBrainstemContext();
-    if (brainstemCtx) prioritizedSections.push({ content: brainstemCtx, priority: 25, label: "brainstem" });
-  } catch { /* brainstem may not be initialized */ }
+  // Brainstem — subconscious thoughts (gated, default off)
+  if (!blankSlate && plan?.brainstem) {
+    try {
+      const { formatBrainstemContext } = await import("../brainstem/index.js");
+      const brainstemCtx = formatBrainstemContext();
+      if (brainstemCtx) prioritizedSections.push({ content: directive ? `[background ref]\n${brainstemCtx}` : brainstemCtx, priority: 25, label: "brainstem" });
+    } catch { /* brainstem may not be initialized */ }
+  }
 
-  // Self-narrative — tentative self-understanding
-  if (!blankSlate) try {
-    const { formatSelfNarrativeContext } = await import("../self-narrative.js");
-    const selfNarrCtx = formatSelfNarrativeContext();
-    if (selfNarrCtx) prioritizedSections.push({ content: selfNarrCtx, priority: 25, label: "self-narrative" });
-  } catch { /* non-fatal */ }
+  // Self-narrative — gated, default off
+  if (!blankSlate && plan?.self_narrative) {
+    try {
+      const { formatSelfNarrativeContext } = await import("../self-narrative.js");
+      const selfNarrCtx = formatSelfNarrativeContext();
+      if (selfNarrCtx) prioritizedSections.push({ content: selfNarrCtx, priority: 25, label: "self-narrative" });
+    } catch { /* non-fatal */ }
+  }
 
-  // User state — what the user is focused on, stressors, emotional trajectory
-  if (!blankSlate) try {
-    const { formatUserStateContext } = await import("../user-state.js");
-    const userStateCtx = formatUserStateContext();
-    if (userStateCtx) prioritizedSections.push({ content: `### ${getCharacter().user.name}'s recent state\n${userStateCtx}`, priority: 25, label: "user-state" });
-  } catch { /* non-fatal */ }
+  // User state — what the user is focused on, stressors, emotional trajectory (gated)
+  if (!blankSlate && (!plan || plan.user_state !== false)) {
+    try {
+      const { formatUserStateContext } = await import("../user-state.js");
+      const userStateCtx = formatUserStateContext();
+      if (userStateCtx) prioritizedSections.push({ content: userStateCtx, priority: 25, label: "user-state" });
+    } catch { /* non-fatal */ }
+  }
 
   // Prediction context — user behavioral predictions
   if (!blankSlate) try {
@@ -813,27 +829,35 @@ Use memory_set to remember things about the user themselves.`);
     }
   } catch { /* non-fatal */ }
 
-  // Emerging values — patterns crystallizing into values
-  if (!blankSlate) try {
-    const { formatValueContext } = await import("../lib/value-formation.js");
-    const valueCtx = formatValueContext(config.statePath);
-    if (valueCtx) {
-      prioritizedSections.push({ content: valueCtx, priority: 25, label: "emerging-values" });
-    }
-  } catch { /* non-fatal */ }
+  // Emerging values — gated, default off
+  if (!blankSlate && plan?.emerging_values) {
+    try {
+      const { formatValueContext } = await import("../lib/value-formation.js");
+      const valueCtx = formatValueContext(config.statePath);
+      if (valueCtx) {
+        prioritizedSections.push({ content: valueCtx, priority: 25, label: "emerging-values" });
+      }
+    } catch { /* non-fatal */ }
+  }
 
-  // Relational reciprocity + personal stance
-  if (!blankSlate) try {
-    const { formatReciprocityContext, formatPersonalStanceContext } = await import("../relational-impact.js");
-    const reciprocityCtx = formatReciprocityContext();
-    if (reciprocityCtx) {
-      prioritizedSections.push({ content: reciprocityCtx, priority: 20, label: "reciprocity" });
-    }
-    const stanceCtx = formatPersonalStanceContext();
-    if (stanceCtx) {
-      prioritizedSections.push({ content: stanceCtx, priority: 20, label: "personal-stance" });
-    }
-  } catch { /* non-fatal */ }
+  // Relational reciprocity + personal stance — gated, default off
+  if (!blankSlate && (plan?.reciprocity || plan?.personal_stance)) {
+    try {
+      const { formatReciprocityContext, formatPersonalStanceContext } = await import("../relational-impact.js");
+      if (plan?.reciprocity) {
+        const reciprocityCtx = formatReciprocityContext();
+        if (reciprocityCtx) {
+          prioritizedSections.push({ content: reciprocityCtx, priority: 20, label: "reciprocity" });
+        }
+      }
+      if (plan?.personal_stance) {
+        const stanceCtx = formatPersonalStanceContext();
+        if (stanceCtx) {
+          prioritizedSections.push({ content: stanceCtx, priority: 20, label: "personal-stance" });
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
 
   // Past sessions index — gives the agent awareness of conversation history
   if (!plan || plan.sessions) {

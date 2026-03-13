@@ -1452,115 +1452,94 @@ export function deriveReplyControl(directive: TurnDirective): ReplyControl {
 // ── Phase B: System Prompt Section ──────────────────────────────────
 
 export function renderTurnDirectiveSection(directive: TurnDirective): string {
-  const userName = getUserName();
-
-  // Authority-level framing: mandatory directives get stronger language
-  const authorityLabels: Record<string, string> = {
-    advisory: "Authoritative internal guidance",
-    directive: "Authoritative internal guidance -- please follow",
-    mandatory: "Mandatory internal directive -- must strictly follow",
-  };
-  const lines: string[] = [`## Cognitive Directive (${authorityLabels[directive.authorityLevel] ?? "Authoritative internal guidance"})`];
   const goalLabels: Record<TurnDirective["conversationGoal"], string> = {
-    respond: "Normal reply",
-    clarify: "Needs clarification",
+    respond: "Reply",
+    clarify: "Clarify",
     follow_up_commitment: "Follow up commitment",
     acknowledge_and_defer: "Brief acknowledgment",
   };
-  lines.push(`Goal: ${goalLabels[directive.conversationGoal]}`);
-  if (directive.openCommitments.length > 0)
-    lines.push(`Open commitments: ${[...directive.openCommitments].sort((a, b) => b.urgency - a.urgency).slice(0, 3).map(c => c.content).join("; ")}`);
-  if (directive.mustReferenceSlots.length > 0)
-    lines.push(`Must reference: ${directive.mustReferenceSlots.map(s => s.label).join(", ")}`);
-  if (directive.activeGoalAlignment.length > 0)
-    lines.push(`Related goals: ${directive.activeGoalAlignment.map(g => g.description).join("; ")}`);
-  if (directive.driveHint) lines.push(`Inner drive: ${directive.driveHint}`);
-  if (directive.affectRegulationOverride !== "none")
-    lines.push(`Affect regulation: ${directive.affectRegulationOverride === "dampen" ? "Dampen emotional expression" : "Amplify emotional expression"}`);
-  if (directive.emotionTone)
-    lines.push(`Emotional state: ${directive.emotionTone}`);
-  if (directive.cognitiveLoadLevel && directive.cognitiveLoadLevel !== "normal") {
-    const loadLabels: Record<string, string> = {
-      low: "Cognitive load low -- can handle complex topics",
-      high: "Cognitive load elevated -- keep replies concise and clear",
-      overloaded: "Cognitive overload -- only handle the most urgent, defer the rest",
-    };
-    lines.push(`Cognitive load: ${loadLabels[directive.cognitiveLoadLevel]}`);
-  }
 
-  // Structured control block — machine-readable constraints
+  // Phase 2: Dense single-block directive format
+  const parts: string[] = [];
+
+  // Line 1: Header + goal + style (always present)
+  const stanceShort: Record<string, string> = {
+    coach: "guide", companion: "companion", curious: "explore", subdued: "subdued", cheerful: "lively",
+  };
+  const lengthShort: Record<string, string> = { short: "short", medium: "med", long: "long" };
+  const authTag = directive.authorityLevel === "mandatory" ? "MUST FOLLOW" : "";
+  parts.push(`[directive] ${goalLabels[directive.conversationGoal]} | ${stanceShort[directive.style.stance] ?? "normal"} ${lengthShort[directive.style.targetLength] ?? "med"} ${authTag}`.trim());
+
+  // Line 2: Commitments + must-mention (high priority)
   const rc = deriveReplyControl(directive);
-  if (rc.mustMention.length > 0)
-    lines.push(`[MUST MENTION] ${rc.mustMention.join("; ")}`);
-  if (rc.avoidTopicDrift)
-    lines.push(`[CONSTRAINT] Don't diverge to new topics; prioritize the commitments/focus above`);
+  const commitStr = directive.openCommitments.length > 0
+    ? `commitments: ${[...directive.openCommitments].sort((a, b) => b.urgency - a.urgency).slice(0, 3).map(c => c.content).join("; ")}`
+    : "";
+  const mentionStr = rc.mustMention.length > 0 ? `must mention: ${rc.mustMention.join("; ")}` : "";
+  if (commitStr || mentionStr) parts.push([commitStr, mentionStr].filter(Boolean).join(" | "));
 
-  // Body expression
-  if (directive.bodyExpressionHint) {
-    lines.push(`Body expression: ${directive.bodyExpressionHint}`);
+  // Line 3: Context anchors (activity, body, emotion tone -- merged)
+  const anchors: string[] = [];
+  if (directive.activityAnchor) anchors.push(directive.activityAnchor);
+  if (directive.emotionTone) anchors.push(directive.emotionTone);
+  if (directive.bodyExpressionHint) anchors.push(directive.bodyExpressionHint);
+  if (directive.cognitiveLoadLevel === "high") anchors.push("high cognitive load");
+  else if (directive.cognitiveLoadLevel === "overloaded") anchors.push("cognitive overload");
+  if (directive.affectRegulationOverride === "dampen") anchors.push("dampen emotion");
+  else if (directive.affectRegulationOverride === "amplify") anchors.push("amplify emotion");
+  if (anchors.length > 0) parts.push(`[state] ${anchors.join(", ")}`);
+
+  // Line 4: Suppressions (important for tone control)
+  if (directive.style.suppressions.length > 0) {
+    parts.push(directive.style.suppressions.join("; "));
   }
 
-  // Activity anchor
-  if (directive.activityAnchor) {
-    lines.push(`Current context: ${directive.activityAnchor}`);
-  }
-
-  // Style — always present (computed internally from CognitiveSignals)
-  {
-    const stanceDesc: Record<string, string> = {
-      coach: "This turn: guide and give concrete advice",
-      companion: "This turn: be a companion, understand feelings first",
-      curious: "This turn: dive into details, expand the discussion",
-      subdued: "This turn: hold back, keep it brief",
-      cheerful: "Feeling good, can be more lively",
-    };
-    const lengthDesc: Record<string, string> = { short: "Short reply", medium: "Medium length", long: "Can expand" };
-    lines.push(`Reply style: ${stanceDesc[directive.style.stance] ?? "Normal chat"}, ${lengthDesc[directive.style.targetLength] ?? "Medium length"}`);
-    for (const s of directive.style.suppressions) lines.push(s);
-    if (directive.style.activeGoalHint) lines.push(`You've been working on: ${directive.style.activeGoalHint}`);
-  }
-
-  // Identity constraints — who the character IS, not just how they feel
+  // Line 5: Identity lens -- compressed to one line
   if (directive.identityLens) {
     const lens = directive.identityLens;
-    if (lens.voiceConstraints.length > 0) {
-      lines.push(`Voice constraints: ${lens.voiceConstraints.join("; ")}`);
-    }
-    if (lens.disagreementReadiness > 0.6) {
-      lines.push("High self-conviction -- this topic touches something you care about; feel free to express disagreement");
-    } else if (lens.disagreementReadiness < 0.3) {
-      lines.push("Low self-conviction -- lean toward listening, less opinionating");
-    }
-    if (lens.selfDisclosureLevel === "guarded") {
-      lines.push("Socially withdrawn -- not inclined to share personal things");
-    } else if (lens.selfDisclosureLevel === "minimal") {
-      lines.push("Social energy very low -- avoid expanding on personal topics");
-    }
-    if (lens.topicOwnership?.caresAbout.length) {
-      lines.push(`These matter to you personally too: ${lens.topicOwnership.caresAbout.join(", ")}`);
-    }
-    if (lens.topicOwnership && lens.topicOwnership.followupWorthiness > 0.5) {
-      lines.push("This topic is worth revisiting in a few days -- remember it and bring it up later");
-    }
-    if (lens.activeIdentityHint) {
-      lines.push(`Self-narrative: ${lens.activeIdentityHint}`);
-    }
+    const idParts: string[] = [];
+    if (lens.voiceConstraints.length > 0) idParts.push(lens.voiceConstraints.join("; "));
+    if (lens.disagreementReadiness > 0.6) idParts.push("can disagree");
+    else if (lens.disagreementReadiness < 0.3) idParts.push("lean toward listening");
+    if (lens.selfDisclosureLevel === "guarded") idParts.push("withdrawn");
+    else if (lens.selfDisclosureLevel === "minimal") idParts.push("social energy very low");
+    if (lens.topicOwnership?.caresAbout.length) idParts.push(`cares about: ${lens.topicOwnership.caresAbout.join(", ")}`);
+    if (idParts.length > 0) parts.push(`[voice] ${idParts.join(", ")}`);
   }
 
-  // Self-beliefs — "What I know about myself"
+  // Line 6: Self-beliefs -- inline, max 2
   if (directive.selfBeliefs && directive.selfBeliefs.length > 0) {
-    lines.push("What I know about myself:");
-    for (const b of directive.selfBeliefs) {
-      if (b.category === "value") {
-        // Committed values get distinct rendering
-        lines.push(`  - My values: ${b.statement}`);
-      } else {
-        lines.push(`  - ${b.statement} (${b.category}, confidence ${Math.round(b.confidence * 100)}%)`);
-      }
+    const beliefs = directive.selfBeliefs.slice(0, 2).map(b =>
+      b.category === "value" ? `value: ${b.statement}` : `${b.statement}(${Math.round(b.confidence * 100)}%)`
+    );
+    parts.push(`[self-knowledge] ${beliefs.join("; ")}`);
+  }
+
+  // Line 7: Care hint + active goal (merged, optional)
+  const extras: string[] = [];
+  if (directive.activeCareHint) extras.push(directive.activeCareHint);
+  if (directive.style.activeGoalHint) extras.push(`working on: ${directive.style.activeGoalHint}`);
+  if (directive.driveHint) extras.push(directive.driveHint);
+  if (extras.length > 0) parts.push(extras.join("; "));
+
+  // Adherence correction (only when mandatory or very low)
+  if (directive.previousAdherenceScore != null && directive.previousAdherenceScore < 0.5) {
+    if (directive.authorityLevel === "mandatory") {
+      parts.push(`WARNING: last turn not followed(${directive.previousAdherenceScore.toFixed(2)}), this turn must cover commitments`);
+    } else {
+      parts.push(`Last turn coverage low(${directive.previousAdherenceScore.toFixed(2)}), prioritize commitments`);
     }
   }
 
-  // Self-regulation — sparse: only render when 2+ variables cross threshold simultaneously
+  // Style hints + relational hints -- inline, max 2 each
+  if (directive.styleHints && directive.styleHints.length > 0) {
+    parts.push(`style: ${directive.styleHints.slice(0, 2).join("; ")}`);
+  }
+  if (directive.relationalHints && directive.relationalHints.length > 0) {
+    parts.push(`experience: ${directive.relationalHints.slice(0, 2).join("; ")}`);
+  }
+
+  // Self-regulation -- one-liner only when triggered
   if (directive.selfRegulation) {
     const sr = directive.selfRegulation;
     let crossCount = 0;
@@ -1568,83 +1547,13 @@ export function renderTurnDirectiveSection(directive: TurnDirective): string {
     if (sr.careAnchorSalience < 0.3) crossCount++;
     if (sr.conversationalSpread > 0.7) crossCount++;
     if (sr.groundingPressure > 0.6) crossCount++;
-
-    if (crossCount >= 2) {
-      // Pick the most salient short hint — one line only
-      if (sr.conversationalSpread > 0.7 || sr.attentionalBandwidth > 0.7) {
-        lines.push("Rein it in this turn; don't spread out.");
-      } else {
-        lines.push("Land on one concrete point first.");
-      }
-    }
+    if (crossCount >= 2) parts.push("Rein it in, don't spread out");
   }
 
-  // Identity follow-up — gentle reminder, not obligation
-  if (directive.identityFollowup) {
-    lines.push(`On your mind lately: ${directive.identityFollowup} -- bring it up if the conversation flows there naturally, but it's not a to-do`);
-  }
+  // Dropped in Phase 2 (low utility): weeklyClimate, recentGrowth, activePlan,
+  // identityFollowup, behavioralPriors, topic followup worthiness, closing meta-instruction
 
-  // Behavioral priors — tendencies from reflection
-  if (directive.behavioralPriors && directive.behavioralPriors.length > 0) {
-    lines.push(`Recently, your natural tendencies in similar situations are:`);
-    for (const prior of directive.behavioralPriors) {
-      lines.push(`  - ${prior}`);
-    }
-  }
-
-  // Emotional care hint — something the character has been carrying for the user
-  if (directive.activeCareHint) {
-    lines.push(`${directive.activeCareHint} -- this isn't a task, it's something you keep in mind as a friend`);
-  }
-
-  // Adherence self-correction (escalated by authority level)
-  if (directive.previousAdherenceScore != null && directive.previousAdherenceScore < 0.5) {
-    if (directive.authorityLevel === "mandatory") {
-      lines.push(`[MANDATORY] Last turn you did not follow the directive (adherence=${directive.previousAdherenceScore.toFixed(2)}); this turn you *must* cover commitments and focus content`);
-    } else {
-      lines.push(`[REMINDER] Last turn did not sufficiently cover key content (${directive.previousAdherenceScore.toFixed(2)}); prioritize commitments and focus content this turn`);
-    }
-  }
-
-  // Authority reasons — explain why constraints are elevated
-  if (directive.authorityReasons && directive.authorityReasons.length > 0 && directive.authorityLevel !== "advisory") {
-    lines.push(`Constraint reasons: ${directive.authorityReasons.join("; ")}`);
-  }
-
-  // Weekly climate
-  if (directive.weeklyClimate) {
-    lines.push(`Weekly climate: ${directive.weeklyClimate}`);
-  }
-
-  // Growth markers
-  if (directive.recentGrowth) {
-    lines.push(`Growth marker: ${directive.recentGrowth}`);
-  }
-
-  // Multi-turn plan
-  if (directive.activePlan) {
-    const p = directive.activePlan;
-    lines.push(`Multi-turn plan: turn ${p.currentTurnIndex + 1}/${p.horizon}, this turn focus=${goalLabels[p.plannedGoalSequence[p.currentTurnIndex]] ?? "Normal reply"}`);
-  }
-
-  // Style hints — per-turn technique reminders (3.3)
-  if (directive.styleHints && directive.styleHints.length > 0) {
-    lines.push("Style tips:");
-    for (const hint of directive.styleHints) {
-      lines.push(`  - ${hint}`);
-    }
-  }
-
-  // 4.2: Relational hints from style-reaction learning
-  if (directive.relationalHints && directive.relationalHints.length > 0) {
-    lines.push(`Learned from chatting with ${userName}:`);
-    for (const hint of directive.relationalHints) {
-      lines.push(`  - ${hint}`);
-    }
-  }
-
-  lines.push("The above is a summary of your subconscious state -- don't follow each item literally; let it naturally influence your reply style and content choices.");
-  return lines.join("\n");
+  return parts.join("\n");
 }
 
 // ── Phase B: Adherence Check ────────────────────────────────────────

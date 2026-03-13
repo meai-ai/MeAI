@@ -244,7 +244,9 @@ export class EmotionEngine {
     const p = this.getJournalPath();
     if (!fs.existsSync(p)) return { entries: [], threads: [] };
     try {
-      return JSON.parse(fs.readFileSync(p, "utf-8")) as EmotionJournal;
+      const raw = JSON.parse(fs.readFileSync(p, "utf-8")) as EmotionJournal;
+      raw.entries = raw.entries ?? [];
+      return raw;
     } catch (err) {
       log.warn("failed to parse emotion journal", err);
       return { entries: [], threads: [] };
@@ -308,29 +310,27 @@ export class EmotionEngine {
     return lines.join("\n");
   }
 
-  /** Format active narrative threads as context. */
+  /** Format active narrative threads as dense context. */
   private formatActiveThreads(): string {
     const journal = this.loadJournal();
-    const ongoing = journal.threads.filter(t => t.status === "ongoing");
-    const lines: string[] = [];
+    const ongoing = journal.threads.filter(t => t.status === "ongoing").slice(0, 3); // Phase 2: cap at 3
+    const dormant = journal.threads
+      .filter(t => t.status !== "ongoing" && t.status !== "resolved" && t.status !== "abandoned")
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, 1); // 1 dormant hint
 
-    for (const t of ongoing) {
-      const daysAgo = Math.floor((Date.now() - t.startedAt) / (24 * 60 * 60 * 1000));
-      const age = daysAgo === 0 ? "started today" : `${daysAgo} days ago`;
-      lines.push(`- ${t.description} (${age})`);
-    }
+    // Dense pipe-separated format: "desc1 | desc2 | desc3"
+    const activeStr = ongoing.map(t => {
+      // Truncate long descriptions
+      const desc = t.description.length > 60 ? t.description.slice(0, 57) + "..." : t.description;
+      return desc;
+    }).join(" | ");
 
-    // 10.1: Narrative arc emotion signals
-    try {
-      const narrativeSignals = getNarrativeEmotionSignals();
-      for (const sig of narrativeSignals) {
-        if (sig && sig.trim()) {
-          lines.push(`- ${sig}`);
-        }
-      }
-    } catch { /* non-fatal */ }
+    const dormantStr = dormant.length > 0
+      ? ` [dormant] ${dormant[0].description.slice(0, 40)}`
+      : "";
 
-    return lines.join("\n");
+    return activeStr + dormantStr;
   }
 
   private loadRecentEmotionalMemories(): string {
@@ -569,8 +569,8 @@ Generate the current emotional state and update narrative threads.`,
           });
         }
 
-        // Hard cap: if ongoing threads exceed 15, demote oldest to resolved
-        const MAX_ONGOING_THREADS = 15;
+        // Hard cap: if ongoing threads exceed 8, demote oldest to resolved
+        const MAX_ONGOING_THREADS = 8;
         const ongoingForCap = threads.filter(t => t.status === "ongoing");
         if (ongoingForCap.length > MAX_ONGOING_THREADS) {
           ongoingForCap.sort((a, b) => a.startedAt - b.startedAt);
@@ -1304,54 +1304,35 @@ Generate the current emotional state and update narrative threads.`,
    * This is what the character "feels" right now — injected alongside time/space/work context.
    */
   public formatEmotionContext(state: EmotionalState, transition?: EmotionTransition | null): string {
-    const lines: string[] = [];
+    const parts: string[] = [];
 
-    // Mood label — with transition annotation if significant
-    let moodLine = `Current mood: ${state.mood}`;
-    if (transition?.isSignificant && transition.previous) {
-      moodLine += ` (shifted from "${transition.previous.mood}")`;
-    }
-    lines.push(moodLine);
-    lines.push(`Cause: ${state.cause}`);
-    lines.push(`Energy: ${state.energy}/10, Valence: ${state.valence}/10`);
+    // Line 1: Mood + energy/valence + cause (dense one-liner)
+    const transTag = transition?.isSignificant && transition.previous ? ` <-${transition.previous.mood}` : "";
+    parts.push(`[mood] ${state.mood}${transTag} | energy${state.energy} valence${state.valence} | ${state.cause.slice(0, 80)}`);
 
+    // Line 2: Micro-event (important for grounding -- keep but cap length)
     if (state.microEvent) {
-      lines.push(`Small thing that happened today (this is real — must stay consistent in chat, don't fabricate a different version): ${state.microEvent}`);
+      parts.push(`[small thing] ${state.microEvent.slice(0, 120)}`);
     }
 
-    if (state.behaviorHints) {
-      lines.push(`State effects: ${state.behaviorHints}`);
-    }
-
-    // 5.2: Defense mechanism context
+    // Line 3: Momentum + defense (only when notable)
+    const flags: string[] = [];
+    if (transition?.momentum === "trending_down") flags.push("mood declining");
+    else if (transition?.momentum === "trending_up") flags.push("mood improving");
+    else if (transition?.momentum === "volatile") flags.push("volatile");
     if (state.defenseMechanism && state.defenseMechanism.type !== "none") {
-      const dm = state.defenseMechanism;
-      lines.push(`Defense mechanism: ${dm.type} — triggered by "${dm.trigger}", but on the surface talking about "${dm.surface}"`);
+      flags.push(`defense:${state.defenseMechanism.type}(${state.defenseMechanism.trigger})`);
     }
+    if (state.behaviorHints) flags.push(state.behaviorHints);
+    if (flags.length > 0) parts.push(flags.join("; "));
 
-    // Significant transition hint
-    if (transition?.isSignificant && transition.transitionLabel) {
-      lines.push(`${transition.transitionLabel} — noticeable mood shift, can mention naturally if the topic comes up`);
-    }
-
-    // 7.6: Emotional momentum — trending direction
-    if (transition?.momentum && transition.momentum !== "stable") {
-      const momentumLabels: Record<string, string> = {
-        trending_up: "Emotional trend: improving",
-        trending_down: "Emotional trend: declining",
-        volatile: "Emotional trend: volatile",
-      };
-      const label = momentumLabels[transition.momentum];
-      if (label) lines.push(label);
-    }
-
-    // Active narrative threads — ongoing storylines she can naturally reference
+    // Threads -- compressed to pipe-separated one-liners, max 3 active
     const threadsStr = this.formatActiveThreads();
     if (threadsStr) {
-      lines.push(`\nThings going on recently (can bring up naturally in chat):\n${threadsStr}`);
+      parts.push(`[busy with] ${threadsStr}`);
     }
 
-    return lines.join("\n");
+    return parts.join("\n");
   }
 
   /**

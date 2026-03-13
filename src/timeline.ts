@@ -116,16 +116,22 @@ export class TimelineEngine {
 
   /** Format today's timeline for system prompt injection. */
   formatTimelineContext(): string {
-    const events = this.getTodayTimeline();
-    if (events.length === 0) return "";
+    const allEvents = this.getTodayTimeline();
+    if (allEvents.length === 0) return "";
 
-    const lines = events.map(e => {
-      let line = `- ${e.time} [${e.category}] ${e.summary}`;
-      if (e.people?.length) line += ` (with ${e.people.join(", ")})`;
+    // Keep last 3 events for prompt injection (token budget).
+    // Full timeline stays in file for analysis/emotion.
+    const events = allEvents.slice(-3);
+    const skipped = allEvents.length - events.length;
+
+    const lines = events.map((e) => {
+      let line = `${e.time} ${e.summary}`;
+      if (Array.isArray(e.people) && e.people.length) line += ` (${e.people.join(", ")})`;
       return line;
     });
+    if (skipped > 0) lines.unshift(`(${skipped} earlier entries omitted)`);
 
-    return `Today's timeline (established facts — conversation must be consistent with these):\n${lines.join("\n")}\n\n⚠️ Strict rules:\n- Nothing you say about activities can contradict "currently doing" and the timeline. If "currently doing" says you're commuting, you can't say you're eating.\n- When ${getCharacter().user.name} asks what you're doing / if you're off work / what you're up to, use the most recent timeline event to answer — be specific (e.g. "dealing with an urgent rebalancing email from the NY client"), not vague (e.g. "wrapping up emails").\n- Don't invent activity details not in the timeline (what you ate, where you went), unless the timeline explicitly mentions them.`;
+    return `[recent] ${lines.join(" -> ")}\nTimeline > schedule. When they conflict, always follow the timeline. Infer location from timeline.`;
   }
 }
 

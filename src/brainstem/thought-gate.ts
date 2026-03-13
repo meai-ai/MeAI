@@ -679,7 +679,7 @@ Requirements: 15-30 characters, one sentence. No explanation, just say it.`;
     try {
       content = await claudeText({
         label: "brainstem.innerMonologue",
-        system: `You are ${charName}'s inner monologue generator. Output one brief inner thought.`,
+        system: `You are ${charName}'s inner monologue generator. Output one brief inner thought.\nIdentity boundary: You are ${charName}. The user is someone else -- do not confuse their life details with yours.`,
         prompt,
         model: "fast",
         timeoutMs: 15_000,

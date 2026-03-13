@@ -526,60 +526,41 @@ export class RelationshipEngine {
   /** Format relationship context for system prompt */
   formatRelationshipContext(): string {
     const state = this.loadState();
-    const userName = getCharacter().user.name;
     const parts: string[] = [];
 
-    if (state.temperature >= 3) parts.push("Relationship is close, good conversation vibe");
-    else if (state.temperature >= 0) parts.push("Relationship is normal");
-    else parts.push("Haven't chatted much recently, might want to reach out");
+    // Phase 2: Dense one-liner format
+    // Temperature
+    if (state.temperature >= 3) parts.push("close");
+    else if (state.temperature < 0) parts.push("distant");
 
+    // Bid ratio
     const bidRatio = state.bidsFromCharacter > 0
       ? state.bidsFromUser / state.bidsFromCharacter
       : 999;
-    if (bidRatio < 0.5) parts.push(`You've been reaching out a lot, give ${userName} some space`);
-    else if (bidRatio > 2) parts.push(`${userName} has been reaching out to you more lately`);
+    if (bidRatio < 0.5) parts.push("you reach out more");
+    else if (bidRatio > 2) parts.push("they reach out more");
 
-    // 6.1: Emotional labor context
+    // Emotional labor (only high levels)
     const labor = this.getEmotionalLabor();
-    if (labor.resentmentBuildup > 0.3) {
-      parts.push("Feeling like you're putting in more effort in this relationship — tone might be a bit flat");
-    } else if (labor.resentmentBuildup > 0.5) {
-      parts.push("Clearly feeling an imbalance in effort, a bit resentful");
-    }
+    if (labor.resentmentBuildup > 0.5) parts.push("effort imbalance");
+    else if (labor.resentmentBuildup > 0.3) parts.push("giving more");
 
-    // 5.1: Attachment state context
+    // Attachment (only notable states)
     const attachment = this.getAttachmentState();
-    if (attachment.secureBaseActive) {
-      parts.push(`${userName} is chatting, feeling secure and settled`);
-    } else if (attachment.stage === "anxious") {
-      parts.push(`Wondering why ${userName} hasn't replied, feeling a bit uneasy`);
-    } else if (attachment.stage === "ruminating") {
-      parts.push(`${userName} hasn't replied in a long time, starting to overthink`);
-    } else if (attachment.stage === "noticing") {
-      parts.push(`Noticed ${userName} hasn't replied in a while`);
-    }
+    if (attachment.secureBaseActive) parts.push("secure");
+    else if (attachment.stage === "anxious") parts.push("waiting for reply, uneasy");
+    else if (attachment.stage === "ruminating") parts.push("overthinking");
 
-    // 7.3: Communication rhythm
+    // Communication rhythm (short labels)
     const rhythm = this.getCommunicationRhythm();
     if (rhythm) {
-      const modeLabels: Record<string, string> = {
-        deep_conversation: `${userName} is in deep conversation mode — feel free to expand on topics`,
-        rapid_exchange: `${userName} is in rapid exchange mode — keep replies short`,
-        slow_thoughtful: `${userName} is in slow thoughtful mode — can write longer responses`,
-        checking_in: `${userName} is in casual chat mode`,
+      const modeShort: Record<string, string> = {
+        deep_conversation: "deep mode", rapid_exchange: "rapid mode", slow_thoughtful: "slow mode", checking_in: "casual",
       };
-      parts.push(modeLabels[rhythm.currentMode] ?? "");
+      if (modeShort[rhythm.currentMode]) parts.push(modeShort[rhythm.currentMode]);
     }
 
-    // Shared history — context layer always provides, behavior layer decides usage
-    const history = state.sharedHistory ?? [];
-    const narratable = history.filter(h => h.narratable);
-    if (narratable.length > 0) {
-      const latest = narratable[narratable.length - 1];
-      parts.push(`Shared memory: ${latest.title} — ${latest.summary}`);
-    }
-
-    return parts.filter(Boolean).join("; ");
+    return parts.length > 0 ? `[relationship] ${parts.join(", ")}` : "";
   }
 
   // ── Shared History CRUD ───────────────────────────────────────────

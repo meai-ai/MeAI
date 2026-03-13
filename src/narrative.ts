@@ -36,6 +36,7 @@ export interface NarrativeArc {
   phaseStartedAt: number;      // timestamp (0 = not started)
   phases: NarrativePhase[];
   completed?: boolean;
+  sourceType?: "narrative"; // narrative arcs are always narrative by design
 }
 
 interface NarrativeState {

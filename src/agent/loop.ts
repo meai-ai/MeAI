@@ -1035,9 +1035,10 @@ export class AgentLoop {
 
     if (worldSet.has("body")) {
       if (bodyContext) {
-        let bodyText = `${s().headers.my_body}:\n${bodyContext}`;
-        if (outfit) bodyText += `\n${s().headers.wearing_today}: ${outfit}`;
-        blocks.push({ id: "body", text: bodyText, keywords: ["hungry", "tired", "sleepy", "eat", "coffee", "body", "period", "sick", "exercise", "wear", "outfit"], alwaysInclude: true, priority: 3 });
+        // Dense one-line body block
+        const bodyParts = [bodyContext.replace(/\n/g, " ")];
+        if (outfit) bodyParts.push(`wearing:${outfit}`);
+        blocks.push({ id: "body", text: `[body] ${bodyParts.join(" | ")}`, keywords: ["hungry", "tired", "sleepy", "eat", "coffee", "body", "period", "sick", "exercise", "wear", "outfit"], alwaysInclude: true, priority: 3 });
       }
     }
     if (worldSet.has("market") && marketData) {

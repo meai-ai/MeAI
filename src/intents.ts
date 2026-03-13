@@ -197,12 +197,12 @@ export function expireStaleIntents(): void {
       }
     }
 
-    // pending + no deadline + >7 days old → expired
+    // pending + no deadline + >3 days old → expired (tightened from 7d)
     if (intent.status === "pending" && !intent.deadline) {
-      if (now - intent.createdAt > 7 * 24 * 60 * 60 * 1000) {
+      if (now - intent.createdAt > 3 * 24 * 60 * 60 * 1000) {
         intent.status = "expired";
         changed = true;
-        console.log(`[intents] Expired (7d no deadline): "${intent.what}"`);
+        console.log(`[intents] Expired (3d no deadline): "${intent.what}"`);
         continue;
       }
     }
@@ -245,36 +245,32 @@ export function formatIntentsForSchedule(): string {
   }).join("\n");
 }
 
-/** For conversation prompt — shows pending + scheduled */
+/** For conversation prompt — dense format, capped at 5 pending + 3 scheduled */
 export function formatIntentContext(): string {
   expireStaleIntents();
-  const pending = _intents.filter(i => i.status === "pending");
-  const scheduled = _intents.filter(i => i.status === "scheduled");
+
+  // Sort by priority (high > medium > low), then by recency
+  const prioOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  const sortByPriority = (a: Intent, b: Intent) =>
+    (prioOrder[a.priority] ?? 1) - (prioOrder[b.priority] ?? 1) || b.createdAt - a.createdAt;
+
+  const pending = _intents.filter(i => i.status === "pending").sort(sortByPriority).slice(0, 5);
+  const scheduled = _intents.filter(i => i.status === "scheduled").sort(sortByPriority).slice(0, 3);
 
   if (pending.length === 0 && scheduled.length === 0) return "";
 
-  const parts: string[] = ["## Things I committed to"];
+  const formatItem = (i: Intent) => {
+    const deadline = i.deadline ? `(by ${i.deadline})` : i.when ? `(${i.when})` : "";
+    return `${i.what}${deadline}`;
+  };
 
+  const parts: string[] = [];
   if (pending.length > 0) {
-    parts.push("Not yet scheduled:");
-    for (const i of pending) {
-      const deadline = i.deadline ? ` (by ${i.deadline})` : i.when ? ` (${i.when})` : "";
-      const ctx = i.context ? ` — ${i.context}` : "";
-      parts.push(`- ${i.what}${deadline}${ctx}`);
-    }
+    parts.push(`[pending] ${pending.map(formatItem).join(" | ")}`);
   }
-
   if (scheduled.length > 0) {
-    if (pending.length > 0) parts.push("");
-    parts.push("Already scheduled:");
-    for (const i of scheduled) {
-      const ctx = i.context ? ` — ${i.context}` : "";
-      parts.push(`- ${i.what} (${i.scheduledDate}, in plan)${ctx}`);
-    }
+    parts.push(`[scheduled] ${scheduled.map(i => `${i.what}(${i.scheduledDate})`).join(" | ")}`);
   }
 
-  parts.push("");
-  parts.push("Naturally check progress on scheduled items; don't repeatedly bring up the same pending item as if it were a new idea.");
-
-  return parts.join("\n");
+  return `## Commitments\n${parts.join("\n")}\nNaturally check progress on scheduled items; don't repeatedly bring up pending items.`;
 }

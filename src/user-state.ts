@@ -370,43 +370,35 @@ export function formatPredictions(): string {
 export function formatUserStateContext(): string {
   expireStale();
 
+  // Phase 2: Dense one-liner format
   const parts: string[] = [];
 
   if (_state.focuses.length > 0) {
-    const items = _state.focuses.map(f => {
-      const ago = Math.round((Date.now() - f.lastMentioned) / 3_600_000);
-      const timeLabel = ago < 1 ? "just now" : ago < 24 ? `${ago}h ago` : `${Math.round(ago / 24)}d ago`;
-      return `${f.topic} (${timeLabel}, mentioned ${f.mentionCount}x)`;
-    });
-    parts.push(`What's on their mind recently: ${items.join(", ")}`);
+    const items = _state.focuses.slice(0, 3).map(f => f.topic);
+    parts.push(`focus: ${items.join(", ")}`);
   }
 
   if (_state.stressors.length > 0) {
-    const items = _state.stressors.map(s => s.what);
-    parts.push(`Stressors: ${items.join(", ")}`);
+    parts.push(`stress: ${_state.stressors.map(s => s.what).join(", ")}`);
   }
 
   if (_state.recentMoods.length >= 2) {
     const recent = _state.recentMoods.slice(-3);
-    const avg = recent.reduce((s, m) => s + m.valence, 0) / recent.length;
     const trend = recent[recent.length - 1].valence - recent[0].valence;
-    const trendLabel = trend > 1 ? "improving" : trend < -1 ? "declining" : "stable";
-    parts.push(`Recent mood trajectory: avg ${avg.toFixed(1)}/10, ${trendLabel}`);
+    if (trend > 1) parts.push("mood improving");
+    else if (trend < -1) parts.push("mood declining");
   }
 
   if (_state.unspokenNeeds.length > 0) {
-    parts.push(`Sensed but unspoken: ${_state.unspokenNeeds.join(", ")}`);
+    parts.push(`unspoken: ${_state.unspokenNeeds.slice(0, 2).join(", ")}`);
   }
 
-  // Predictions based on temporal patterns
+  // Predictions -- inline, max 1
   if (_state.predictions.length > 0) {
-    const predItems = _state.predictions.map(p =>
-      `${p.what} (${p.basis})`,
-    );
-    parts.push(`Your hunches (based on past patterns):\n- ${predItems.join("\n- ")}`);
+    parts.push(`hunch: ${_state.predictions[0].what}`);
   }
 
-  return parts.join("\n");
+  return parts.length > 0 ? `[user-state] ${parts.join(" | ")}` : "";
 }
 
 export function getUserState(): UserState {

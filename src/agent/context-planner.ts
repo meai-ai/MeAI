@@ -31,6 +31,18 @@ export interface ContextPlan {
   documents: boolean;
   world: string[]; // IDs of world blocks to include
   capabilities: "full" | "minimal";
+  // Phase 1 additions: gate control for sections that bypass planner
+  intents: boolean;           // default true
+  episodes: boolean;          // default true
+  relationship: boolean;      // default true
+  user_state: boolean;        // default true
+  moments: boolean;           // default false
+  brainstem: boolean;         // default false
+  emerging_values: boolean;   // default false
+  self_narrative: boolean;    // default false
+  personal_stance: boolean;   // default false
+  reciprocity: boolean;       // default false
+  identityRefs: string[];     // identity sections to expand
 }
 
 /** Full context — equivalent to current behavior (used as fallback). */
@@ -49,6 +61,18 @@ export const FULL_PLAN: ContextPlan = {
   documents: true,
   world: ["time", "schedule", "body", "market", "pet", "hobbies", "social", "entertainment", "notifications", "discoveries", "activities"],
   capabilities: "full",
+  // Phase 1 gate defaults
+  intents: true,
+  episodes: true,
+  relationship: true,
+  user_state: true,
+  moments: false,
+  brainstem: false,
+  emerging_values: false,
+  self_narrative: false,
+  personal_stance: false,
+  reciprocity: false,
+  identityRefs: [],
 };
 
 // ── Planner Prompt ───────────────────────────────────────────────────
@@ -56,20 +80,31 @@ export const FULL_PLAN: ContextPlan = {
 const PLANNER_PROMPT = `You are a context router for a chat system. Given the user's message and recent chat history, decide which context sections the AI needs to respond well. Exclude sections only when clearly irrelevant — when in doubt, include.
 
 Available sections:
-- persona: "full" | "compact" (speaking style rules — compact for simple greetings only, full for everything else)
-- identity: true/false (who the AI persona is — include for most conversations, skip only for pure factual questions)
-- user_profile: true/false (facts about the user — include when conversation is personal)
-- memories: true/false (past conversation memories — include for most conversations to maintain continuity)
-- emotion: "full" | "summary" (mood state — summary for casual chat, full for emotional depth. Always include at least summary)
-- opinions: true/false (viewpoints — for debate/opinion topics)
-- diary: true/false (journal entries — rarely needed)
-- goals: true/false (motivations — for life direction discussions)
-- narrative: true/false (life storylines — for ongoing arc discussions)
-- skills: true/false (tool capabilities — include when user might want photos, voice, search, weather, or any action)
-- sessions: true/false (past conversation index — only for "remember when" or referencing past chats)
-- documents: true/false (saved files — only for document references)
-- world: array of: "time","schedule","body","market","pet","hobbies","social","entertainment","notifications","discoveries","activities" (always include "time" and "schedule"; add others when topic matches)
-- capabilities: "full" | "minimal" (tool instructions — full for most conversations, minimal only for trivial greetings)
+- persona: "full" | "compact" (compact for simple greetings only)
+- identity: true/false (skip only for pure factual questions)
+- user_profile: true/false (include when conversation is personal)
+- memories: true/false (include for most conversations)
+- emotion: "full" | "summary" (summary for casual, full for emotional depth)
+- opinions: true/false (for debate/opinion topics)
+- diary: true/false (rarely needed)
+- goals: true/false (life direction discussions)
+- narrative: true/false (ongoing arc discussions)
+- skills: true/false (when user needs photos, voice, search, weather, or actions)
+- sessions: true/false (only for "remember when" or referencing past chats)
+- documents: true/false (only for document references)
+- world: array of: "time","schedule","body","market","pet","hobbies","social","entertainment","notifications","discoveries","activities"
+- capabilities: "full" | "minimal" (minimal for trivial greetings)
+- intents: true/false (default true -- pending tasks/promises, skip for pure greetings)
+- episodes: true/false (default true -- past conversation scenes)
+- relationship: true/false (default true -- attachment dynamics with user)
+- user_state: true/false (default true -- user's current mental state)
+- moments: true/false (default false -- social posts, include when discussing social sharing)
+- brainstem: true/false (default false -- subconscious thoughts, for deep reflection)
+- emerging_values: true/false (default false -- evolving values, for philosophical discussion)
+- self_narrative: true/false (default false -- self-understanding, for identity/growth topics)
+- personal_stance: true/false (default false -- personal positions, for debate)
+- reciprocity: true/false (default false -- relationship balance, for relationship discussions)
+- identityRefs: string[] (default [] -- identity sections to expand when topic matches)
 
 Respond with JSON only, no explanation.`;
 
@@ -138,14 +173,23 @@ function normalizePlan(raw: any): ContextPlan {
   if (!world.includes("time")) world.unshift("time");
   if (!world.includes("schedule")) world.push("schedule");
 
+  // Normalize identityRefs
+  const VALID_IDENTITY_REFS = new Set([
+    "appearance", "living", "daily", "vibe-coding", "friends",
+    "food", "sensory", "philosophy", "private", "family",
+  ]);
+  const identityRefs = Array.isArray(raw.identityRefs)
+    ? raw.identityRefs.filter((r: string) => VALID_IDENTITY_REFS.has(r))
+    : [];
+
   return {
     persona: raw.persona === "compact" ? "compact" : "full",
     identity: raw.identity !== false,         // default true
     user_profile: raw.user_profile === true,
     memories: raw.memories !== false,          // default true
-    emotion: raw.emotion === "full" ? "full"
+    emotion: raw.emotion === "summary" ? "summary"
       : raw.emotion === false ? "summary"     // never fully disable emotion
-      : "summary",
+      : "full",                               // default to full -- emotion was under-injected
     opinions: raw.opinions === true,
     diary: raw.diary === true,
     goals: raw.goals === true,
@@ -155,5 +199,18 @@ function normalizePlan(raw: any): ContextPlan {
     documents: raw.documents === true,
     world,
     capabilities: raw.capabilities === "minimal" ? "minimal" : "full", // default full
+    // Phase 1 gate -- default true (planner can turn off)
+    intents: raw.intents !== false,           // default true
+    episodes: raw.episodes !== false,         // default true
+    relationship: raw.relationship !== false,  // default true
+    user_state: raw.user_state !== false,     // default true
+    // Phase 1 gate -- default false (planner must turn on)
+    moments: raw.moments === true,
+    brainstem: raw.brainstem === true,
+    emerging_values: raw.emerging_values === true,
+    self_narrative: raw.self_narrative === true,
+    personal_stance: raw.personal_stance === true,
+    reciprocity: raw.reciprocity === true,
+    identityRefs,
   };
 }

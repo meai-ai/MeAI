@@ -725,8 +725,51 @@ export class WorldEngine {
     const hour = userTime.getHours();
 
     // Find current and next block from the full-day schedule
-    const currentBlock = schedule.blocks.find(b => hour >= b.start && hour < b.end) ?? null;
-    const nextBlock = schedule.blocks.find(b => b.start > hour) ?? null;
+    let currentBlock = schedule.blocks.find(b => hour >= b.start && hour < b.end) ?? null;
+    let nextBlock = schedule.blocks.find(b => b.start > hour) ?? null;
+
+    // Schedule drift fix: when timeline's latest event category differs from
+    // the current schedule block, advance to the next block. This handles cases
+    // where narration/conversation has moved the character past the scheduled activity.
+    if (currentBlock && nextBlock) {
+      try {
+        const { getTodayTimeline } = await import("./timeline.js");
+        const timeline = getTodayTimeline();
+        if (timeline.length > 0) {
+          const last = timeline[timeline.length - 1];
+          // Parse time safely: strip leading ~ from approximate times, handle ranges
+          const timeStr = last.time.replace(/^~/, "");
+          const timePart = timeStr.split(/[-\u2013]/)[0]; // split on - or en-dash
+          const [hStr, mStr] = timePart.split(":");
+          const lastH = parseInt(hStr, 10) || 0;
+          const lastM = parseInt(mStr, 10) || 0;
+          const lastMinutes = lastH * 60 + lastM;
+          const nowMinutes = hour * 60 + userTime.getMinutes();
+
+          // If latest timeline event is recent (within 60 min) and its category
+          // differs from the current schedule block, advance to next block
+          if (
+            nowMinutes - lastMinutes < 60 &&
+            nowMinutes - lastMinutes >= 0 &&
+            last.category !== currentBlock.category &&
+            last.category === nextBlock.category
+          ) {
+            currentBlock = nextBlock;
+            nextBlock = schedule.blocks.find(b => b.start > currentBlock!.end) ?? null;
+          }
+        }
+      } catch { /* timeline may not be initialized */ }
+    }
+
+    // Infer location from category when block location is missing or generic
+    const locationMap: Record<string, string> = {
+      commute: "commuting",
+      sleep: "home",
+      morning: "home",
+      rest: "home",
+      chores: "home",
+      pet: "home",
+    };
 
     if (!schedule.isWorkDay && !currentBlock) {
       return {
@@ -740,6 +783,10 @@ export class WorldEngine {
       };
     }
 
+    const location = currentBlock?.location
+      || locationMap[currentBlock?.category ?? ""]
+      || "home";
+
     return {
       currentActivity: currentBlock?.activity ?? "",
       busy: currentBlock?.busy ?? false,
@@ -747,7 +794,7 @@ export class WorldEngine {
       isWorkDay: schedule.isWorkDay,
       currentBlock,
       nextBlock,
-      location: currentBlock?.location ?? "home",
+      location,
     };
   }
 

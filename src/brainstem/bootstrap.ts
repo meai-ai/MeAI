@@ -214,11 +214,12 @@ export function bootstrapGraph(
     if (parts.length < 2) continue;
     const prefix = parts.slice(0, 2).join(".");
 
+    // Skip user-specific memories -- these are not part of the character's self-concept
+    if (prefix.startsWith("user.") || prefix.startsWith("family.")) continue;
+
     // Determine ACL from key
     let acl: ConceptACL = ACL_DEFAULTS.topic;
-    if (prefix.startsWith("user.") || prefix.startsWith("family.")) {
-      acl = ACL_DEFAULTS.person;
-    } else if (prefix.startsWith("health.")) {
+    if (prefix.startsWith("health.")) {
       acl = ACL_DEFAULTS.sensitive;
     }
 
