@@ -192,10 +192,14 @@ export class ToolRegistry {
       return `Error: Unknown tool "${name}"`;
     }
     try {
-      return await tool.execute(input);
+      const result = await tool.execute(input);
+      if (!result || (typeof result === "string" && result.trim() === "")) {
+        return `⚠️ Tool "${name}" returned empty result. Do NOT fabricate output — report this to the user.`;
+      }
+      return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return `Error executing tool "${name}": ${msg}`;
+      return `⚠️ Tool "${name}" failed: ${msg}. Do NOT fabricate output — report this error to the user.`;
     }
   }
 

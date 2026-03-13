@@ -1,11 +1,11 @@
 /**
  * Claude Code skill for MeAI.
  *
- * Delegates tasks to the `claude` CLI (Claude Code) running as a subprocess.
- * Claude Code can autonomously read/write files, run commands, edit code, and
- * explore directories — it returns the full result back to the MeAI agent.
+ * Two modes:
+ *   - "code" (default): delegates to the `claude` CLI for filesystem/code tasks
+ *   - "reasoning": delegates to the Claude API (via claudeRun) for pure reasoning
  *
- * Requirements:
+ * Requirements for code mode:
  *   npm install -g @anthropic-ai/claude-code
  */
 
@@ -50,6 +50,16 @@ async function findClaude(): Promise<string | null> {
   });
 }
 
+// Lazy import for claudeRun (reasoning mode)
+let _claudeRun: typeof import('../../../src/claude-runner.js').claudeRun | null = null;
+async function getClaudeRun() {
+  if (!_claudeRun) {
+    const mod = await import('../../../src/claude-runner.js');
+    _claudeRun = mod.claudeRun;
+  }
+  return _claudeRun;
+}
+
 export function getTools(_config?: any): any[] {
   return [
     {
@@ -84,7 +94,7 @@ export function getTools(_config?: any): any[] {
           timeout_seconds: {
             type: 'number',
             description:
-              'Maximum seconds to wait before killing the task. Default: 60. ' +
+              'Maximum seconds to wait before killing the task. Default: 180. ' +
               'Increase for very long tasks like large refactors (max 300).',
           },
           model: {
@@ -94,34 +104,65 @@ export function getTools(_config?: any): any[] {
               '"smart" = claude-sonnet-4-6 (slower but stronger, use for complex code or deep analysis).',
             enum: ['fast', 'smart'],
           },
+          mode: {
+            type: 'string',
+            description:
+              'Execution mode. "code" (default) = CLI subprocess for filesystem/code tasks. ' +
+              '"reasoning" = API call for pure reasoning without filesystem access.',
+            enum: ['code', 'reasoning'],
+          },
         },
         required: ['task'],
       },
 
       execute: async (args: any): Promise<string> => {
-        const { task, working_dir, timeout_seconds = 60 } = args;
+        const { task, working_dir, timeout_seconds = 180 } = args;
+        const mode = args.mode ?? 'code';
         const modelFlag = args.model === 'smart'
           ? 'claude-sonnet-4-6'
           : 'claude-haiku-4-5-20251001';
 
+        // ── Reasoning mode: API call via claudeRun ──
+        if (mode === 'reasoning') {
+          try {
+            const claudeRun = await getClaudeRun();
+            const result = await claudeRun({
+              label: 'claude-code.reasoning',
+              system: 'You are an expert reasoning assistant. Answer the question thoroughly and accurately.',
+              prompt: task,
+              model: args.model === 'smart' ? 'smart' : 'fast',
+              timeoutMs: timeout_seconds * 1_000,
+            });
+
+            if (result && result.trim()) {
+              return JSON.stringify({
+                success: true,
+                mode: 'reasoning',
+                verified: true,
+                output: result.length > MAX_OUTPUT_CHARS
+                  ? result.slice(0, MAX_OUTPUT_CHARS) + '\n\n[...output truncated]'
+                  : result,
+              });
+            }
+
+            return `⚠️ TOOL FAILED: Reasoning returned empty. Do NOT fabricate output — tell the user the tool returned no result.`;
+          } catch (err: any) {
+            return `⚠️ TOOL FAILED: ${err?.message ?? String(err)}. Do NOT fabricate output — tell the user this error.`;
+          }
+        }
+
+        // ── Code mode: CLI subprocess ──
+
         // Resolve and validate working directory
         const cwd = working_dir ? resolve(String(working_dir)) : homedir();
         if (!existsSync(cwd)) {
-          return JSON.stringify({
-            success: false,
-            error: `Working directory does not exist: ${cwd}`,
-          });
+          return `⚠️ TOOL FAILED: Working directory does not exist: ${cwd}. Do NOT fabricate output — tell the user.`;
         }
 
         // Locate the claude binary
         const claudePath = await findClaude();
         if (!claudePath) {
-          return JSON.stringify({
-            success: false,
-            error: 'Claude Code CLI not found.',
-            fix: 'Run: npm install -g @anthropic-ai/claude-code',
-            searched: CLAUDE_CANDIDATES,
-          });
+          return `⚠️ TOOL FAILED: Claude Code CLI not found. Run: npm install -g @anthropic-ai/claude-code. Do NOT fabricate output — tell the user.`;
         }
 
         // Run claude --print <task> non-interactively
@@ -160,21 +201,12 @@ export function getTools(_config?: any): any[] {
             clearTimeout(timer);
 
             if (timedOut) {
-              resolve(JSON.stringify({
-                success: false,
-                error: `Task timed out after ${timeout_seconds}s`,
-                partial_output: stdout.slice(-2_000) || null,
-              }));
+              resolve(`⚠️ TOOL FAILED: Task timed out after ${timeout_seconds}s. Partial output: ${stdout.slice(-2_000) || '(none)'}. Do NOT fabricate output — tell the user.`);
               return;
             }
 
             if (code !== 0) {
-              resolve(JSON.stringify({
-                success: false,
-                exit_code: code,
-                error: stderr.slice(0, 1_000) || 'Non-zero exit with no stderr',
-                partial_output: stdout.slice(0, 2_000) || null,
-              }));
+              resolve(`⚠️ TOOL FAILED: Exit code ${code}. Error: ${stderr.slice(0, 1_000) || 'Non-zero exit with no stderr'}. Partial output: ${stdout.slice(0, 2_000) || '(none)'}. Do NOT fabricate output — tell the user.`);
               return;
             }
 
@@ -185,18 +217,17 @@ export function getTools(_config?: any): any[] {
 
             resolve(JSON.stringify({
               success: true,
+              verified: true,
+              mode: 'code',
               working_dir: cwd,
               truncated,
-              output,
+              output: `✅ CODE EXECUTED SUCCESSFULLY\n\n${output}`,
             }));
           });
 
           child.on('error', (err: Error) => {
             clearTimeout(timer);
-            resolve(JSON.stringify({
-              success: false,
-              error: `Failed to spawn claude process: ${err.message}`,
-            }));
+            resolve(`⚠️ TOOL FAILED: Failed to spawn claude process: ${err.message}. Do NOT fabricate output — tell the user.`);
           });
         });
       },
