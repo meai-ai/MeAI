@@ -95,14 +95,15 @@ const CITY_COORDS: Record<string, { lat: number; lon: number; tz: string }> = {
 async function callAgent(
   systemPrompt: string,
   userPrompt: string,
-  opts: { maxOutputChars?: number } = {},
+  opts: { maxOutputChars?: number; model?: string; maxTokens?: number } = {},
 ): Promise<string> {
   const text = await claudeText({
     system: systemPrompt,
     prompt: userPrompt,
-    model: "smart",
+    model: opts.model ?? "smart",
     timeoutMs: 300_000,
     maxOutputChars: opts.maxOutputChars ?? 16_000,
+    maxTokens: opts.maxTokens,
   });
   if (!text) throw new Error("Empty response from LLM");
   return text;
@@ -130,7 +131,7 @@ function extractJSON(text: string): unknown {
 async function extractJSONWithRetry(
   systemPrompt: string,
   userPrompt: string,
-  opts: { maxOutputChars?: number } = {},
+  opts: { maxOutputChars?: number; model?: string; maxTokens?: number } = {},
 ): Promise<unknown> {
   const text = await callAgent(systemPrompt, userPrompt, opts);
   try {
@@ -138,7 +139,7 @@ async function extractJSONWithRetry(
   } catch {
     // One retry asking LLM to fix the output
     const fixPrompt = `Your previous response contained invalid JSON. Here it is:\n\n${text}\n\nPlease output ONLY a valid JSON object with the same content. No markdown, no explanation, just the JSON.`;
-    const fixed = await callAgent("You are a JSON fixer. Output only valid JSON.", fixPrompt, { maxOutputChars: opts.maxOutputChars });
+    const fixed = await callAgent("You are a JSON fixer. Output only valid JSON.", fixPrompt, { maxOutputChars: opts.maxOutputChars, model: opts.model, maxTokens: opts.maxTokens });
     return extractJSON(fixed);
   }
 }
@@ -755,16 +756,17 @@ export async function generateCharacter(
   progress(2, totalSteps, "Running sociology, novelist, and director agents in parallel...");
 
   const [sociologyResult, novelistResult, directorResult] = await Promise.all([
-    // Sociology Agent
+    // Sociology Agent — structured JSON, fast model is sufficient
     extractJSONWithRetry(
       SOCIOLOGY_SYSTEM,
       buildSociologyPrompt(inputs, psychologyResult),
+      { model: "fast" },
     ).catch(() => {
       console.log("  (Sociology agent had issues, continuing with partial data)");
       return {} as unknown;
     }),
 
-    // Novelist Agent (pass empty sociology — it runs in parallel)
+    // Novelist Agent — needs creativity, use smart
     extractJSONWithRetry(
       NOVELIST_SYSTEM,
       buildNovelistPrompt(inputs, psychologyResult, {}),
@@ -773,10 +775,11 @@ export async function generateCharacter(
       return {} as unknown;
     }),
 
-    // Director Agent (pass empty sociology/novelist — it runs in parallel)
+    // Director Agent — structured JSON, fast model is sufficient
     extractJSONWithRetry(
       DIRECTOR_SYSTEM,
       buildDirectorPrompt(inputs, psychologyResult, {}, {}),
+      { model: "fast" },
     ).catch(() => {
       console.log("  (Director agent had issues, continuing with partial data)");
       return {} as unknown;
@@ -792,6 +795,7 @@ export async function generateCharacter(
     synthesizedResult = await extractJSONWithRetry(
       SYNTHESIZER_SYSTEM,
       buildSynthesizerPrompt(inputs, psychologyResult, sociologyResult, novelistResult, directorResult),
+      { maxTokens: 16384 },
     );
   } catch (err) {
     throw new Error(`Synthesizer failed (critical): ${err instanceof Error ? err.message : err}`);

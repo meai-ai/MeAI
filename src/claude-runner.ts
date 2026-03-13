@@ -77,6 +77,8 @@ export interface ClaudeRunOptions {
   timeoutMs?: number;
   /** Max output chars to return (default: 16000) */
   maxOutputChars?: number;
+  /** Max output tokens for API calls (default: 4096) */
+  maxTokens?: number;
   /** Trace label — identifies the caller (e.g. "curiosity.pickTopic") */
   label?: string;
   /** Hand-annotated template version (e.g. "v1", "2026-03-07-a") */
@@ -120,6 +122,7 @@ async function runApi(
   model: string,
   timeoutMs: number,
   maxOutputChars: number,
+  maxTokens: number = 16384,
 ): Promise<ClaudeRunResult> {
   if (!apiClient) return { ok: false, text: "", error: "API client not initialized" };
 
@@ -130,7 +133,7 @@ async function runApi(
     const response = await apiClient.messages.create(
       {
         model: modelId(model),
-        max_tokens: 4096,
+        max_tokens: maxTokens,
         system,
         messages: [{ role: "user", content: prompt }],
       },
@@ -199,7 +202,7 @@ export async function claudeRun(opts: ClaudeRunOptions): Promise<ClaudeRunResult
   // Primary path: API via Max OAuth
   if (apiClient) {
     useApi = true;
-    result = await runApi(cleanSystem, cleanPrompt, model, timeoutMs, maxOutputChars);
+    result = await runApi(cleanSystem, cleanPrompt, model, timeoutMs, maxOutputChars, opts.maxTokens);
     if (!result.ok) {
       // API failed — fall back to CLI
       console.warn(`[claude-runner] API failed, falling back to CLI: ${result.error}`);
