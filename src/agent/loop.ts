@@ -717,6 +717,22 @@ export class AgentLoop {
     // Context eval: detect misses from previous turn (before block selection)
     evaluatePreviousTurn(actualText);
 
+    // Style-reaction pairing — check if pending features should be paired with this reply
+    try {
+      const { getPendingStyleFeatures, clearPendingStyleFeatures, isPairingValid,
+              computeUserReaction, recordStyleReactionPair } = await import("../interaction-learning.js");
+      const sessionId = "main";
+      const pending = getPendingStyleFeatures(sessionId);
+      if (pending) {
+        const hasInterveningAssistant = false; // this is the next user message after assistant
+        if (isPairingValid(pending.timestamp, pending.assistantContent, Date.now(), actualText, hasInterveningAssistant)) {
+          const reaction = computeUserReaction(pending.timestamp, pending.assistantContent, Date.now(), actualText);
+          recordStyleReactionPair(pending.features, reaction, 1.0);
+        }
+        clearPendingStyleFeatures(sessionId);
+      }
+    } catch { /* non-fatal */ }
+
     // Record user message for relationship model
     try {
       const hour = new Date().getHours();

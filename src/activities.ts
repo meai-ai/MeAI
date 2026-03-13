@@ -657,6 +657,16 @@ Output only YES or NO.`;
       }
     } catch { /* non-fatal */ }
 
+    // Pending intents — things the character promised to do
+    let intentHint = "";
+    try {
+      const { formatIntentsForSchedule } = await import("./intents.js");
+      const intentsText = formatIntentsForSchedule();
+      if (intentsText) {
+        intentHint = `\nThings you said you would do (consider these first):\n${intentsText}\n`;
+      }
+    } catch { /* non-fatal */ }
+
     // 8.5: Boredom/restlessness detection — count recent 7-day activity types
     let boredomHint = "";
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -685,7 +695,7 @@ Output only YES or NO.`;
           projectsContext: projectsContext ? `Your in-progress projects (can continue):\n${projectsContext}\n` : "",
           recentTitles: recentTitles || "none",
           energyLevel: String(energyLevel), mood,
-          boredomHint, spontaneousHint,
+          boredomHint, spontaneousHint, intentHint,
         })
       : `You are ${char.name}. You have some free time right now.
 
@@ -697,7 +707,7 @@ ${discoveriesText}
 
 ${projectsContext ? `Your in-progress projects (can continue):\n${projectsContext}\n` : ""}
 Recent activities: ${recentTitles || "none"} (try not to repeat the same topic)
-Energy: ${energyLevel}/10, mood: ${mood}${boredomHint}${spontaneousHint}
+Energy: ${energyLevel}/10, mood: ${mood}${boredomHint}${spontaneousHint}${intentHint}
 
 Do you actually feel like doing something right now? No pressure — just do what you genuinely want.
 Could be: continuing a project, diving deeper into a recent discovery, reading a book you've been meaning to read, building a fun side project, systematically studying a topic...
@@ -721,7 +731,43 @@ listen = listen to a podcast, find an episode on a topic that interests you`;
     });
     const parsed = extractJson<{ type: string; topic?: string; reason?: string }>(choice, { type: "" });
 
-    // Case A: she has a specific impulse
+    // Case A.0: Pending intents — character promised to do something, honor it first
+    try {
+      const { getPendingIntents, markScheduled } = await import("./intents.js");
+      const pending = getPendingIntents();
+      if (pending.length > 0) {
+        // Pick highest priority first, then earliest deadline
+        const sorted = [...pending].sort((a, b) => {
+          const prioOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+          const pa = prioOrder[a.priority] ?? 1;
+          const pb = prioOrder[b.priority] ?? 1;
+          if (pa !== pb) return pa - pb;
+          if (a.deadline && b.deadline) return a.deadline.localeCompare(b.deadline);
+          if (a.deadline) return -1;
+          if (b.deadline) return 1;
+          return a.createdAt - b.createdAt;
+        });
+        const intent = sorted[0];
+        const text = intent.what.toLowerCase();
+        const isWatch = /watch|video|youtube|movie|film/i.test(text);
+        const isListen = /podcast|listen|audio/i.test(text);
+        const isCoding = /code|coding|programming|build|develop/i.test(text);
+        const isLearn = /learn|study|research|course/i.test(text);
+        const actType: ActivityType = isWatch ? "watch" : isListen ? "listen" : isCoding ? "vibe_coding" : isLearn ? "learn" : "deep_read";
+        const topic = intent.url ? `${intent.what} (ref: ${intent.url})` : intent.what;
+        // Mark as scheduled so next tick picks a different intent
+        markScheduled(intent.id, pstDateStr());
+        console.log(`[activities] Intent-driven: ${actType} — "${topic}" (priority=${intent.priority})`);
+        return {
+          type: actType,
+          topic,
+          reason: `Fulfilling commitment: ${intent.what}${intent.context ? ` — ${intent.context}` : ""}`,
+          fromSchedule: false,
+        };
+      }
+    } catch { /* intents module may not be initialized */ }
+
+    // Case A: character has a specific impulse (no pending intents)
     if (parsed.type && parsed.type !== "NOTHING" && parsed.topic) {
       const type = parsed.type.toLowerCase() as string;
       const actType: ActivityType =

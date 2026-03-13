@@ -367,6 +367,13 @@ export class WorldEngine {
     // Get current health status for schedule adjustments
     const sickStatus = getCurrentSickStatus();
 
+    // Get pending intents for schedule injection
+    let pendingIntents = "";
+    try {
+      const { formatIntentsForSchedule } = await import("./intents.js");
+      pendingIntents = formatIntentsForSchedule();
+    } catch { /* non-fatal */ }
+
     const schedule = await this.generateSchedule({
       todayStr,
       dayName,
@@ -381,9 +388,27 @@ export class WorldEngine {
       periodPhase,
       sickType: sickStatus.type,
       sickSeverity: sickStatus.severity,
+      pendingIntents,
     });
 
     this.saveCachedSchedule(schedule);
+
+    // Mark intents as scheduled if they appear in the generated schedule
+    try {
+      const { getPendingIntents, markScheduled } = await import("./intents.js");
+      for (const intent of getPendingIntents()) {
+        const normalized = intent.what.replace(/[^\w\s]/g, " ").toLowerCase().replace(/\s+/g, " ").trim();
+        const keywords = normalized.split(/\s+/).filter(w => w.length > 1);
+        const longKw = keywords.filter(w => w.length >= 3);
+        const matched = schedule.blocks.some(b => {
+          const normActivity = b.activity.replace(/[^\w\s]/g, " ").toLowerCase().replace(/\s+/g, " ").trim();
+          const hitLong = longKw.some(kw => normActivity.includes(kw));
+          const hitCount = keywords.filter(kw => normActivity.includes(kw)).length;
+          return hitLong || hitCount >= 2;
+        });
+        if (matched) markScheduled(intent.id, schedule.date);
+      }
+    } catch { /* non-fatal */ }
 
     // Now that we have a watchlist, invalidate market cache so next fetch uses it
     this.marketCache = null;
@@ -412,6 +437,7 @@ export class WorldEngine {
     periodPhase: string;
     sickType: string;
     sickSeverity: number;
+    pendingIntents?: string;
   }): Promise<DailySchedule> {
     const prevContext = ctx.previousSchedule
       ? `\nPrevious day (for continuity):\n${ctx.previousSchedule}\n`
@@ -454,6 +480,10 @@ export class WorldEngine {
       ? `\nFriend interactions: ${ctx.friendState.slice(0, 300)}\n`
       : "";
 
+    const intentContext = ctx.pendingIntents
+      ? `\nThings the character said they would do (fit 0-2 into appropriate time slots, prioritize those with deadlines and high priority; do not displace sleep, meals, commute, or recovery rest):\n${ctx.pendingIntents}\n`
+      : "";
+
     const schedulePrompt = getCharacter().persona.schedule_generator;
     if (!schedulePrompt) {
       // No schedule generation prompt — use defaults
@@ -467,7 +497,7 @@ export class WorldEngine {
     }
     const systemPrompt = renderTemplate(schedulePrompt, undefined, {
       identity: ctx.identity ? ctx.identity.slice(0, 600) : "",
-      prevContext, weatherContext, hobbyContext, friendContext, healthContext,
+      prevContext, weatherContext, hobbyContext, friendContext, healthContext, intentContext,
       recentMemories: ctx.recentMemories || "",
       localEvents: ctx.localEvents || "",
       dayName: ctx.dayName, todayStr: ctx.todayStr,
