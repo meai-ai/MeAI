@@ -104,6 +104,11 @@ async function refreshTokens(tokens: OAuthTokens): Promise<OAuthTokens> {
   });
   if (!res.ok) {
     const errText = await res.text();
+    if (res.status === 401 || res.status === 403 || errText.includes("invalid_grant")) {
+      console.error("[max-oauth] Refresh token expired or revoked. Re-authorize with: npx anthropic-max-router");
+      // Invalidate cached tokens so we fall back to API key
+      cached = null;
+    }
     throw new Error(`[max-oauth] Token refresh failed (${res.status}): ${errText}`);
   }
   const fresh = (await res.json()) as OAuthTokens;
@@ -122,7 +127,16 @@ async function getValidToken(): Promise<string> {
 
   const BUFFER = 5 * 60 * 1000; // refresh 5 min before expiry
   if (Date.now() >= tokens.expires_at - BUFFER) {
-    tokens = await refreshTokens(tokens);
+    try {
+      tokens = await refreshTokens(tokens);
+    } catch (err) {
+      // If refresh fails but token hasn't fully expired, try using it anyway
+      if (Date.now() < tokens.expires_at) {
+        console.warn("[max-oauth] Refresh failed, using existing token:", err instanceof Error ? err.message : err);
+      } else {
+        throw err;
+      }
+    }
   }
   cached = tokens;
   return tokens.access_token;
