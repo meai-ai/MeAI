@@ -5,7 +5,7 @@
  * than to capture noise.
  * - capture → store → show → light schedule injection
  * - No automatic completion detection (v2 will use LLM semantic comparison)
- * - scheduled expired → rollback to pending → expired after 2 schedule cycles
+ * - scheduled expired → rollback to pending → expired after schedule cycle
  */
 
 import path from "node:path";
@@ -207,21 +207,22 @@ export function expireStaleIntents(): void {
       }
     }
 
-    // scheduled + scheduledDate passed +2 days → rollback to pending or expired
+    // scheduled + scheduledDate is yesterday → expire immediately
+    // Most intents are one-shot actions; if they weren't fulfilled on the scheduled day,
+    // they're stale. Only high-priority intents with explicit deadlines survive.
     if (intent.status === "scheduled" && intent.scheduledDate) {
-      const scheduledDate = new Date(intent.scheduledDate + "T00:00:00");
-      const twoDaysAfter = new Date(scheduledDate);
-      twoDaysAfter.setDate(twoDaysAfter.getDate() + 2);
-      if (new Date(todayStr) > twoDaysAfter) {
-        if (intent.scheduleCount >= 2) {
-          intent.status = "expired";
-          changed = true;
-          console.log(`[intents] Expired (2 schedule cycles): "${intent.what}"`);
-        } else {
+      if (intent.scheduledDate < todayStr) {
+        if (intent.priority === "high" && intent.deadline && intent.deadline >= todayStr) {
+          // High-priority with future deadline → rollback to pending for re-scheduling
           intent.status = "pending";
           changed = true;
-          console.log(`[intents] Rolled back to pending: "${intent.what}" (scheduleCount=${intent.scheduleCount})`);
+          console.log(`[intents] Rolled back to pending (high-pri, deadline ${intent.deadline}): "${intent.what}"`);
+        } else {
+          intent.status = "expired";
+          changed = true;
+          console.log(`[intents] Expired (scheduled day passed): "${intent.what}"`);
         }
+        continue;
       }
     }
   }

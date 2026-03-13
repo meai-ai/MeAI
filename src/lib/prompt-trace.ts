@@ -190,8 +190,8 @@ function flushSync(): void {
 }
 
 process.on("beforeExit", flushSync);
-process.on("SIGINT", flushSync);
-process.on("SIGTERM", flushSync);
+process.once("SIGINT", () => { flushSync(); process.kill(process.pid, "SIGINT"); });
+process.once("SIGTERM", () => { flushSync(); process.kill(process.pid, "SIGTERM"); });
 
 // ── Annotate ─────────────────────────────────────────────────────────
 
