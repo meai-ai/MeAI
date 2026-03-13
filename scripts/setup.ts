@@ -78,20 +78,33 @@ This wizard will help you configure your AI companion.
 You'll need about 5 minutes and a Telegram account.
 `);
 
-  // Check for existing config
+  // Load existing config if present (skip already-configured steps)
+  let existingConfig: Record<string, unknown> = {};
   if (fs.existsSync(CONFIG_PATH)) {
-    const answer = await ask("Config already exists. Reconfigure? (y/N) ");
-    if (answer.toLowerCase() !== "y") {
-      console.log("Setup cancelled.");
-      process.exit(0);
-    }
+    try {
+      existingConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+    } catch { /* ignore parse errors, start fresh */ }
   }
 
-  // Collect all values first, write at end (safe against Ctrl+C)
-  const config: Record<string, unknown> = {};
+  // Collect all values — start from existing config
+  const config: Record<string, unknown> = { ...existingConfig };
+
+  // Count what's already configured
+  const alreadySet: string[] = [];
+  if (config.telegramBotToken) alreadySet.push("Telegram Bot Token");
+  if (config.allowedChatId) alreadySet.push("Chat ID");
+  if (config.anthropicApiKey) alreadySet.push("Anthropic API Key");
+  if (config.openaiApiKey) alreadySet.push("OpenAI API Key");
+  if (config.falApiKey) alreadySet.push("Fal.ai API Key");
+
+  if (alreadySet.length > 0) {
+    console.log(`Already configured: ${alreadySet.join(", ")}`);
+    console.log("Skipping those steps. Only missing items will be asked.\n");
+  }
 
   // ── Step 1: Telegram Bot Token ───────────────────────────────────
-  console.log(`
+  if (!config.telegramBotToken) {
+    console.log(`
 --- Step 1/5: Create a Telegram Bot ---
 
 1. Open Telegram and search for @BotFather
@@ -102,13 +115,15 @@ You'll need about 5 minutes and a Telegram account.
 
 Direct link: https://t.me/BotFather
 `);
-  config.telegramBotToken = await askRequired("Paste your bot token: ", (v) => {
-    if (/^\d+:[A-Za-z0-9_-]+$/.test(v)) return null;
-    return "That doesn't look like a valid bot token. It should look like 123456789:ABC...";
-  });
+    config.telegramBotToken = await askRequired("Paste your bot token: ", (v) => {
+      if (/^\d+:[A-Za-z0-9_-]+$/.test(v)) return null;
+      return "That doesn't look like a valid bot token. It should look like 123456789:ABC...";
+    });
+  }
 
   // ── Step 2: Chat ID ──────────────────────────────────────────────
-  console.log(`
+  if (!config.allowedChatId) {
+    console.log(`
 --- Step 2/5: Get Your Chat ID ---
 
 1. Open Telegram and search for @userinfobot
@@ -117,48 +132,89 @@ Direct link: https://t.me/BotFather
 
 Direct link: https://t.me/userinfobot
 `);
-  const chatIdStr = await askRequired("Paste your chat ID: ", (v) => {
-    if (!isNaN(parseInt(v, 10))) return null;
-    return "That should be a number like 123456789.";
-  });
-  config.allowedChatId = parseInt(chatIdStr, 10);
+    const chatIdStr = await askRequired("Paste your chat ID: ", (v) => {
+      if (!isNaN(parseInt(v, 10))) return null;
+      return "That should be a number like 123456789.";
+    });
+    config.allowedChatId = parseInt(chatIdStr, 10);
+  }
 
-  // ── Step 3: Anthropic API Key ────────────────────────────────────
-  console.log(`
---- Step 3/5: Anthropic API Key ---
+  // ── Step 3: LLM Setup (Max OAuth or Anthropic API Key) ──────────
+  if (!config.anthropicApiKey) {
+    console.log(`
+--- Step 3/5: LLM Setup ---
 
-This powers your companion's conversation ability.
+MeAI needs a Claude LLM backend. You have two options:
 
-1. Go to https://console.anthropic.com/
-2. Sign up or log in
-3. Go to Settings > API Keys > Create Key
-4. Copy the key (starts with "sk-ant-")
+  Option A (Recommended): Claude Max subscription ($0 API cost)
+    If you have a Claude Max subscription, MeAI can use it for ALL LLM calls
+    at zero additional cost. Run: npx anthropic-max-router
+    to generate OAuth tokens, then press Enter to skip the API key.
 
-New accounts get $5 free credits — enough for weeks of chatting.
+  Option B: Anthropic API key (pay-per-use)
+    Go to https://console.anthropic.com/ > Settings > API Keys > Create Key.
+    New accounts get $5 free credits.
 `);
-  config.anthropicApiKey = await askRequired("Paste your Anthropic API key: ", (v) => {
-    if (v.length > 20) return null;
-    return "That doesn't look like a valid API key. It should be a long string starting with sk-ant-...";
-  });
-  if (!(config.anthropicApiKey as string).startsWith("sk-ant-")) {
-    console.log("(Warning: key doesn't start with sk-ant- — continuing anyway)\n");
+    const apiKey = await askOptional("Paste your Anthropic API key (or press Enter to use Max OAuth): ");
+    if (apiKey) {
+      config.anthropicApiKey = apiKey;
+      if (!apiKey.startsWith("sk-ant-")) {
+        console.log("(Warning: key doesn't start with sk-ant- — continuing anyway)\n");
+      }
+    } else {
+      console.log("No API key provided — MeAI will use Max OAuth (generate tokens with: npx anthropic-max-router)\n");
+    }
   }
 
   // ── Step 4: Optional API Keys ────────────────────────────────────
-  console.log(`
+  if (!config.openaiApiKey || !config.falApiKey) {
+    console.log(`
 --- Step 4/5: Optional Features ---
 
 These are optional — press Enter to skip any.
 `);
 
-  const openaiKey = await askOptional("OpenAI API key (enables semantic memory search)\n  Get one at https://platform.openai.com/api-keys\n  Paste key or press Enter to skip: ");
-  if (openaiKey) config.openaiApiKey = openaiKey;
+    if (!config.openaiApiKey) {
+      const openaiKey = await askOptional("OpenAI API key (enables semantic memory search)\n  Get one at https://platform.openai.com/api-keys\n  Paste key or press Enter to skip: ");
+      if (openaiKey) config.openaiApiKey = openaiKey;
+      console.log();
+    }
 
-  console.log();
-  const falKey = await askOptional("Fal.ai API key (enables AI-generated selfies)\n  Get one at https://fal.ai/dashboard/keys\n  Paste key or press Enter to skip: ");
-  if (falKey) config.falApiKey = falKey;
+    if (!config.falApiKey) {
+      const falKey = await askOptional("Fal.ai API key (enables AI-generated selfies)\n  Get one at https://fal.ai/dashboard/keys\n  Paste key or press Enter to skip: ");
+      if (falKey) config.falApiKey = falKey;
+    }
+  }
 
   // ── Step 5: Character Setup ──────────────────────────────────────
+  // Skip if character.yaml already exists with a real character name
+  const characterExists = fs.existsSync(CHARACTER_PATH) && (() => {
+    try {
+      const content = fs.readFileSync(CHARACTER_PATH, "utf-8");
+      const nameMatch = content.match(/^name:\s*(.+)$/m);
+      const name = nameMatch?.[1]?.trim();
+      return name && name !== "Your Character Name" && name !== "Alex";
+    } catch { return false; }
+  })();
+
+  if (characterExists) {
+    const content = fs.readFileSync(CHARACTER_PATH, "utf-8");
+    const nameMatch = content.match(/^name:\s*(.+)$/m);
+    charName = nameMatch?.[1]?.trim() ?? "Unknown";
+    const cityMatch = content.match(/^\s+city:\s*(.+)$/m);
+    characterCity = cityMatch?.[1]?.trim() ?? "Unknown";
+    console.log(`\nCharacter already configured: ${charName} (${characterCity})`);
+    const regenAnswer = await ask("Regenerate character? (y/N) ");
+    if (regenAnswer.toLowerCase() !== "y") {
+      // Save config (may have new keys) and print summary
+      fs.mkdirSync(path.join(PROJECT_ROOT, "data"), { recursive: true });
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+      printSummary(charName, characterCity, "existing", config);
+      rl.close();
+      return;
+    }
+  }
+
   console.log(`
 --- Step 5/5: Create Your Character ---
 

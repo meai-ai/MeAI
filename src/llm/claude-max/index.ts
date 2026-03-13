@@ -29,18 +29,13 @@ const provider: LLMProvider = {
   roles: ["conversation", "background", "vision"] as LLMRole[],
 
   init(config: AppConfig): void {
-    if (!config.maxOAuthEnabled) {
-      console.log("[llm:claude-max] Disabled (maxOAuthEnabled is false)");
-      return;
-    }
-
     // initMaxOAuth may already have been called from index.ts, but it's idempotent
     initMaxOAuth(config.statePath, config.maxOAuthTokenPath);
 
     if (isMaxOAuthAvailable()) {
-      client = createAnthropicClient(config.anthropicApiKey);
+      client = createAnthropicClient(config.anthropicApiKey ?? "");
       available = true;
-      console.log("[llm:claude-max] Max OAuth provider ready");
+      console.log("[llm:claude-max] Max OAuth provider ready — $0 cost for all calls");
     } else {
       console.log("[llm:claude-max] Token file not found — provider unavailable");
       console.log("[llm:claude-max] Generate tokens with: npx anthropic-max-router");

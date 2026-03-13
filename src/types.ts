@@ -7,7 +7,7 @@
 export interface AppConfig {
   telegramBotToken: string;
   allowedChatId: number;
-  anthropicApiKey: string;
+  anthropicApiKey?: string;
   openaiApiKey?: string;       // optional — enables GPT routing
   model: string;               // default model string
   openaiModel?: string;        // OpenAI model for GPT path (default: gpt-4o)

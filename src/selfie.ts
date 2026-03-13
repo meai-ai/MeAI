@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
+import { createAnthropicClient, isMaxOAuthAvailable } from "./max-oauth.js";
 import { readJsonSafe, writeJsonAtomic } from "./lib/atomic-file.js";
 import { pstDateStr, getUserTZ } from "./lib/pst-date.js";
 import { claudeText } from "./claude-runner.js";
@@ -500,13 +501,13 @@ export class SelfieEngine {
   private async checkImageQuality(
     imageBuffer: Buffer,
   ): Promise<{ pass: boolean; reason?: string }> {
-    if (!this.config?.anthropicApiKey) {
-      // No API key — skip quality check, assume pass
+    if (!this.config?.anthropicApiKey && !isMaxOAuthAvailable()) {
+      // No API key and no OAuth — skip quality check, assume pass
       return { pass: true };
     }
 
     try {
-      const anthropic = new Anthropic({ apiKey: this.config.anthropicApiKey });
+      const anthropic = createAnthropicClient(this.config?.anthropicApiKey ?? "");
       const base64 = imageBuffer.toString("base64");
 
       // Detect actual image format from magic bytes

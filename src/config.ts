@@ -22,7 +22,7 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 export const ConfigSchema = z.object({
   telegramBotToken: z.string().min(1),
   allowedChatId: z.number().int(),
-  anthropicApiKey: z.string().min(1),
+  anthropicApiKey: z.string().optional().default(""),
   openaiApiKey: z.string().optional(),
   model: z.string().default("claude-sonnet-4-6"),
   openaiModel: z.string().optional(),
@@ -56,8 +56,8 @@ export const ConfigSchema = z.object({
     embedding: z.string().default("anthropic-api"),
     vision: z.string().default("anthropic-api"),
   }).default({}),
-  /** Claude Max OAuth — optional, uses Max subscription for background LLM calls ($0 API cost) */
-  maxOAuthEnabled: z.boolean().default(false),
+  /** Claude Max OAuth — uses Max subscription for ALL LLM calls ($0 API cost). Default: true */
+  maxOAuthEnabled: z.boolean().default(true),
   /** Path to the OAuth token file — defaults to <projectRoot>/.oauth-tokens.json */
   maxOAuthTokenPath: z.string().optional(),
   /** MAIP Protocol — optional, enables federated AI agent networking */
@@ -195,7 +195,7 @@ export function loadConfig(): AppConfig {
   } else {
     console.error(`Config file not found: ${resolved}`);
     console.error(
-      "Run 'npm run setup' to create one, or set TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_ID, and ANTHROPIC_API_KEY environment variables.",
+      "Run 'npm run setup' to create one, or set TELEGRAM_BOT_TOKEN and ALLOWED_CHAT_ID environment variables.",
     );
     process.exit(1);
   }

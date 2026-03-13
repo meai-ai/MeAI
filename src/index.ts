@@ -117,7 +117,7 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   console.log(`Config loaded. State path: ${config.statePath}`);
-  const provider = config.conversationProvider === "openai" ? "OpenAI" : "Claude CLI";
+  const provider = config.conversationProvider === "openai" ? "OpenAI" : "Anthropic API (Max OAuth preferred)";
   console.log(`Conversation: ${provider} (${config.model})`);
 
   let moduleCount = 0;
@@ -135,18 +135,22 @@ async function main(): Promise<void> {
   await track("character", () => initCharacter(config.statePath), true);
 
   // Initialize Max OAuth (token-based auth via Claude Max subscription)
-  if (config.maxOAuthEnabled) {
-    await track("max-oauth", () => {
-      initMaxOAuth(config.statePath, config.maxOAuthTokenPath);
-      if (isMaxOAuthAvailable()) {
-        console.log("[max-oauth] Claude Max subscription active — $0 API cost for background tasks");
-        initClaudeRunnerApi(config.anthropicApiKey);
-      } else {
-        console.log("[max-oauth] Enabled but token file not found — falling back to CLI");
-        console.log("[max-oauth] Generate tokens with: npx anthropic-max-router");
-      }
-    });
-  }
+  // Always initialize — Max OAuth is the preferred path for ALL LLM calls ($0 cost)
+  await track("max-oauth", () => {
+    initMaxOAuth(config.statePath, config.maxOAuthTokenPath);
+    if (isMaxOAuthAvailable()) {
+      console.log("[max-oauth] Claude Max subscription active — $0 API cost for ALL LLM calls");
+      initClaudeRunnerApi(config.anthropicApiKey ?? "");
+    } else if (config.anthropicApiKey) {
+      console.log("[max-oauth] Token file not found — using Anthropic API key as fallback");
+      console.log("[max-oauth] For $0 cost, generate tokens with: npx anthropic-max-router");
+      // Initialize claude-runner with API key directly (no OAuth)
+      initClaudeRunnerApi(config.anthropicApiKey);
+    } else {
+      console.log("[max-oauth] No OAuth tokens and no API key — falling back to CLI");
+      console.log("[max-oauth] Generate tokens with: npx anthropic-max-router");
+    }
+  });
 
   // Initialize prompt trace (JSONL recording of all LLM calls)
   await track("prompt-trace", () => initPromptTrace(config.statePath));

@@ -17,7 +17,7 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const ConfigSchema = z.object({
   telegramBotToken: z.string().min(1),
   allowedChatId: z.number().int(),
-  anthropicApiKey: z.string().min(1),
+  anthropicApiKey: z.string().optional().default(""),
   openaiApiKey: z.string().optional(),
   model: z.string().default("claude-sonnet-4-6"),
   openaiModel: z.string().optional(),
@@ -101,8 +101,13 @@ async function main() {
   if (config.allowedChatId) pass("allowedChatId present");
   else fail("allowedChatId missing");
 
-  if (config.anthropicApiKey) pass("anthropicApiKey present");
-  else fail("anthropicApiKey missing");
+  // Check Max OAuth tokens
+  const oauthTokenPath = path.join(PROJECT_ROOT, ".oauth-tokens.json");
+  const hasOAuth = fs.existsSync(oauthTokenPath);
+
+  if (hasOAuth) pass("Max OAuth tokens present ($0 LLM cost)");
+  else if (config.anthropicApiKey) pass("anthropicApiKey present (pay-per-use)");
+  else fail("No LLM backend: set anthropicApiKey or generate Max OAuth tokens (npx anthropic-max-router)");
 
   // ── 3. Character file ───────────────────────────────────────────
   console.log("\nCharacter:");
@@ -139,29 +144,35 @@ async function main() {
     fail(`Telegram API error: ${(err as Error).message}`);
   }
 
-  // Anthropic
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": config.anthropicApiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1,
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    });
-    if (res.ok) {
-      pass("Anthropic API key valid");
-    } else {
-      const err = await res.json() as { error?: { message?: string } };
-      fail(`Anthropic API: ${err.error?.message ?? res.statusText}`);
+  // Anthropic API key check (only if provided — Max OAuth users may not have one)
+  if (config.anthropicApiKey) {
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": config.anthropicApiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+      if (res.ok) {
+        pass("Anthropic API key valid");
+      } else {
+        const err = await res.json() as { error?: { message?: string } };
+        fail(`Anthropic API: ${err.error?.message ?? res.statusText}`);
+      }
+    } catch (err) {
+      fail(`Anthropic API error: ${(err as Error).message}`);
     }
-  } catch (err) {
-    fail(`Anthropic API error: ${(err as Error).message}`);
+  } else if (hasOAuth) {
+    pass("Using Max OAuth (no API key needed)");
+  } else {
+    skip("No Anthropic API key — using CLI fallback");
   }
 
   // ── 5. Optional features ────────────────────────────────────────

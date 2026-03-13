@@ -1,8 +1,7 @@
 /**
  * Claude Runner — unified LLM call layer for background tasks.
  *
- * Primary path (when maxOAuthEnabled): Anthropic API via Max OAuth ($0 cost).
- * Fallback / default: Claude Code CLI (`claude --print`).
+ * Fallback chain: Max OAuth API ($0) -> Anthropic API key -> Claude Code CLI.
  *
  * Usage:
  *   const text = await claudeRun({ system: "...", prompt: "...", model: "fast" });
@@ -100,12 +99,18 @@ let apiClient: Anthropic | null = null;
 
 /**
  * Initialize the API-based runner. Call once at startup after initMaxOAuth().
- * If Max OAuth is available, background tasks will use the API instead of CLI.
+ * Tries Max OAuth first (free), falls back to Anthropic API key.
+ * If neither is available, background tasks will use Claude CLI.
  */
 export function initClaudeRunnerApi(apiKey: string): void {
   if (isMaxOAuthAvailable()) {
+    // Max OAuth available — createAnthropicClient will use OAuth fetch wrapper
     apiClient = createAnthropicClient(apiKey);
-    console.log("[claude-runner] API path enabled (Max OAuth)");
+    console.log("[claude-runner] API path enabled (Max OAuth — $0 cost)");
+  } else if (apiKey) {
+    // No OAuth tokens but we have an API key — createAnthropicClient falls back to plain key
+    apiClient = createAnthropicClient(apiKey);
+    console.log("[claude-runner] API path enabled (Anthropic API key)");
   }
 }
 

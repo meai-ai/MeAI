@@ -16,8 +16,9 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { claudeRun, claudeText } from "../claude-runner.js";
+import { createAnthropicClient, isMaxOAuthAvailable } from "../max-oauth.js";
 import { runWithTrace } from "../lib/prompt-trace.js";
 import { generateTurnTraceId, TurnTraceBuilder } from "../lib/turn-trace.js";
 /** Generic reply result — decoupled from Telegraf's Message type. */
@@ -530,6 +531,7 @@ type OpenAIClient = any;
 
 export class AgentLoop {
   private openai: OpenAIClient | null = null;
+  private anthropic: Anthropic | null = null;
   private config: AppConfig;
   private session: SessionManager;
   private tools: ToolRegistry;
@@ -587,10 +589,23 @@ export class AgentLoop {
     this.deleteMessageFn = fn;
   }
 
+  /** Trace metadata captured by callAnthropic for the conversation trace */
+  private _lastStopReason?: string;
+  private _lastUsage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+
   constructor(config: AppConfig, session: SessionManager, tools: ToolRegistry, curiosity?: CuriosityEngine) {
     this.config = config;
     this.session = session;
     this.tools = tools;
+
+    // Initialize Anthropic client via Max OAuth or API key
+    // Max OAuth: $0 cost via Claude Max subscription (preferred)
+    // API key: standard pay-per-use (fallback)
+    if (isMaxOAuthAvailable() || config.anthropicApiKey) {
+      this.anthropic = createAnthropicClient(config.anthropicApiKey ?? "", { maxRetries: 0 });
+      const source = isMaxOAuthAvailable() ? "Max OAuth" : "API key";
+      console.log(`[loop] Anthropic client initialized (${source})`);
+    }
 
     // Lazily load OpenAI so missing package doesn't crash the bot
     if (config.openaiApiKey) {
@@ -688,14 +703,18 @@ export class AgentLoop {
     const turnTraceId = generateTurnTraceId();
     const traceBuilder = new TurnTraceBuilder(turnTraceId);
 
-    // Provider routing: Claude CLI is default (free with Max subscription).
-    // "gpt:" prefix forces OpenAI, "claude:" forces Claude CLI for a single message.
+    // Provider routing: Anthropic API is default (Max OAuth = free, API key = paid).
+    // "gpt:" prefix forces OpenAI, "cli:" prefix forces Claude CLI for a single message.
     // conversationProvider config sets the persistent default.
     let actualText = text;
     let useOpenAI = this.config.conversationProvider === "openai" || isOpenAIModel(this.config.model);
+    let useCli = false;
     if (text.toLowerCase().startsWith("gpt:")) {
       actualText = text.slice(4).trimStart();
       useOpenAI = true;
+    } else if (text.toLowerCase().startsWith("cli:")) {
+      actualText = text.slice(4).trimStart();
+      useCli = true;
     } else if (text.toLowerCase().startsWith("claude:")) {
       actualText = text.slice(7).trimStart();
       useOpenAI = false;
@@ -744,6 +763,10 @@ export class AgentLoop {
     if (useOpenAI && !this.openai) {
       await sendReply("OpenAI not available. Install the openai package and add openaiApiKey to config.json, or remove the gpt: prefix.");
       return;
+    }
+    if (!useOpenAI && !useCli && !this.anthropic) {
+      // No Anthropic client — fall back to CLI
+      useCli = true;
     }
 
     // Append user message to transcript
@@ -1132,8 +1155,8 @@ export class AgentLoop {
           toolCalls.push(...result.toolCalls);
         } catch (err) {
           if (isQuotaError(err)) {
-            // OpenAI credit exhausted — fall back to Claude CLI silently
-            console.warn("[loop] OpenAI quota exhausted, falling back to Claude CLI");
+            // OpenAI credit exhausted — fall back to Anthropic API
+            console.warn("[loop] OpenAI quota exhausted, falling back to Anthropic API");
             useOpenAI = false;
             this._fallbackModel = "claude-haiku-4-5-20251001";
           } else {
@@ -1141,8 +1164,51 @@ export class AgentLoop {
           }
         }
       }
-      if (!useOpenAI) {
-        // ── Claude Code path (via claude --print) — default ──────────────
+      if (!useOpenAI && !useCli && this.anthropic) {
+        // ── Anthropic API path (default — Max OAuth = $0, API key = paid) ──
+        try {
+          const media: MediaCallbacks = {
+            sendPhoto: this.sendPhotoFn ? (photo: Buffer, caption?: string) => this.sendPhotoFn!(photo, caption) : null,
+            sendVoice: this.sendVoiceFn ? (audio: Buffer, caption?: string) => this.sendVoiceFn!(audio, caption) : null,
+            sendVideo: this.sendVideoFn ? (video: Buffer, caption?: string) => this.sendVideoFn!(video, caption) : null,
+            sendAudio: this.sendAudioFn ? (audio: Buffer, title?: string, performer?: string) => this.sendAudioFn!(audio, title, performer) : null,
+          };
+          const onUsage: OnUsageFn = (model, source, u) => {
+            this.usage.record(model, source, u);
+          };
+          // Wrap sendReply to normalize the return type for routerCallAnthropic
+          const wrappedSendReply = async (text: string) => {
+            const result = await activeSendReply(text);
+            return { messageId: getMsgId(result) };
+          };
+          const result = await routerCallAnthropic(
+            this.anthropic!, systemPrompt, "", currentMessages, msgId,
+            activeEditReply, wrappedSendReply, sendTyping, this.tools, media, onUsage, imageData,
+          );
+          accumulated = result.text;
+          toolCalls.push(...result.toolCalls);
+          this._lastStopReason = result.stopReason;
+          this._lastUsage = result.usage;
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const isOverloaded = errMsg.includes("overloaded") || errMsg.includes("529") ||
+            errMsg.includes("ECONNRESET") || errMsg.includes("socket hang up") ||
+            errMsg.includes("after retries");
+          if (err instanceof Anthropic.RateLimitError) {
+            // Rate limited — fall back to CLI immediately
+            log.warn("Anthropic rate limit hit, falling back to CLI");
+            useCli = true;
+          } else if (isOverloaded) {
+            // Anthropic overloaded — fall back to CLI
+            log.warn("Anthropic API exhausted retries, falling back to CLI");
+            useCli = true;
+          } else {
+            throw err;
+          }
+        }
+      }
+      if (useCli || (!useOpenAI && !this.anthropic)) {
+        // ── Claude CLI path (via claude --print) — fallback ──────────────
         const result = await this.callClaudeCode(systemPrompt, currentMessages, msgId, activeEditReply, activeSendReply, sendTyping, imageData);
         accumulated = result.text;
         toolCalls.push(...result.toolCalls);
