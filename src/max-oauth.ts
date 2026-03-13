@@ -92,7 +92,15 @@ function saveTokens(tokens: OAuthTokens): void {
   fs.writeFileSync(tokenPath, JSON.stringify(tokens, null, 2));
 }
 
+/** How long to suppress retry after an invalid_grant error. */
+let invalidGrantUntil = 0;
+
 async function refreshTokens(tokens: OAuthTokens): Promise<OAuthTokens> {
+  // Don't spam the token endpoint after an invalid_grant — wait 10 min
+  if (Date.now() < invalidGrantUntil) {
+    throw new Error("[max-oauth] Refresh token invalid — waiting for manual re-auth. Run: npx tsx scripts/oauth-login.ts");
+  }
+
   const res = await globalThis.fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -104,10 +112,10 @@ async function refreshTokens(tokens: OAuthTokens): Promise<OAuthTokens> {
   });
   if (!res.ok) {
     const errText = await res.text();
-    if (res.status === 401 || res.status === 403 || errText.includes("invalid_grant")) {
-      console.error("[max-oauth] Refresh token expired or revoked. Re-authorize with: npx anthropic-max-router");
-      // Invalidate cached tokens so we fall back to API key
+    if (errText.includes("invalid_grant")) {
+      invalidGrantUntil = Date.now() + 10 * 60 * 1000;
       cached = null;
+      console.error("[max-oauth] ⚠️ Refresh token expired/revoked. Run: npx tsx scripts/oauth-login.ts to re-authenticate. Suppressing retries for 10 min.");
     }
     throw new Error(`[max-oauth] Token refresh failed (${res.status}): ${errText}`);
   }
@@ -117,6 +125,7 @@ async function refreshTokens(tokens: OAuthTokens): Promise<OAuthTokens> {
   fresh.created_at = new Date().toISOString();
   saveTokens(fresh);
   cached = fresh;
+  invalidGrantUntil = 0;
   console.log("[max-oauth] Token refreshed, expires in", Math.round(fresh.expires_in / 60), "min");
   return fresh;
 }
@@ -127,16 +136,7 @@ async function getValidToken(): Promise<string> {
 
   const BUFFER = 5 * 60 * 1000; // refresh 5 min before expiry
   if (Date.now() >= tokens.expires_at - BUFFER) {
-    try {
-      tokens = await refreshTokens(tokens);
-    } catch (err) {
-      // If refresh fails but token hasn't fully expired, try using it anyway
-      if (Date.now() < tokens.expires_at) {
-        console.warn("[max-oauth] Refresh failed, using existing token:", err instanceof Error ? err.message : err);
-      } else {
-        throw err;
-      }
-    }
+    tokens = await refreshTokens(tokens);
   }
   cached = tokens;
   return tokens.access_token;
