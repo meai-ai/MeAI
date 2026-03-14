@@ -10,6 +10,7 @@ import type { AppConfig } from "../types.js";
 import type { Channel } from "./types.js";
 import { TelegramChannel } from "./telegram.js";
 import { DiscordChannel } from "./discord.js";
+import { TelegramGroupChannel } from "./telegram-group.js";
 
 /**
  * Create a channel instance based on config.
@@ -21,6 +22,8 @@ export function createChannel(config: AppConfig): Channel {
   switch (channelType) {
     case "telegram":
       return new TelegramChannel(config);
+    case "telegram-group":
+      return new TelegramGroupChannel(config);
     case "discord":
       return new DiscordChannel(config);
     default:

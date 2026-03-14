@@ -1115,6 +1115,17 @@ export class AgentLoop {
       blocks.push({ id: "outfit", text: `${s().headers.wearing_today}: ${outfit}`, keywords: ["wear", "clothes", "outfit"], alwaysInclude: false, priority: 11 });
     }
 
+    // ── Researcher self-awareness (if running as researcher bot) ──
+    if (this.config.botName) {
+      try {
+        const { formatSelfModelContext } = await import("../researcher/self-model.js");
+        const selfCtx = formatSelfModelContext();
+        if (selfCtx) {
+          blocks.push({ id: "self-awareness", text: selfCtx, keywords: ["confidence", "review", "propose", "implement", "belief"], alwaysInclude: true, priority: 2 });
+        }
+      } catch { /* self-model not initialized */ }
+    }
+
     // ── Select relevant blocks based on recent conversation ──
     const recentMsgs = messages.slice(-5)
       .filter(m => m.role === "user")

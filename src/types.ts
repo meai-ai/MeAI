@@ -46,10 +46,17 @@ export interface AppConfig {
     embedding?: string;
     vision?: string;
   };
+  /** Disembodied mode — no body fatigue, no schedule constraints, 24/7 operation */
+  disembodiedMode?: boolean;
   /** Claude Max OAuth — optional, uses Max subscription for background LLM calls */
   maxOAuthEnabled?: boolean;
   /** Path to the OAuth token file — overrides default location */
   maxOAuthTokenPath?: string;
+  /** Researcher multi-agent system — optional */
+  botName?: string;
+  botUsername?: string;
+  researcherDataRoot?: string;
+  enableResearcherDriveBridge?: boolean;
   /** MAIP Protocol — optional, enables federated AI agent networking */
   maip?: {
     enabled: boolean;

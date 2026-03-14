@@ -96,6 +96,10 @@ import { initResearch, ResearchEngine } from "./research.js";
 import { initSelfNarrative } from "./self-narrative.js";
 import { initRelationalImpact } from "./relational-impact.js";
 import { initMaxOAuth, isMaxOAuthAvailable } from "./max-oauth.js";
+import { researcherRecovery } from "./researcher/recovery.js";
+import { initBrainstemBridge } from "./researcher/brainstem-bridge.js";
+import { startOmegaMonitor } from "./researcher/omega-monitor.js";
+import { startMergeDetector } from "./researcher/merge-detector.js";
 import { initClaudeRunnerApi } from "./claude-runner.js";
 import { initTurnDirective } from "./agent/turn-directive.js";
 import { initReconsolidationProposals } from "./memory/reconsolidation.js";
@@ -133,6 +137,17 @@ async function main(): Promise<void> {
 
   // Critical modules — crash on failure
   await track("character", () => initCharacter(config.statePath), true);
+
+  // Researcher recovery — runs BEFORE skill loader, releases expired leases,
+  // cleans orphan branches, acquires instance lock. Skips if botName not set.
+  let researcherPaused = false;
+  if (config.botName) {
+    const { proceed } = await researcherRecovery(config);
+    if (!proceed) {
+      researcherPaused = true;
+      console.log(`[researcher] ${config.botName} in paused mode — heartbeat only, no actions`);
+    }
+  }
 
   // Initialize Max OAuth (token-based auth via Claude Max subscription)
   // Always initialize — Max OAuth is the preferred path for ALL LLM calls ($0 cost)
@@ -218,6 +233,11 @@ async function main(): Promise<void> {
   await track("research", () => initResearch(config.statePath));
   await track("turn-directive", () => initTurnDirective(config.statePath));
   await track("reconsolidation", () => initReconsolidationProposals(config.statePath));
+
+  // Brainstem event bridge — connects research workflow to brainstem signals
+  if (config.botName && config.enableResearcherDriveBridge) {
+    await track("brainstem-bridge", () => initBrainstemBridge(config));
+  }
 
   // Discover and initialize extensible registries (all 5 axes)
   await Promise.all([
@@ -387,6 +407,12 @@ async function main(): Promise<void> {
   watchdog.setHeartbeat(heartbeat);
   heartbeat.start();
   watchdog.start();
+
+  // Researcher monitors — only for researcher bots
+  if (config.botName) {
+    startOmegaMonitor(config, channel);  // Only active for Omega
+    startMergeDetector(config.botName, process.cwd()); // Only active for researchers
+  }
 
   const optimizer = new PromptOptimizer(config);
   optimizer.start();

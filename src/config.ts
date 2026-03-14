@@ -56,10 +56,17 @@ export const ConfigSchema = z.object({
     embedding: z.string().default("anthropic-api"),
     vision: z.string().default("anthropic-api"),
   }).default({}),
+  /** Disembodied mode — no body fatigue, no schedule constraints, 24/7 operation. Default: false */
+  disembodiedMode: z.boolean().default(false),
   /** Claude Max OAuth — uses Max subscription for ALL LLM calls ($0 API cost). Default: true */
   maxOAuthEnabled: z.boolean().default(true),
   /** Path to the OAuth token file — defaults to <projectRoot>/.oauth-tokens.json */
   maxOAuthTokenPath: z.string().optional(),
+  /** Researcher multi-agent system — bot identity and shared coordination */
+  botName: z.string().optional(),
+  botUsername: z.string().optional(),
+  researcherDataRoot: z.string().optional().default("/Users/allen/Documents/MeAI_data"),
+  enableResearcherDriveBridge: z.boolean().optional().default(true),
   /** MAIP Protocol — optional, enables federated AI agent networking */
   maip: z.object({
     enabled: z.boolean().default(false),
@@ -169,7 +176,83 @@ function getEnvOverrides(): Record<string, unknown> {
   if (process.env.MOMENTS_CHANNEL_ID) overrides.momentsChannelId = process.env.MOMENTS_CHANNEL_ID;
   if (process.env.MAX_OAUTH_ENABLED) overrides.maxOAuthEnabled = process.env.MAX_OAUTH_ENABLED === "true";
   if (process.env.MAX_OAUTH_TOKEN_PATH) overrides.maxOAuthTokenPath = process.env.MAX_OAUTH_TOKEN_PATH;
+  if (process.env.MEAI_BOT_NAME) overrides.botName = process.env.MEAI_BOT_NAME;
+  if (process.env.MEAI_DATA_ROOT) overrides.researcherDataRoot = process.env.MEAI_DATA_ROOT;
   return overrides;
+}
+
+// ── Researcher Path Resolver ──────────────────────────────────────
+
+export interface ResearcherPaths {
+  botDataDir: string;
+  botStateDir: string;
+  sharedState: string;
+  agenda: string;
+  messageClaims: string;
+  globalMode: string;
+  modeChangelog: string;
+  statusDir: string;
+  botStatus: string;
+  watchdogLog: string;
+  worktree: string;
+  logFile: string;
+  lockFile: string;
+}
+
+/**
+ * Derive all researcher-related paths from researcherDataRoot + botName.
+ * Returns null if botName is not set (non-researcher mode).
+ */
+export function getResearcherPaths(config: AppConfig): ResearcherPaths | null {
+  if (!config.botName) return null;
+  const root = resolveHome(config.researcherDataRoot ?? "/Users/allen/Documents/MeAI_data");
+  const bot = config.botName.toLowerCase();
+  return {
+    botDataDir: path.join(root, bot),
+    botStateDir: path.join(root, bot, "data"),
+    sharedState: path.join(root, "shared-state"),
+    agenda: path.join(root, "shared-state", "research-agenda.json"),
+    messageClaims: path.join(root, "shared-state", "message-claims"),
+    globalMode: path.join(root, "shared-state", "global-mode.json"),
+    modeChangelog: path.join(root, "shared-state", "mode-changelog.jsonl"),
+    statusDir: path.join(root, "shared-state", "status"),
+    botStatus: path.join(root, "shared-state", "status", `${bot}.json`),
+    watchdogLog: path.join(root, "shared-state", "watchdog-log.jsonl"),
+    worktree: path.join(root, "worktrees", bot),
+    logFile: path.join(root, "logs", `${bot}.log`),
+    lockFile: path.join(root, bot, "run.lock"),
+  };
+}
+
+/**
+ * Ensure researcher shared-state directories exist.
+ * Called during startup when botName is configured.
+ */
+export function ensureResearcherDirectories(paths: ResearcherPaths): void {
+  const dirs = [
+    paths.botDataDir,
+    paths.botStateDir,
+    paths.sharedState,
+    paths.messageClaims,
+    paths.statusDir,
+    path.dirname(paths.logFile),
+  ];
+  for (const dir of dirs) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+let _config: AppConfig | null = null;
+
+/** Get the loaded config singleton. Must call loadConfig() first. */
+export function getConfig(): AppConfig {
+  if (!_config) throw new Error("Config not loaded yet — call loadConfig() first");
+  return _config;
+}
+
+/** Check if disembodied mode is enabled. Safe to call before config is loaded (returns false). */
+export function isDisembodied(): boolean {
+  return _config?.disembodiedMode ?? false;
 }
 
 export function loadConfig(): AppConfig {
@@ -221,5 +304,12 @@ export function loadConfig(): AppConfig {
   ensureDirectories(config.statePath);
   seedDefaults(config.statePath);
 
+  // If running as a researcher bot, ensure shared-state directories exist
+  const rPaths = getResearcherPaths(config);
+  if (rPaths) {
+    ensureResearcherDirectories(rPaths);
+  }
+
+  _config = config;
   return config;
 }
