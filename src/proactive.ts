@@ -145,7 +145,10 @@ export class ProactiveScheduler {
   }
 
   private async loop(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped) {
+      console.log("[proactive] loop: stopped=true, exiting loop");
+      return;
+    }
     try {
       const sent = await this.maybeReachOut();
       // After sending: 20-45 min gap; after skip: try again in 15-30 min (with relationship multiplier)
@@ -198,7 +201,10 @@ export class ProactiveScheduler {
 
     // Gate on relationship model — respect user's active hours
     try {
-      if (!isGoodTimeToReachOut(userTime.getHours())) return false;
+      if (!isGoodTimeToReachOut(userTime.getHours())) {
+        console.log(`[proactive] _doReachOut skipped: isGoodTimeToReachOut=false (hour=${userTime.getHours()})`);
+        return false;
+      }
     } catch { /* non-fatal, fall through */ }
 
     // Reset daily counter on new day
