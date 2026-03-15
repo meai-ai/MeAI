@@ -17,6 +17,7 @@ import { getSkillDiscoveryTools } from "../evolution/skill-discovery.js";
 import { getNotificationTools } from "../notifications.js";
 import { moduleRegistry } from "../modules/registry.js";
 import { getCharacterUpdateTools } from "../character.js";
+import { getEmotionFeedbackTools } from "../emotion.js";
 
 /**
  * Callbacks that the tool registry needs to send Telegram messages
@@ -136,6 +137,11 @@ export class ToolRegistry {
 
     // Character tools: update_character + confirm_character_update (always loaded)
     for (const tool of getCharacterUpdateTools(config)) {
+      this.register(tool);
+    }
+
+    // Emotion feedback tool: real-time conversation-driven mood shifts (always loaded)
+    for (const tool of getEmotionFeedbackTools()) {
       this.register(tool);
     }
 
