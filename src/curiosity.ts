@@ -107,6 +107,15 @@ const DEEP_READ_CHARS = 8000; // deep dives read 8K chars per page (vs 3K shallo
 /** Entropy floor — below this, diversity enforcement kicks in. */
 const ACTIVATION_ENTROPY_FLOOR = 0.3;
 
+// ── Module-level singleton ───────────────────────────────────────────
+
+let _instance: CuriosityEngine | null = null;
+
+/** Get the singleton CuriosityEngine instance (null if not yet created). */
+export function getCuriosityInstance(): CuriosityEngine | null {
+  return _instance;
+}
+
 // ── CuriosityEngine ──────────────────────────────────────────────────
 
 export class CuriosityEngine {
@@ -120,6 +129,7 @@ export class CuriosityEngine {
 
   constructor(config: AppConfig) {
     this.config = config;
+    _instance = this;
   }
 
   /** Give the curiosity engine access to X for real-time info. */
