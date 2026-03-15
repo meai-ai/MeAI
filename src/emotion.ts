@@ -1591,6 +1591,54 @@ export function getActiveThreads(): string[] {
   return _singleton!.getActiveThreads();
 }
 
+// ── Emotion Feedback Tool (for agent tool registry) ─────────────────
+
+import type { ToolDefinition } from "./types.js";
+
+export function getEmotionFeedbackTools(): ToolDefinition[] {
+  return [
+    {
+      name: "emotion_feedback",
+      description:
+        "Nudge the character's emotional state based on the user's conversational tone. " +
+        "Call this when the user's messages carry emotional weight — comfort, encouragement, " +
+        "hostility, criticism, celebration, etc. The shift is constrained to predefined tiers " +
+        "and capped per session, so it cannot be over-driven.\n" +
+        "Tiers: strong_positive (+2), mild_positive (+1), mild_negative (-1), strong_negative (-2).\n" +
+        "Do NOT call on neutral/informational messages. Only call when genuine emotional content is present.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tier: {
+            type: "string",
+            enum: ["strong_positive", "mild_positive", "mild_negative", "strong_negative"],
+            description: "Predefined intensity tier — pick the one that best matches the user's emotional tone",
+          },
+          cause: {
+            type: "string",
+            description: "Brief description of what the user said/did that warrants the shift (e.g. 'user offered warm encouragement about work stress')",
+          },
+        },
+        required: ["tier", "cause"],
+      },
+      execute: async (input: Record<string, unknown>): Promise<string> => {
+        if (!_singleton) return "Emotion engine not initialized";
+        const tier = input.tier as ConversationDeltaTier;
+        const cause = input.cause as string;
+        if (!CONVERSATION_DELTA_TIERS.hasOwnProperty(tier)) {
+          return `Invalid tier "${tier}". Must be one of: ${Object.keys(CONVERSATION_DELTA_TIERS).join(", ")}`;
+        }
+        const applied = _singleton.applyConversationDelta(tier, cause);
+        if (applied === 0) {
+          return "No shift applied — session cap reached or window expired. The character's emotional state is stable.";
+        }
+        const direction = applied > 0 ? "positive" : "negative";
+        return `Emotional shift applied: ${applied > 0 ? "+" : ""}${applied} (${direction}). The character's mood will reflect this in subsequent responses.`;
+      },
+    },
+  ];
+}
+
 // ── Weekly Climate ───────────────────────────────────────────────────
 
 export interface WeeklyClimate {
