@@ -79,6 +79,16 @@ export interface Discovery {
   deepInsights?: string;
   /** Associated care topic ID (if this exploration was for user's expressed need) */
   careTopicId?: string;
+  /** User engagement feedback — tracks 'expanded discussion' events passively */
+  userFeedback?: DiscoveryFeedback;
+}
+
+/** Passive feedback record for a single Discovery. */
+export interface DiscoveryFeedback {
+  /** Number of times the user expanded discussion on this discovery's topic */
+  discussionCount: number;
+  /** Timestamps of each recorded engagement event */
+  engagedAt: number[];
 }
 
 interface CuriosityState {
