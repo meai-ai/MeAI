@@ -1267,7 +1267,16 @@ Classification:`,
 
     if (matched > 0) {
       this.saveState(state);
-      log.info(`recorded discussion engagement: ${matched} discoveries matched from ${topics.length} topics`);
+      // Coverage stats: how many share-worthy discoveries have any feedback
+      const shareWorthy = state.discoveries.filter(d => d.shareWorthy && now - d.timestamp < DISCOVERY_MAX_AGE);
+      const withFeedback = shareWorthy.filter(d => d.userFeedback && d.userFeedback.discussionCount > 0);
+      const totalEngagements = withFeedback.reduce((sum, d) => sum + d.userFeedback!.discussionCount, 0);
+      const categories = new Set(withFeedback.map(d => d.category));
+      log.info(
+        `recorded discussion engagement: ${matched} discoveries matched from ${topics.length} topics | ` +
+        `coverage: ${withFeedback.length}/${shareWorthy.length} share-worthy have feedback, ` +
+        `${totalEngagements} total engagements across ${categories.size} categories`
+      );
     }
   }
 

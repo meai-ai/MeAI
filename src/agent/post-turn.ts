@@ -580,6 +580,24 @@ Extraction rules:
       } catch { log.warn("relational observation skipped (module not available)"); safeIncrementError("post-turn", "relational_observation"); }
     }
 
+    // Dispatch: discovery engagement feedback — record when user discusses topics
+    // related to recent curiosity discoveries (positive-only signal collection)
+    {
+      const discussionTopics: string[] = [
+        ...(parsed.episode?.topics ?? []),
+        ...(parsed.allenState?.focuses ?? []),
+      ].filter((t: string) => t && t.length > 1);
+      if (discussionTopics.length > 0) {
+        try {
+          const { getCuriosityInstance } = await import("../curiosity.js");
+          const engine = getCuriosityInstance();
+          if (engine) {
+            engine.recordDiscussionEngagement(discussionTopics);
+          }
+        } catch { safeIncrementError("post-turn", "discovery_engagement"); }
+      }
+    }
+
     // Dispatch: response quality (log for now, will feed into learning)
     if (parsed.responseQuality) {
       const rq = parsed.responseQuality;
