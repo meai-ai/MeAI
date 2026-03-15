@@ -104,6 +104,25 @@ interface EmotionJournal {
   contagion?: ContagionEvent[];
   /** 5.4: Active rumination state */
   rumination?: RuminationState;
+  /** Conversation delta accumulator — tracks cumulative shift within a session window */
+  conversationDelta?: ConversationDeltaAccumulator;
+}
+
+/** Predefined tiers for conversation-driven valence shifts */
+export type ConversationDeltaTier =
+  | "strong_positive"   // +2: sustained comfort, celebration, deep encouragement
+  | "mild_positive"     // +1: casual encouragement, jokes, warm chat
+  | "mild_negative"     // -1: mild criticism, dismissiveness, passive aggression
+  | "strong_negative";  // -2: aggressive content, insults, harsh confrontation
+
+/** Session-scoped accumulator preventing emotional manipulation */
+interface ConversationDeltaAccumulator {
+  /** When this accumulator window started */
+  windowStart: number;
+  /** Cumulative valence shift in this window */
+  cumulativeShift: number;
+  /** Number of delta events applied */
+  eventCount: number;
 }
 
 /** Tracks emotional contagion from the user's shared emotions */
