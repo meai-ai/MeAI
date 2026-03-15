@@ -79,6 +79,28 @@ export interface Discovery {
   deepInsights?: string;
   /** Associated care topic ID (if this exploration was for user's expressed need) */
   careTopicId?: string;
+  /** User engagement feedback — tracks 'expanded discussion' events passively */
+  userFeedback?: DiscoveryFeedback;
+}
+
+/** Passive feedback record for a single Discovery. */
+export interface DiscoveryFeedback {
+  /** Number of times the user expanded discussion on this discovery's topic */
+  discussionCount: number;
+  /** Timestamps of each recorded engagement event */
+  engagedAt: number[];
+  /** Which user topics triggered each match — enables noise audit */
+  matchedTopics: string[];
+}
+
+/** Per-category engagement summary — data basis for future weight adjustment. */
+export interface CategoryEngagement {
+  category: string;
+  totalDiscoveries: number;
+  shareWorthyCount: number;
+  engagedCount: number;
+  totalEngagements: number;
+  engagementRate: number; // engagedCount / shareWorthyCount
 }
 
 interface CuriosityState {
@@ -97,6 +119,15 @@ const DEEP_READ_CHARS = 8000; // deep dives read 8K chars per page (vs 3K shallo
 /** Entropy floor — below this, diversity enforcement kicks in. */
 const ACTIVATION_ENTROPY_FLOOR = 0.3;
 
+// ── Module-level singleton ───────────────────────────────────────────
+
+let _instance: CuriosityEngine | null = null;
+
+/** Get the singleton CuriosityEngine instance (null if not yet created). */
+export function getCuriosityInstance(): CuriosityEngine | null {
+  return _instance;
+}
+
 // ── CuriosityEngine ──────────────────────────────────────────────────
 
 export class CuriosityEngine {
@@ -110,6 +141,7 @@ export class CuriosityEngine {
 
   constructor(config: AppConfig) {
     this.config = config;
+    _instance = this;
   }
 
   /** Give the curiosity engine access to X for real-time info. */
@@ -1210,6 +1242,112 @@ Classification:`,
 
   private getStatePath(): string {
     return path.join(this.config.statePath, "curiosity.json");
+  }
+
+  /**
+   * Record that the user expanded discussion on topics related to discoveries.
+   * Called when a substantive user reply matches recent share-worthy discoveries.
+   * Only records positive engagement — silence/ignoring is NOT treated as negative signal.
+   */
+  recordDiscussionEngagement(topics: string[]): void {
+    if (topics.length === 0) return;
+    const state = this.loadState();
+    const now = Date.now();
+    // Filter out very short topics (≤2 chars) to reduce noise
+    const topicsLower = topics
+      .map(t => t.toLowerCase().trim())
+      .filter(t => t.length > 2);
+    if (topicsLower.length === 0) return;
+    let matched = 0;
+
+    for (const d of state.discoveries) {
+      if (!d.shareWorthy) continue;
+      if (now - d.timestamp > DISCOVERY_MAX_AGE) continue;
+
+      // Match: topic overlaps with discovery query or category (word-aware)
+      const queryWords = d.query.toLowerCase().split(/\s+/);
+      const catLower = d.category.toLowerCase();
+      const hitTopics: string[] = [];
+      for (const t of topicsLower) {
+        // Category match: topic contains or is contained by category
+        if (t.includes(catLower) || catLower.includes(t)) {
+          hitTopics.push(t);
+          continue;
+        }
+        // Query match: topic appears as substring but must match a meaningful portion
+        // Require topic length ≥ 3 and either appears as whole word or covers ≥40% of a query word
+        const inQuery = queryWords.some(w => w.includes(t) || t.includes(w));
+        if (inQuery) {
+          hitTopics.push(t);
+        }
+      }
+      if (hitTopics.length === 0) continue;
+
+      if (!d.userFeedback) {
+        d.userFeedback = { discussionCount: 0, engagedAt: [], matchedTopics: [] };
+      }
+      // Backfill matchedTopics for older feedback records
+      if (!d.userFeedback.matchedTopics) {
+        d.userFeedback.matchedTopics = [];
+      }
+      d.userFeedback.discussionCount++;
+      d.userFeedback.engagedAt.push(now);
+      d.userFeedback.matchedTopics.push(...hitTopics);
+      matched++;
+      log.info(`discussion engagement recorded for discovery "${d.query}" ← topics=[${hitTopics.join(", ")}] (count=${d.userFeedback.discussionCount})`);
+    }
+
+    if (matched > 0) {
+      this.saveState(state);
+      // Coverage & noise stats
+      const shareWorthy = state.discoveries.filter(d => d.shareWorthy && now - d.timestamp < DISCOVERY_MAX_AGE);
+      const withFeedback = shareWorthy.filter(d => d.userFeedback && d.userFeedback.discussionCount > 0);
+      const totalEngagements = withFeedback.reduce((sum, d) => sum + d.userFeedback!.discussionCount, 0);
+      const allMatchedTopics = withFeedback.flatMap(d => d.userFeedback!.matchedTopics ?? []);
+      const uniqueTopics = new Set(allMatchedTopics);
+      const categorySummary = this.getCategoryEngagement(state, now);
+      const catStats = categorySummary.map(c => `${c.category}:${c.engagedCount}/${c.shareWorthyCount}`).join(" ");
+      log.info(
+        `recorded discussion engagement: ${matched} discoveries matched from ${topicsLower.length} topics | ` +
+        `coverage: ${withFeedback.length}/${shareWorthy.length} share-worthy have feedback, ` +
+        `${totalEngagements} total engagements, ${uniqueTopics.size} unique trigger topics | ` +
+        `by-category: [${catStats}]`
+      );
+    }
+  }
+
+  /**
+   * Aggregate engagement stats by category — data basis for future weight adjustment decisions.
+   * Returns per-category counts of discoveries, share-worthy, engaged, and engagement rate.
+   */
+  getCategoryEngagement(state?: CuriosityState, now?: number): CategoryEngagement[] {
+    const s = state ?? this.loadState();
+    const ts = now ?? Date.now();
+    const recent = s.discoveries.filter(d => ts - d.timestamp < DISCOVERY_MAX_AGE);
+
+    const catMap = new Map<string, { total: number; shareWorthy: number; engaged: number; engagements: number }>();
+    for (const d of recent) {
+      const cat = d.category || "uncategorized";
+      const entry = catMap.get(cat) ?? { total: 0, shareWorthy: 0, engaged: 0, engagements: 0 };
+      entry.total++;
+      if (d.shareWorthy) {
+        entry.shareWorthy++;
+        if (d.userFeedback && d.userFeedback.discussionCount > 0) {
+          entry.engaged++;
+          entry.engagements += d.userFeedback.discussionCount;
+        }
+      }
+      catMap.set(cat, entry);
+    }
+
+    return Array.from(catMap.entries()).map(([category, e]) => ({
+      category,
+      totalDiscoveries: e.total,
+      shareWorthyCount: e.shareWorthy,
+      engagedCount: e.engaged,
+      totalEngagements: e.engagements,
+      engagementRate: e.shareWorthy > 0 ? e.engaged / e.shareWorthy : 0,
+    }));
   }
 
   private loadState(): CuriosityState {

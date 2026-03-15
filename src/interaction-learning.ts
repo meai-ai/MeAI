@@ -425,11 +425,11 @@ export function recordProactiveIgnored(): void {
  * Check whether there's a pending proactive message (for reply detection).
  * Returns { pending, sentAt } — sentAt is undefined if no pending.
  */
-export function getPendingProactive(): { pending: boolean; sentAt?: number } {
+export function getPendingProactive(): { pending: boolean; sentAt?: number; topics?: string[] } {
   if (!filePath) return { pending: false };
   const state = loadState();
   if (!state.lastProactiveSentAt) return { pending: false };
-  return { pending: true, sentAt: state.lastProactiveSentAt };
+  return { pending: true, sentAt: state.lastProactiveSentAt, topics: state.lastProactiveTopics };
 }
 
 /**
