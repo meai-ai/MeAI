@@ -35,7 +35,7 @@ import { generateVoice, isTTSEnabled, getVoiceDailyCount } from "./tts.js";
 import { addTimelineEvent, enqueueTimelineJob, getTodayTimeline } from "./timeline.js";
 import { getCharacter, s, renderTemplate } from "./character.js";
 import { recordCharacterOutreach, markAwaitingReply, isGoodTimeToReachOut, getAttachmentState } from "./lib/relationship-model.js";
-import { recordProactiveSent, getTimingAdvice, formatLearningContext, extractTopicsFromText, getTopicPreferences, getPendingProactive } from "./interaction-learning.js";
+import { recordProactiveSent, getTimingAdvice, formatLearningContext, extractTopicsFromText, getTopicPreferences, getPendingProactive, getRecentProactiveSummaries } from "./interaction-learning.js";
 import { checkProactiveGate } from "./lib/action-gate.js";
 import { formatPredictions, getUserState } from "./user-state.js";
 import { createLogger } from "./lib/logger.js";
@@ -349,16 +349,10 @@ export class ProactiveScheduler {
 
     if (!message) return false;
 
-    // Dedup: if too similar to a recent message, retry once with explicit hint
+    // Safety net: if still too similar to a recent message despite prompt constraints, drop silently
     if (this.isDuplicate(message)) {
-      console.log(`[proactive] Duplicate detected: "${message.slice(0, 60)}..." — retrying with hint`);
-      const retryCtx = context + `\n\n⚠️ You almost sent this again: "${message.slice(0, 80)}" — but you've already said something similar. Pick a completely different topic, or ${SKIP_TOKEN} if you have nothing else to say.`;
-      const retry = await this.askXiaomei(retryCtx);
-      if (!retry || this.isDuplicate(retry)) {
-        console.log("[proactive] Retry still duplicate or empty — skipping");
-        return false;
-      }
-      message = retry;
+      console.log(`[proactive] Duplicate detected despite prompt constraints: "${message.slice(0, 60)}..." — skipping`);
+      return false;
     }
 
     // 9.5: Suspense timing — delay based on emotional weight of recent conversation
@@ -704,6 +698,20 @@ export class ProactiveScheduler {
       const predText = formatPredictions();
       if (predText) {
         parts.push(`\nYour hunches (based on past patterns): ${predText}`);
+      }
+    } catch { /* non-fatal */ }
+
+    // Recent proactive summaries — negative constraint to avoid repeating topics
+    try {
+      const recentSummaries = getRecentProactiveSummaries(8);
+      if (recentSummaries.length > 0) {
+        const lines = recentSummaries.map(s => {
+          const topicStr = s.topics?.length ? ` [${s.topics.join(", ")}]` : "";
+          return `- ${s.hoursAgo}h ago: ${s.context || "(no summary)"}${topicStr}`;
+        });
+        parts.push(
+          `\n⚠️ Topics you already sent recently (DO NOT repeat these — pick something different):\n${lines.join("\n")}`,
+        );
       }
     } catch { /* non-fatal */ }
 

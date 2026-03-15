@@ -1048,6 +1048,27 @@ export function getPendingStyleFeatures(sessionId: string): {
 }
 
 /**
+ * Get summaries of recent proactive messages for dedup.
+ * Returns the last N proactive_sent signals with their context and topics,
+ * most recent first. Used as negative constraints in the generation prompt
+ * so the LLM avoids repeating recently sent topics.
+ */
+export function getRecentProactiveSummaries(n = 8): Array<{ context?: string; topics?: string[]; hoursAgo: number }> {
+  if (!filePath) return [];
+  const state = loadState();
+  const now = Date.now();
+  return state.signals
+    .filter(s => s.type === "proactive_sent" && (s.context || (s.topics && s.topics.length > 0)))
+    .slice(-n)
+    .reverse()
+    .map(s => ({
+      context: s.context,
+      topics: s.topics,
+      hoursAgo: Math.round((now - s.timestamp) / 3600000),
+    }));
+}
+
+/**
  * Clear pending style features for a session.
  */
 export function clearPendingStyleFeatures(sessionId: string): void {
