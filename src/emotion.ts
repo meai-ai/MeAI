@@ -178,6 +178,23 @@ const EMOTION_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 hours — mood shifts natural
 const JOURNAL_MAX_ENTRIES = 30; // ~3 days at 2-hour intervals, keeps context manageable
 const JOURNAL_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+/** Conversation delta tier → valence shift mapping (predefined, not LLM-controlled) */
+const CONVERSATION_DELTA_TIERS: Record<ConversationDeltaTier, number> = {
+  strong_positive: 2,
+  mild_positive: 1,
+  mild_negative: -1,
+  strong_negative: -2,
+};
+
+/** Max cumulative |shift| within one session window */
+const CONVERSATION_DELTA_CAP = 4;
+
+/** Session window duration — accumulator resets after this */
+const CONVERSATION_DELTA_WINDOW = 2 * 60 * 60 * 1000; // 2 hours (matches emotion cache TTL)
+
+/** Diminishing returns: each successive event in the same direction has reduced effect */
+const CONVERSATION_DELTA_DECAY = 0.7;
+
 /** 5.6: Fixed Big-5 personality traits for the character — drives emotion amplification. */
 const PERSONALITY_TRAITS = {
   conscientiousness: 0.8,  // high → work setbacks hit harder
@@ -749,6 +766,92 @@ Generate the current emotional state and update narrative threads.`,
     // Keep last 10 events
     if (journal.contagion.length > 10) journal.contagion = journal.contagion.slice(-10);
     this.saveJournal(journal);
+  }
+
+  // ── Conversation Delta (real-time user-interaction feedback) ─────────
+
+  /**
+   * Apply a conversation-driven emotional shift using predefined tiers.
+   *
+   * Called by the agent's emotion-feedback tool during conversation when the
+   * user's messages carry emotional weight (encouragement, comfort, hostility, etc.).
+   *
+   * Design constraints:
+   * - Tier system prevents the LLM from setting arbitrary valence values
+   * - Session-scoped accumulator caps total shift to ±CONVERSATION_DELTA_CAP
+   * - Diminishing returns: repeated same-direction shifts have reduced effect
+   * - Immediately updates the cached EmotionalState so subsequent turns see the change
+   * - Also records a ContagionEvent so the next full regeneration benefits from the signal
+   *
+   * @returns The actual valence change applied (may be less than tier value due to caps/decay)
+   */
+  public applyConversationDelta(tier: ConversationDeltaTier, cause: string): number {
+    if (!this.dataPath) return 0;
+
+    const rawShift = CONVERSATION_DELTA_TIERS[tier];
+    if (rawShift === undefined) return 0;
+
+    const now = Date.now();
+    const journal = this.loadJournal();
+
+    // Initialize or reset accumulator if window expired
+    let acc = journal.conversationDelta;
+    if (!acc || (now - acc.windowStart) > CONVERSATION_DELTA_WINDOW) {
+      acc = { windowStart: now, cumulativeShift: 0, eventCount: 0 };
+    }
+
+    // Check if we've hit the cap in this direction
+    const sameDirection = Math.sign(rawShift) === Math.sign(acc.cumulativeShift);
+    if (sameDirection && Math.abs(acc.cumulativeShift) >= CONVERSATION_DELTA_CAP) {
+      log.info("conversation delta capped", { cumulative: acc.cumulativeShift, attempted: rawShift });
+      return 0;
+    }
+
+    // Diminishing returns: each same-direction event gets weaker
+    const sameDirectionCount = sameDirection ? acc.eventCount : 0;
+    const decayMultiplier = Math.pow(CONVERSATION_DELTA_DECAY, sameDirectionCount);
+    let effectiveShift = rawShift * decayMultiplier;
+
+    // Clamp so cumulative doesn't exceed cap
+    const headroom = CONVERSATION_DELTA_CAP - Math.abs(acc.cumulativeShift);
+    if (Math.abs(effectiveShift) > headroom) {
+      effectiveShift = Math.sign(effectiveShift) * headroom;
+    }
+
+    // Round to one decimal for clean state
+    effectiveShift = Math.round(effectiveShift * 10) / 10;
+    if (effectiveShift === 0) return 0;
+
+    // Update accumulator
+    acc.cumulativeShift += effectiveShift;
+    acc.eventCount += 1;
+    journal.conversationDelta = acc;
+
+    // Also record as a contagion event (so next full regeneration sees it)
+    if (!journal.contagion) journal.contagion = [];
+    journal.contagion.push({ timestamp: now, valenceShift: effectiveShift, cause });
+    if (journal.contagion.length > 10) journal.contagion = journal.contagion.slice(-10);
+
+    this.saveJournal(journal);
+
+    // Immediately nudge the live cached emotion state
+    const cached = this.loadCachedEmotion();
+    if (cached) {
+      const newValence = clamp(Math.round(cached.valence + effectiveShift), 1, 10);
+      if (newValence !== cached.valence) {
+        this.saveCachedEmotion({
+          ...cached,
+          valence: newValence,
+          cause: `${cached.cause}; ${cause}`,
+        });
+      }
+    }
+
+    log.info("conversation delta applied", {
+      tier, effectiveShift, cumulative: acc.cumulativeShift, eventCount: acc.eventCount,
+    });
+
+    return effectiveShift;
   }
 
   /**
@@ -1454,6 +1557,10 @@ export function formatEmotionContext(state: EmotionalState, transition?: Emotion
 
 export function recordEmotionalContagion(valenceShift: number, cause: string): void {
   return _singleton!.recordEmotionalContagion(valenceShift, cause);
+}
+
+export function applyConversationDelta(tier: ConversationDeltaTier, cause: string): number {
+  return _singleton!.applyConversationDelta(tier, cause);
 }
 
 export function interruptRumination(): number {
