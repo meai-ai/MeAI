@@ -1222,6 +1222,45 @@ Classification:`,
     return path.join(this.config.statePath, "curiosity.json");
   }
 
+  /**
+   * Record that the user expanded discussion on topics related to discoveries.
+   * Called when a substantive user reply matches recent share-worthy discoveries.
+   * Only records positive engagement — silence/ignoring is NOT treated as negative signal.
+   */
+  recordDiscussionEngagement(topics: string[]): void {
+    if (topics.length === 0) return;
+    const state = this.loadState();
+    const now = Date.now();
+    const topicsLower = topics.map(t => t.toLowerCase());
+    let matched = 0;
+
+    for (const d of state.discoveries) {
+      if (!d.shareWorthy) continue;
+      if (now - d.timestamp > DISCOVERY_MAX_AGE) continue;
+
+      // Match: any topic overlaps with discovery query or category
+      const queryLower = d.query.toLowerCase();
+      const catLower = d.category.toLowerCase();
+      const hit = topicsLower.some(t =>
+        queryLower.includes(t) || t.includes(catLower) || catLower.includes(t)
+      );
+      if (!hit) continue;
+
+      if (!d.userFeedback) {
+        d.userFeedback = { discussionCount: 0, engagedAt: [] };
+      }
+      d.userFeedback.discussionCount++;
+      d.userFeedback.engagedAt.push(now);
+      matched++;
+      log.info(`discussion engagement recorded for discovery "${d.query}" (count=${d.userFeedback.discussionCount})`);
+    }
+
+    if (matched > 0) {
+      this.saveState(state);
+      log.info(`recorded discussion engagement: ${matched} discoveries matched from ${topics.length} topics`);
+    }
+  }
+
   private loadState(): CuriosityState {
     const p = this.getStatePath();
     if (!fs.existsSync(p)) {
